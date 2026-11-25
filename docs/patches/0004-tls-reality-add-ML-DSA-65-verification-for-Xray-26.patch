@@ -1,0 +1,155 @@
+From 6fc2e1698cd02626b25a8392b3ff5674734cc1d2 Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 06:24:03 +0300
+Subject: [PATCH 04/12] tls/reality: add ML-DSA-65 verification for Xray 26
+
+---
+ common/tls/reality_client.go     | 43 ++++++++++++++++++++++++--------
+ common/tls/reality_mldsa.go      | 13 ++++++++++
+ common/tls/reality_mldsa_stub.go |  8 ++++++
+ option/tls.go                    |  7 +++---
+ 4 files changed, 57 insertions(+), 14 deletions(-)
+ create mode 100644 common/tls/reality_mldsa.go
+ create mode 100644 common/tls/reality_mldsa_stub.go
+
+diff --git a/common/tls/reality_client.go b/common/tls/reality_client.go
+index 3ce2412..4a6bfce 100644
+--- a/common/tls/reality_client.go
++++ b/common/tls/reality_client.go
+@@ -46,10 +46,11 @@ import (
+ var _ ConfigCompat = (*RealityClientConfig)(nil)
+ 
+ type RealityClientConfig struct {
+-	ctx       context.Context
+-	uClient   *UTLSClientConfig
+-	publicKey []byte
+-	shortID   [8]byte
++	ctx           context.Context
++	uClient       *UTLSClientConfig
++	publicKey     []byte
++	shortID       [8]byte
++	mldsa65Verify []byte
+ 	// x25519Only is set for the fallback attempt used with servers that do
+ 	// not understand X25519MLKEM768 (Xray <= 25).
+ 	x25519Only bool
+@@ -87,8 +88,15 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+ 	if decodedLen > 8 {
+ 		return nil, E.New("invalid short_id")
+ 	}
++	var mldsa65Verify []byte
++	if options.Reality.Mldsa65Verify != "" {
++		mldsa65Verify, err = base64.RawURLEncoding.DecodeString(options.Reality.Mldsa65Verify)
++		if err != nil || len(mldsa65Verify) != 1952 {
++			return nil, E.New("invalid mldsa65_verify")
++		}
++	}
+ 
+-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, false}
++	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, mldsa65Verify, false}
+ 	if options.KernelRx || options.KernelTx {
+ 		if !C.IsLinux {
+ 			return nil, E.New("kTLS is only supported on Linux")
+@@ -147,7 +155,8 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
+ 
+ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+ 	verifier := &realityVerifier{
+-		serverName: e.uClient.ServerName(),
++		serverName:    e.uClient.ServerName(),
++		mldsa65Verify: e.mldsa65Verify,
+ 	}
+ 	uConfig := e.uClient.config.Clone()
+ 	uConfig.InsecureSkipVerify = true
+@@ -298,15 +307,17 @@ func (e *RealityClientConfig) Clone() Config {
+ 		e.uClient.Clone().(*UTLSClientConfig),
+ 		e.publicKey,
+ 		e.shortID,
++		e.mldsa65Verify,
+ 		e.x25519Only,
+ 	}
+ }
+ 
+ type realityVerifier struct {
+ 	*utls.UConn
+-	serverName string
+-	authKey    []byte
+-	verified   bool
++	serverName    string
++	authKey       []byte
++	mldsa65Verify []byte
++	verified      bool
+ }
+ 
+ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+@@ -316,8 +327,18 @@ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChain
+ 		h := hmac.New(sha512.New, c.authKey)
+ 		h.Write(pub)
+ 		if bytes.Equal(h.Sum(nil), certs[0].Signature) {
+-			c.verified = true
+-			return nil
++			if len(c.mldsa65Verify) == 0 {
++				c.verified = true
++				return nil
++			}
++			if len(certs[0].Extensions) > 0 && c.UConn != nil && c.UConn.HandshakeState.Hello != nil && c.UConn.HandshakeState.ServerHello != nil {
++				h.Write(c.UConn.HandshakeState.Hello.Raw)
++				h.Write(c.UConn.HandshakeState.ServerHello.Raw)
++				if verifyMldsa65(c.mldsa65Verify, h.Sum(nil), certs[0].Extensions[0].Value) {
++					c.verified = true
++					return nil
++				}
++			}
+ 		}
+ 	}
+ 	opts := x509.VerifyOptions{
+diff --git a/common/tls/reality_mldsa.go b/common/tls/reality_mldsa.go
+new file mode 100644
+index 0000000..418fbf8
+--- /dev/null
++++ b/common/tls/reality_mldsa.go
+@@ -0,0 +1,13 @@
++//go:build go1.27
++
++package tls
++
++import "crypto/mldsa"
++
++func verifyMldsa65(publicKey []byte, message []byte, signature []byte) bool {
++	key, err := mldsa.NewPublicKey(mldsa.MLDSA65(), publicKey)
++	if err != nil {
++		return false
++	}
++	return mldsa.Verify(key, message, signature, nil) == nil
++}
+diff --git a/common/tls/reality_mldsa_stub.go b/common/tls/reality_mldsa_stub.go
+new file mode 100644
+index 0000000..817f6b6
+--- /dev/null
++++ b/common/tls/reality_mldsa_stub.go
+@@ -0,0 +1,8 @@
++//go:build !go1.27
++
++package tls
++
++// ML-DSA-65 Reality verification requires Go 1.27 or newer.
++func verifyMldsa65(publicKey []byte, message []byte, signature []byte) bool {
++	return false
++}
+diff --git a/option/tls.go b/option/tls.go
+index 5c807d6..6896450 100644
+--- a/option/tls.go
++++ b/option/tls.go
+@@ -250,7 +250,8 @@ type OutboundUTLSOptions struct {
+ }
+ 
+ type OutboundRealityOptions struct {
+-	Enabled   bool   `json:"enabled,omitempty"`
+-	PublicKey string `json:"public_key,omitempty"`
+-	ShortID   string `json:"short_id,omitempty"`
++	Enabled       bool   `json:"enabled,omitempty"`
++	PublicKey     string `json:"public_key,omitempty"`
++	ShortID       string `json:"short_id,omitempty"`
++	Mldsa65Verify string `json:"mldsa65_verify,omitempty"`
+ }
+-- 
+2.34.1
+

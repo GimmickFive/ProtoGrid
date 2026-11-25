@@ -1,0 +1,80 @@
+From 93235c27d8eba505ac31fdc88d8215b6adfa714c Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 08:24:26 +0300
+Subject: [PATCH 12/12] v2rayxdrive: add S3 backend options
+
+---
+ option/v2ray_transport.go       | 30 +++++++++++++++++++-----------
+ transport/v2rayxdrive/client.go | 13 +++++++++++++
+ 2 files changed, 32 insertions(+), 11 deletions(-)
+
+diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
+index d332608..45ac304 100644
+--- a/option/v2ray_transport.go
++++ b/option/v2ray_transport.go
+@@ -194,15 +194,23 @@ type V2RayKCPOptions struct {
+ 
+ // V2RayXDriveOptions configures Xray's XDRIVE storage transport.
+ type V2RayXDriveOptions struct {
+-	RemoteFolder      string   `json:"remote_folder,omitempty"`
+-	Service           string   `json:"service,omitempty"`
+-	Secrets           []string `json:"secrets,omitempty"`
+-	SegmentBytes      uint32   `json:"segment_bytes,omitempty"`
+-	FlushIntervalMs   uint32   `json:"flush_interval_ms,omitempty"`
+-	PollIntervalMs    uint32   `json:"poll_interval_ms,omitempty"`
+-	MaxPollIntervalMs uint32   `json:"max_poll_interval_ms,omitempty"`
+-	SessionTTLSeconds uint32   `json:"session_ttl_seconds,omitempty"`
+-	Concurrency       uint32   `json:"concurrency,omitempty"`
+-	EagerWindowMs     uint32   `json:"eager_window_ms,omitempty"`
+-	HoleTimeoutMs     uint32   `json:"hole_timeout_ms,omitempty"`
++	RemoteFolder      string                `json:"remote_folder,omitempty"`
++	Service           string                `json:"service,omitempty"`
++	Secrets           []string              `json:"secrets,omitempty"`
++	SegmentBytes      uint32                `json:"segment_bytes,omitempty"`
++	FlushIntervalMs   uint32                `json:"flush_interval_ms,omitempty"`
++	PollIntervalMs    uint32                `json:"poll_interval_ms,omitempty"`
++	MaxPollIntervalMs uint32                `json:"max_poll_interval_ms,omitempty"`
++	SessionTTLSeconds uint32                `json:"session_ttl_seconds,omitempty"`
++	Concurrency       uint32                `json:"concurrency,omitempty"`
++	EagerWindowMs     uint32                `json:"eager_window_ms,omitempty"`
++	HoleTimeoutMs     uint32                `json:"hole_timeout_ms,omitempty"`
++	S3                *V2RayXDriveS3Options `json:"s3,omitempty"`
++}
++
++type V2RayXDriveS3Options struct {
++	Endpoint  string `json:"endpoint,omitempty"`
++	Region    string `json:"region,omitempty"`
++	Bucket    string `json:"bucket,omitempty"`
++	PathStyle bool   `json:"path_style,omitempty"`
+ }
+diff --git a/transport/v2rayxdrive/client.go b/transport/v2rayxdrive/client.go
+index 343640c..646ff09 100644
+--- a/transport/v2rayxdrive/client.go
++++ b/transport/v2rayxdrive/client.go
+@@ -54,6 +54,7 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ 			Concurrency:       c.options.Concurrency,
+ 			EagerWindowMs:     c.options.EagerWindowMs,
+ 			HoleTimeoutMs:     c.options.HoleTimeoutMs,
++			S3:                s3Config(c.options.S3),
+ 		},
+ 	})
+ 	if err != nil {
+@@ -65,3 +66,15 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ func (c *Client) Close() error {
+ 	return nil
+ }
++
++func s3Config(options *option.V2RayXDriveS3Options) *xdrive.S3Config {
++	if options == nil {
++		return nil
++	}
++	return &xdrive.S3Config{
++		Endpoint:  options.Endpoint,
++		Region:    options.Region,
++		Bucket:    options.Bucket,
++		PathStyle: options.PathStyle,
++	}
++}
+-- 
+2.34.1
+

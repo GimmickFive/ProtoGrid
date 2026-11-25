@@ -1,0 +1,311 @@
+From ec8541f90b334ad082cd6f8651450c2f06ea95f5 Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 07:53:38 +0300
+Subject: [PATCH 09/12] protocol/masque: add MASQUE outbound adapter (TCP)
+
+---
+ constant/proxy.go           |   1 +
+ go.mod                      |   2 +
+ go.sum                      |   4 +
+ include/registry.go         |   2 +
+ option/masque.go            |  12 +++
+ protocol/masque/outbound.go | 191 ++++++++++++++++++++++++++++++++++++
+ 6 files changed, 212 insertions(+)
+ create mode 100644 option/masque.go
+ create mode 100644 protocol/masque/outbound.go
+
+diff --git a/constant/proxy.go b/constant/proxy.go
+index d42e5d9..d428e87 100644
+--- a/constant/proxy.go
++++ b/constant/proxy.go
+@@ -20,6 +20,7 @@ const (
+ 	TypeHysteria           = "hysteria"
+ 	TypeTor                = "tor"
+ 	TypeSSH                = "ssh"
++	TypeMasque             = "masque"
+ 	TypeShadowTLS          = "shadowtls"
+ 	TypeAnyTLS             = "anytls"
+ 	TypeShadowsocksR       = "shadowsocksr"
+diff --git a/go.mod b/go.mod
+index 72cae93..7fca3ab 100644
+--- a/go.mod
++++ b/go.mod
+@@ -189,6 +189,7 @@ require (
+ 	github.com/tidwall/sjson v1.2.5 // indirect
+ 	github.com/tjfoc/gmsm v1.4.1 // indirect
+ 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
++	github.com/vishvananda/netlink v1.3.1 // indirect
+ 	github.com/x448/float16 v0.8.4 // indirect
+ 	github.com/xtls/reality v0.0.0-20261108101329-4bb46b2afd8b // indirect
+ 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+@@ -202,6 +203,7 @@ require (
+ 	golang.org/x/oauth2 v0.36.0 // indirect
+ 	golang.org/x/time v0.15.0 // indirect
+ 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
++	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb // indirect
+ 	golang.zx2c4.com/wireguard/windows v1.1.1 // indirect
+ 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
+ 	layeh.com/gopher-luar v1.0.11 // indirect
+diff --git a/go.sum b/go.sum
+index 0edef8e..36141db 100644
+--- a/go.sum
++++ b/go.sum
+@@ -541,9 +541,11 @@ golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1/go.mod h1:oPkhp1MJrh7nUepCBc
+ golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
++golang.org/x/sys v0.2.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.5.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.8.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
++golang.org/x/sys v0.10.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.12.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.17.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+ golang.org/x/sys v0.20.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+@@ -631,6 +633,8 @@ gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 h1:Lk6hARj5UPY47dBep70OD/TIMwikJ5fGUGX0Rm3Xigk=
++gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0/go.mod h1:QkHjoMIBaYtpVufgwv3keYAbln78mBoCuShZrPrer1Q=
+ honnef.co/go/tools v0.0.0-20190102054323-c2f93a96b099/go.mod h1:rf3lG4BRIbNafJWhAfAdb/ePZxsR/4RtNHQocxwk9r4=
+ honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWhAfAdb/ePZxsR/4RtNHQocxwk9r4=
+ howett.net/plist v1.0.1 h1:37GdZ8tP09Q35o9ych3ehygcsL+HqKSwzctveSlarvM=
+diff --git a/include/registry.go b/include/registry.go
+index 9bb9220..5df833e 100644
+--- a/include/registry.go
++++ b/include/registry.go
+@@ -25,6 +25,7 @@ import (
+ 	"github.com/sagernet/sing-box/protocol/direct"
+ 	"github.com/sagernet/sing-box/protocol/group"
+ 	"github.com/sagernet/sing-box/protocol/http"
++	"github.com/sagernet/sing-box/protocol/masque"
+ 	"github.com/sagernet/sing-box/protocol/mixed"
+ 	"github.com/sagernet/sing-box/protocol/naive"
+ 	"github.com/sagernet/sing-box/protocol/redirect"
+@@ -97,6 +98,7 @@ func OutboundRegistry() *outbound.Registry {
+ 	registerNaiveOutbound(registry)
+ 	tor.RegisterOutbound(registry)
+ 	ssh.RegisterOutbound(registry)
++	masque.RegisterOutbound(registry)
+ 	shadowtls.RegisterOutbound(registry)
+ 	vless.RegisterOutbound(registry)
+ 	anytls.RegisterOutbound(registry)
+diff --git a/option/masque.go b/option/masque.go
+new file mode 100644
+index 0000000..6aa931e
+--- /dev/null
++++ b/option/masque.go
+@@ -0,0 +1,12 @@
++package option
++
++type MasqueOutboundOptions struct {
++	ServerOptions
++	OutboundTLSOptionsContainer
++	Host                 string   `json:"host,omitempty"`
++	Path                 string   `json:"path,omitempty"`
++	User                 string   `json:"user,omitempty"`
++	Pass                 string   `json:"pass,omitempty"`
++	RemoteDNS            []string `json:"remote_dns,omitempty"`
++	PinnedPeerCertSha256 string   `json:"pinned_peer_cert_sha256,omitempty"`
++}
+diff --git a/protocol/masque/outbound.go b/protocol/masque/outbound.go
+new file mode 100644
+index 0000000..e8a84a1
+--- /dev/null
++++ b/protocol/masque/outbound.go
+@@ -0,0 +1,191 @@
++package masque
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/hex"
++	"net"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"github.com/xtls/xray-core/app/policy"
++	"github.com/xtls/xray-core/common/buf"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/serial"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/core"
++	xmasque "github.com/xtls/xray-core/proxy/masque"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/internet"
++	mtransport "github.com/xtls/xray-core/transport/internet/masque"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	xtls "github.com/xtls/xray-core/transport/internet/tls"
++)
++
++func RegisterOutbound(registry *outbound.Registry) {
++	outbound.Register[option.MasqueOutboundOptions](registry, C.TypeMasque, NewOutbound)
++}
++
++type Outbound struct {
++	outbound.Adapter
++	client   *xmasque.Client
++	dialer   *masqueDialer
++	ctx      context.Context
++	settings *internet.MemoryStreamConfig
++}
++
++type masqueDialer struct {
++	settings *internet.MemoryStreamConfig
++}
++
++func (d *masqueDialer) Dial(ctx context.Context, destination xnet.Destination) (stat.Connection, error) {
++	return mtransport.Dial(ctx, destination, d.settings)
++}
++
++func (d *masqueDialer) DestIpAddress() net.IP                                 { return nil }
++func (d *masqueDialer) SetOutboundGateway(context.Context, *session.Outbound) {}
++
++func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueOutboundOptions) (adapter.Outbound, error) {
++	_ = router
++	_ = logger
++	serverName := options.Server
++	if options.TLS != nil && options.TLS.ServerName != "" {
++		serverName = options.TLS.ServerName
++	}
++	xTLS := &xtls.Config{
++		ServerName:   serverName,
++		NextProtocol: []string{"h2"},
++	}
++	if options.PinnedPeerCertSha256 != "" {
++		pin, err := hex.DecodeString(options.PinnedPeerCertSha256)
++		if err != nil || len(pin) != 32 {
++			return nil, E.New("invalid pinned_peer_cert_sha256")
++		}
++		xTLS.PinnedPeerCertSha256 = [][]byte{pin}
++	}
++	headers := map[string]string{}
++	if options.User != "" || options.Pass != "" {
++		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(options.User+":"+options.Pass))
++	}
++	settings := &internet.MemoryStreamConfig{
++		ProtocolName: "masque",
++		ProtocolSettings: &mtransport.Config{
++			Host:    options.Host,
++			Path:    options.Path,
++			Headers: headers,
++		},
++		SecurityType:     "tls",
++		SecuritySettings: xTLS,
++	}
++	instance, err := core.New(&core.Config{App: []*serial.TypedMessage{
++		serial.ToTypedMessage(&policy.Config{}),
++	}})
++	if err != nil {
++		return nil, E.Cause(err, "create Xray policy instance")
++	}
++	xrayCtx := context.WithValue(ctx, core.XrayKey(1), instance)
++	xrayCtx = session.ContextWithStreamSettings(xrayCtx, settings)
++	serverAddr := xnet.NewIPOrDomain(xnet.ParseAddress(options.Server))
++	client, err := xmasque.NewClient(xrayCtx, &xmasque.ClientConfig{
++		Server: &protocol.ServerEndpoint{
++			Address: serverAddr,
++			Port:    uint32(options.ServerPort),
++		},
++		RemoteDns: options.RemoteDNS,
++	})
++	if err != nil {
++		return nil, E.Cause(err, "create MASQUE client")
++	}
++	return &Outbound{
++		Adapter:  outbound.NewAdapter(C.TypeMasque, tag, []string{N.NetworkTCP}, nil),
++		client:   client,
++		dialer:   &masqueDialer{settings: settings},
++		ctx:      xrayCtx,
++		settings: settings,
++	}, nil
++}
++
++func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	switch N.NetworkName(network) {
++	case N.NetworkTCP:
++		return h.dial(ctx, destination, false)
++	case N.NetworkUDP:
++		conn, err := h.dial(ctx, destination, true)
++		if err != nil {
++			return nil, err
++		}
++		return conn, nil
++	default:
++		return nil, E.New("masque: unsupported network: ", network)
++	}
++}
++
++func (h *Outbound) dial(ctx context.Context, destination M.Socksaddr, udp bool) (*masqueConn, error) {
++	targetNetwork := xnet.Network_TCP
++	if udp {
++		targetNetwork = xnet.Network_UDP
++	}
++	target := xnet.Destination{
++		Network: targetNetwork,
++		Address: xnet.ParseAddress(destination.AddrString()),
++		Port:    xnet.Port(destination.Port),
++	}
++	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{Target: target}})
++	local, remote := net.Pipe()
++	link := &transport.Link{
++		Reader: buf.NewReader(remote),
++		Writer: buf.NewWriter(remote),
++	}
++	go func() {
++		_ = h.client.Process(ctx, link, h.dialer)
++		_ = remote.Close()
++		_ = local.Close()
++	}()
++	return &masqueConn{Conn: local, destination: destination}, nil
++}
++
++type masqueConn struct {
++	net.Conn
++	destination M.Socksaddr
++}
++
++func (c *masqueConn) LocalAddr() net.Addr              { return masqueAddr("masque-local") }
++func (c *masqueConn) RemoteAddr() net.Addr             { return masqueAddr(c.destination.String()) }
++func (c *masqueConn) SetDeadline(time.Time) error      { return nil }
++func (c *masqueConn) SetReadDeadline(time.Time) error  { return nil }
++func (c *masqueConn) SetWriteDeadline(time.Time) error { return nil }
++
++type masqueAddr string
++
++func (a masqueAddr) Network() string { return "masque" }
++func (a masqueAddr) String() string  { return string(a) }
++
++func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	conn, err := h.dial(ctx, destination, true)
++	if err != nil {
++		return nil, err
++	}
++	return &masquePacketConn{masqueConn: conn}, nil
++}
++
++type masquePacketConn struct {
++	*masqueConn
++}
++
++func (c *masquePacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
++	n, err := c.Read(buffer)
++	return n, c.RemoteAddr(), err
++}
++
++func (c *masquePacketConn) WriteTo(buffer []byte, _ net.Addr) (int, error) {
++	return c.Write(buffer)
++}
+-- 
+2.34.1
+

@@ -1,0 +1,356 @@
+From ac5ec035a4edb874494658a4776e23250b6be6b9 Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 06:42:52 +0300
+Subject: [PATCH 05/12] transport: add XHTTP batching, HTTP/3 and mKCP
+
+---
+ constant/v2ray.go            |  1 +
+ go.mod                       | 10 +++--
+ go.sum                       | 30 +++++++++----
+ option/v2ray_transport.go    | 23 +++++++++-
+ transport/v2ray/transport.go |  3 ++
+ transport/v2raykcp/client.go | 84 ++++++++++++++++++++++++++++++++++++
+ 6 files changed, 138 insertions(+), 13 deletions(-)
+ create mode 100644 transport/v2raykcp/client.go
+
+diff --git a/constant/v2ray.go b/constant/v2ray.go
+index 1811df5..4e04f3c 100644
+--- a/constant/v2ray.go
++++ b/constant/v2ray.go
+@@ -7,4 +7,5 @@ const (
+ 	V2RayTransportTypeGRPC        = "grpc"
+ 	V2RayTransportTypeHTTPUpgrade = "httpupgrade"
+ 	V2RayTransportTypeXHTTP       = "xhttp"
++	V2RayTransportTypeKCP         = "kcp"
+ )
+diff --git a/go.mod b/go.mod
+index 8d74d59..675351b 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/sagernet/sing-box
+ 
+-go 1.25.5
++go 1.26
+ 
+ require (
+ 	filippo.io/age v1.3.1
+@@ -66,6 +66,7 @@ require (
+ 	github.com/stretchr/testify v1.12.0
+ 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55
+ 	github.com/vishvananda/netns v0.0.5
++	github.com/xtls/xray-core v1.260327.0
+ 	go.uber.org/zap v1.27.1
+ 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
+ 	golang.org/x/crypto v0.54.0
+@@ -77,7 +78,7 @@ require (
+ 	golang.org/x/term v0.45.0
+ 	golang.org/x/text v0.40.0
+ 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
+-	google.golang.org/grpc v1.79.1
++	google.golang.org/grpc v1.79.3
+ 	google.golang.org/protobuf v1.36.11
+ 	howett.net/plist v1.0.1
+ )
+@@ -137,8 +138,9 @@ require (
+ 	github.com/pion/dtls/v3 v3.1.5 // indirect
+ 	github.com/pion/logging v0.2.4 // indirect
+ 	github.com/pion/transport/v4 v4.0.2 // indirect
+-	github.com/pires/go-proxyproto v0.8.1 // indirect
++	github.com/pires/go-proxyproto v0.11.0 // indirect
+ 	github.com/quic-go/qpack v0.6.0 // indirect
++	github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af // indirect
+ 	github.com/safchain/ethtool v0.3.0 // indirect
+ 	github.com/sagernet/cronet-go/lib/android_386 v0.0.0-20260912104006-c10c03c318db // indirect
+ 	github.com/sagernet/cronet-go/lib/android_amd64 v0.0.0-20260912104006-c10c03c318db // indirect
+@@ -195,6 +197,6 @@ require (
+ 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
+ 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+-	lukechampine.com/blake3 v1.3.0 // indirect
++	lukechampine.com/blake3 v1.4.1 // indirect
+ 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
+ )
+diff --git a/go.sum b/go.sum
+index 8b2a775..00c634f 100644
+--- a/go.sum
++++ b/go.sum
+@@ -30,6 +30,8 @@ github.com/anthropics/anthropic-sdk-go v1.26.0 h1:oUTzFaUpAevfuELAP1sjL6CQJ9HHAf
+ github.com/anthropics/anthropic-sdk-go v1.26.0/go.mod h1:qUKmaW+uuPB64iy1l+4kOSvaLqPXnHTTBKH6RVZ7q5Q=
+ github.com/anytls/sing-anytls v0.0.11 h1:w8e9Uj1oP3m4zxkyZDewPk0EcQbvVxb7Nn+rapEx4fc=
+ github.com/anytls/sing-anytls v0.0.11/go.mod h1:7rjN6IukwysmdusYsrV51Fgu1uW6vsrdd6ctjnEAln8=
++github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22 h1:00ziBGnLWQEcR9LThDwvxOznJJquJ9bYUdmBFnawLMU=
++github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22/go.mod h1:Npbg8qBtAZlsAB3FWmqwlVh5jtVG6a4DlYsOylUpvzA=
+ github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02 h1:bXAPYSbdYbS5VTy92NIUbeDI1qyggi+JYh5op9IFlcQ=
+ github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02/go.mod h1:k08r+Yj1PRAmuayFiRK6MYuR5Ve4IuZtTfxErMIh0+c=
+ github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 h1:LYSB6VgWzKtNrcxElw3c97BP40Oc7bizKxA9K1Vi/5k=
+@@ -46,6 +48,8 @@ github.com/cilium/ebpf v0.16.0/go.mod h1:L7u2Blt2jMM/vLAVgjxluxtBKlz3/GWjB0dMOEn
+ github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
+ github.com/clipperhouse/uax29/v2 v2.2.0 h1:ChwIKnQN3kcZteTXMgb1wztSgaU+ZemkgWdohwgs8tY=
+ github.com/clipperhouse/uax29/v2 v2.2.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
++github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
++github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
+ github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
+ github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
+ github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+@@ -117,6 +121,8 @@ github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfU
+ github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 h1:f+oWsMOmNPc8JmEHVZIycC7hBoQxHH9pNKQORJNozsQ=
+ github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8/go.mod h1:wcDNUvekVysuuOpQKo3191zZyTpiI6se1N1ULghS0sw=
+ github.com/golang/mock v1.1.1/go.mod h1:oTYuIxOrZwtPieC+H1uAHpcLFnEyAGVDL/k47Jfbm0A=
++github.com/golang/mock v1.7.0-rc.1 h1:YojYx61/OLFsiv6Rw1Z96LpldJIy31o+UHmwAUMJ6/U=
++github.com/golang/mock v1.7.0-rc.1/go.mod h1:s42URUywIqd+OcERslBJvOjepvNymP31m3q8d/GkuRs=
+ github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
+ github.com/golang/protobuf v1.3.2/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
+ github.com/golang/protobuf v1.3.3/go.mod h1:vzj43D7+SQXF/4pzW/hwtAqwc6iTitCiVSaWz5lYuqw=
+@@ -165,6 +171,8 @@ github.com/jsimonetti/rtnetlink v1.4.1 h1:JfD4jthWBqZMEffc5RjgmlzpYttAVw1sdnmiNa
+ github.com/jsimonetti/rtnetlink v1.4.1/go.mod h1:xJjT7t59UIZ62GLZbv6PLLo8VFrostJMPBAheR6OM8w=
+ github.com/jsimonetti/rtnetlink/v2 v2.2.0 h1:/KfZ310gOAFrXXol5VwnFEt+ucldD/0dsSRZwpHCP9w=
+ github.com/jsimonetti/rtnetlink/v2 v2.2.0/go.mod h1:lbjDHxC+5RJ08lzPeA90Ls2pEoId3F08MoEMlhfHxeI=
++github.com/juju/ratelimit v1.0.2 h1:sRxmtRiajbvrcLQT7S+JbqU0ntsb9W2yhSdNN8tWfaI=
++github.com/juju/ratelimit v1.0.2/go.mod h1:qapgC/Gy+xNh9UxzV13HGGl/6UXNN+ct+vwSgWNm/qk=
+ github.com/keybase/go-keychain v0.0.1 h1:way+bWYa6lDppZoZcgMbYsvC7GxljxrskdNInRtuthU=
+ github.com/keybase/go-keychain v0.0.1/go.mod h1:PdEILRW3i9D8JcdM+FmY6RwkHGnhHxXwkPPMeUgOK1k=
+ github.com/klauspost/compress v1.19.1 h1:VsB4HPswih7mmZ8WleSFQ75c/Ui1M4trX5oAsJnhSlk=
+@@ -225,14 +233,16 @@ github.com/pion/logging v0.2.4 h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=
+ github.com/pion/logging v0.2.4/go.mod h1:DffhXTKYdNZU+KtJ5pyQDjvOAh/GsNSyv1lbkFbe3so=
+ github.com/pion/transport/v4 v4.0.2 h1:ifYlPqNwsy6aKQ9y8yzxXlHae5431ZrH2avkD/Rn6Tk=
+ github.com/pion/transport/v4 v4.0.2/go.mod h1:06hFI+jCFcok2X2MekVufNZ/uzNZXivGBPfviSVcjgM=
+-github.com/pires/go-proxyproto v0.8.1 h1:9KEixbdJfhrbtjpz/ZwCdWDD2Xem0NZ38qMYaASJgp0=
+-github.com/pires/go-proxyproto v0.8.1/go.mod h1:ZKAAyp3cgy5Y5Mo4n9AlScrkCZwUy0g3Jf+slqQVcuU=
++github.com/pires/go-proxyproto v0.11.0 h1:gUQpS85X/VJMdUsYyEgyn59uLJvGqPhJV5YvG68wXH4=
++github.com/pires/go-proxyproto v0.11.0/go.mod h1:ZKAAyp3cgy5Y5Mo4n9AlScrkCZwUy0g3Jf+slqQVcuU=
+ github.com/pkg/sftp v1.13.10 h1:+5FbKNTe5Z9aspU88DPIKJ9z2KZoaGCu6Sr6kKR/5mU=
+ github.com/pkg/sftp v1.13.10/go.mod h1:bJ1a7uDhrX/4OII+agvy28lzRvQrmIQuaHrcI1HbeGA=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
+ github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=
+ github.com/quic-go/qpack v0.6.0/go.mod h1:lUpLKChi8njB4ty2bFLX2x4gzDqXwUpaO1DP9qMDZII=
++github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af h1:er2acxbi3N1nvEq6HXHUAR1nTWEJmQfqiGR8EVT9rfs=
++github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
+ github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
+ github.com/safchain/ethtool v0.3.0 h1:gimQJpsI6sc1yIqP/y8GYgiXn/NjgvpM0RNoWLVVmP0=
+ github.com/safchain/ethtool v0.3.0/go.mod h1:SA9BwrgyAqNo7M+uaL6IYbxpm5wk3L7Mm6ocLW+CJUs=
+@@ -398,6 +408,10 @@ github.com/vishvananda/netns v0.0.5 h1:DfiHV+j8bA32MFM7bfEunvT8IAqQ/NzSJHtcmW5zd
+ github.com/vishvananda/netns v0.0.5/go.mod h1:SpkAiCQRtJ6TvvxPnOSyH3BMl6unz3xZlaprSwhNNJM=
+ github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
+ github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
++github.com/xtls/reality v0.0.0-20260322125925-9234c772ba8f h1:iy2JRioxmUpoJ3SzbFPyTxHZMbR/rSHP7dOOgYaq1O8=
++github.com/xtls/reality v0.0.0-20260322125925-9234c772ba8f/go.mod h1:DsJblcWDGt76+FVqBVwbwRhxyyNJsGV48gJLch0OOWI=
++github.com/xtls/xray-core v1.260327.0 h1:g4TzxMwyPrxslZh6uD+FiG3lXKTrnNO+b4ky2OhogHE=
++github.com/xtls/xray-core v1.260327.0/go.mod h1:OXMlhBloFry8mw0KwWLWLd3RQyXJzEYsCGlgsX36h60=
+ github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 h1:ilQV1hzziu+LLM3zUTJ0trRztfwgjqKnBWNtSRkbmwM=
+ github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78/go.mod h1:aL8wCCfTfSfmXjznFBSZNN13rSJjlIOI1fUNAtF7rmI=
+ github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
+@@ -575,8 +589,8 @@ google.golang.org/grpc v1.19.0/go.mod h1:mqu4LbDTu4XGKhr4mRzUsmM4RtVoemTSY81AxZi
+ google.golang.org/grpc v1.23.0/go.mod h1:Y5yQAOtifL1yxbo5wqy6BxZv8vAUGQwXBOALyacEbxg=
+ google.golang.org/grpc v1.25.1/go.mod h1:c3i+UQWmh7LiEpx4sFZnkU36qjEYZ0imhYfXVyQciAY=
+ google.golang.org/grpc v1.31.0/go.mod h1:N36X2cJ7JwdamYAgDz+s+rVMFjt3numwzf/HckM8pak=
+-google.golang.org/grpc v1.79.1 h1:zGhSi45ODB9/p3VAawt9a+O/MULLl9dpizzNNpq7flY=
+-google.golang.org/grpc v1.79.1/go.mod h1:KmT0Kjez+0dde/v2j9vzwoAScgEPx/Bw1CYChhHLrHQ=
++google.golang.org/grpc v1.79.3 h1:sybAEdRIEtvcD68Gx7dmnwjZKlyfuc61Dyo9pGXXkKE=
++google.golang.org/grpc v1.79.3/go.mod h1:KmT0Kjez+0dde/v2j9vzwoAScgEPx/Bw1CYChhHLrHQ=
+ google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
+ google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=
+ google.golang.org/protobuf v0.0.0-20200228230310-ab0ca4ff8a60/go.mod h1:cfTl7dwQJ+fmap5saPgwCLgHXTUD7jkjRqWcaiX5VyM=
+@@ -588,8 +602,8 @@ google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/yaml.v1 v1.0.0-20140924161607-9f9df34309c0/go.mod h1:WDnlLJ4WF5VGsH/HVa3CI79GS0ol3YnhVnKP89i0kNg=
+-gopkg.in/yaml.v2 v2.2.8 h1:obN1ZagJSUGI0Ek/LBmuj4SNLPfIny3KsKFopxRdj10=
+-gopkg.in/yaml.v2 v2.2.8/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
++gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
++gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+@@ -597,8 +611,8 @@ honnef.co/go/tools v0.0.0-20190102054323-c2f93a96b099/go.mod h1:rf3lG4BRIbNafJWh
+ honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWhAfAdb/ePZxsR/4RtNHQocxwk9r4=
+ howett.net/plist v1.0.1 h1:37GdZ8tP09Q35o9ych3ehygcsL+HqKSwzctveSlarvM=
+ howett.net/plist v1.0.1/go.mod h1:lqaXoTrLY4hg8tnEzNru53gicrbv7rrk+2xJA/7hw9g=
+-lukechampine.com/blake3 v1.3.0 h1:sJ3XhFINmHSrYCgl958hscfIa3bw8x4DqMP3u1YvoYE=
+-lukechampine.com/blake3 v1.3.0/go.mod h1:0OFRp7fBtAylGVCO40o87sbupkyIGgbpv1+M1k1LM6k=
++lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
++lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
+ software.sslmate.com/src/go-pkcs12 v0.4.0 h1:H2g08FrTvSFKUj+D309j1DPfk5APnIdAQAB8aEykJ5k=
+ software.sslmate.com/src/go-pkcs12 v0.4.0/go.mod h1:Qiz0EyvDRJjjxGyUQa2cCNZn/wMyzrRJ/qcDXOQazLI=
+ zombiezen.com/go/capnproto2 v2.18.2+incompatible h1:v3BD1zbruvffn7zjJUU5Pn8nZAB11bhZSQC4W+YnnKo=
+diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
+index 720abf5..2317da1 100644
+--- a/option/v2ray_transport.go
++++ b/option/v2ray_transport.go
+@@ -12,13 +12,14 @@ import (
+ )
+ 
+ type _V2RayTransportOptions struct {
+-	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
++	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp,kcp"`
+ 	HTTPOptions        V2RayHTTPOptions        `json:"-"`
+ 	WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
+ 	QUICOptions        V2RayQUICOptions        `json:"-"`
+ 	GRPCOptions        V2RayGRPCOptions        `json:"-"`
+ 	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+ 	XHTTPOptions       V2RayXHTTPOptions       `json:"-"`
++	KCPOptions         V2RayKCPOptions         `json:"-"`
+ }
+ 
+ type V2RayTransportOptions _V2RayTransportOptions
+@@ -38,6 +39,8 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
+ 		v = o.HTTPUpgradeOptions
+ 	case C.V2RayTransportTypeXHTTP:
+ 		v = o.XHTTPOptions
++	case C.V2RayTransportTypeKCP:
++		v = o.KCPOptions
+ 	case "":
+ 		return nil, E.New("missing transport type")
+ 	default:
+@@ -65,6 +68,8 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
+ 		v = &o.HTTPUpgradeOptions
+ 	case C.V2RayTransportTypeXHTTP:
+ 		v = &o.XHTTPOptions
++	case C.V2RayTransportTypeKCP:
++		v = &o.KCPOptions
+ 	default:
+ 		return E.New("unknown transport type: " + o.Type)
+ 	}
+@@ -84,6 +89,7 @@ func (o V2RayTransportOptions) DescribeSchema(builder schema.Builder) (*schema.N
+ 			{Value: C.V2RayTransportTypeGRPC, StructType: reflect.TypeFor[V2RayGRPCOptions]()},
+ 			{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
+ 			{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
++			{Value: C.V2RayTransportTypeKCP, StructType: reflect.TypeFor[V2RayKCPOptions]()},
+ 		}, nil)
+ 	})
+ }
+@@ -129,4 +135,19 @@ type V2RayXHTTPOptions struct {
+ 	// Mode is one of "auto", "stream-one", "stream-up" or "packet-up".
+ 	// Empty and "auto" currently map to stream-one.
+ 	Mode string `json:"mode,omitempty"`
++	// ScMaxEachPostBytes limits a single packet-up POST body. Defaults to 1 MB.
++	ScMaxEachPostBytes int `json:"sc_max_each_post_bytes,omitempty"`
++	// ScMinPostsIntervalMs batches small writes before a POST. Defaults to 30 ms.
++	ScMinPostsIntervalMs int `json:"sc_min_posts_interval_ms,omitempty"`
++}
++
++// V2RayKCPOptions configures the client side of mKCP.
++type V2RayKCPOptions struct {
++	MTU              int  `json:"mtu,omitempty"`
++	TTI              int  `json:"tti,omitempty"`
++	UplinkCapacity   int  `json:"uplink_capacity,omitempty"`
++	DownlinkCapacity int  `json:"downlink_capacity,omitempty"`
++	CwndMultiplier   int  `json:"cwnd_multiplier,omitempty"`
++	MaxSendingWindow int  `json:"max_sending_window,omitempty"`
++	Congestion       bool `json:"congestion,omitempty"`
+ }
+diff --git a/transport/v2ray/transport.go b/transport/v2ray/transport.go
+index 2f0f881..4ade455 100644
+--- a/transport/v2ray/transport.go
++++ b/transport/v2ray/transport.go
+@@ -9,6 +9,7 @@ import (
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-box/transport/v2rayhttp"
+ 	"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"
++	"github.com/sagernet/sing-box/transport/v2raykcp"
+ 	"github.com/sagernet/sing-box/transport/v2raywebsocket"
+ 	"github.com/sagernet/sing-box/transport/v2rayxhttp"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -65,6 +66,8 @@ func NewClientTransport(ctx context.Context, dialer N.Dialer, serverAddr M.Socks
+ 		return v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
+ 	case C.V2RayTransportTypeXHTTP:
+ 		return v2rayxhttp.NewClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
++	case C.V2RayTransportTypeKCP:
++		return v2raykcp.NewClient(ctx, dialer, serverAddr, options.KCPOptions, tlsConfig)
+ 	default:
+ 		return nil, E.New("unknown transport type: " + options.Type)
+ 	}
+diff --git a/transport/v2raykcp/client.go b/transport/v2raykcp/client.go
+new file mode 100644
+index 0000000..9d004cb
+--- /dev/null
++++ b/transport/v2raykcp/client.go
+@@ -0,0 +1,84 @@
++package v2raykcp
++
++import (
++	"context"
++	"net"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/tls"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/kcp"
++)
++
++var _ adapter.V2RayClientTransport = (*Client)(nil)
++
++// Client adapts Xray's mKCP transport to the sing-box V2Ray transport
++// interface. Xray's implementation is used directly so the wire protocol stays
++// compatible with Xray servers.
++type Client struct {
++	ctx        context.Context
++	serverAddr M.Socksaddr
++	options    option.V2RayKCPOptions
++	tlsConfig  tls.Config
++}
++
++func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayKCPOptions, tlsConfig tls.Config) (*Client, error) {
++	_ = dialer
++	return &Client{
++		ctx:        ctx,
++		serverAddr: serverAddr,
++		options:    options,
++		tlsConfig:  tlsConfig,
++	}, nil
++}
++
++func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
++	destination := xnet.UDPDestination(
++		xnet.ParseAddress(c.serverAddr.AddrString()),
++		xnet.Port(c.serverAddr.Port),
++	)
++	settings := &kcp.Config{}
++	if c.options.MTU > 0 {
++		settings.Mtu = &kcp.MTU{Value: uint32(c.options.MTU)}
++	}
++	if c.options.TTI > 0 {
++		settings.Tti = &kcp.TTI{Value: uint32(c.options.TTI)}
++	}
++	if c.options.UplinkCapacity > 0 {
++		settings.UplinkCapacity = &kcp.UplinkCapacity{Value: uint32(c.options.UplinkCapacity)}
++	}
++	if c.options.DownlinkCapacity > 0 {
++		settings.DownlinkCapacity = &kcp.DownlinkCapacity{Value: uint32(c.options.DownlinkCapacity)}
++	}
++	if c.options.MaxSendingWindow > 0 {
++		settings.WriteBuffer = &kcp.WriteBuffer{Size: uint32(c.options.MaxSendingWindow)}
++	}
++	settings.Congestion = c.options.Congestion
++
++	conn, err := kcp.DialKCP(ctx, destination, &internet.MemoryStreamConfig{
++		ProtocolName:     "mkcp",
++		ProtocolSettings: settings,
++	})
++	if err != nil {
++		return nil, E.Cause(err, "v2ray-kcp: dial")
++	}
++	if c.tlsConfig != nil {
++		tlsConn, err := c.tlsConfig.Client(conn)
++		if err != nil {
++			_ = conn.Close()
++			return nil, E.Cause(err, "v2ray-kcp: tls")
++		}
++		return tlsConn, nil
++	}
++	return conn, nil
++}
++
++func (c *Client) Close() error {
++	return nil
++}
+-- 
+2.34.1
+

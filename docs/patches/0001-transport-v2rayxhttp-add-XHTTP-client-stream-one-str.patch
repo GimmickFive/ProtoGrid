@@ -1,0 +1,594 @@
+From eadc13b9c8f2fddb7117556a49394a9d8b5dd97e Mon Sep 17 00:00:00 2001
+From: Rast Fork <rast@localhost>
+Date: Wed, 25 Nov 2026 05:32:39 +0300
+Subject: [PATCH 01/12] transport/v2rayxhttp: add XHTTP client (stream-one,
+ stream-up)
+
+---
+ constant/v2ray.go                   |   1 +
+ option/v2ray_transport.go           |  19 +-
+ option/v2ray_transport_test.go      |  26 ++
+ transport/v2ray/transport.go        |   3 +
+ transport/v2rayxhttp/client.go      | 366 ++++++++++++++++++++++++++++
+ transport/v2rayxhttp/client_test.go |  72 ++++++
+ 6 files changed, 486 insertions(+), 1 deletion(-)
+ create mode 100644 option/v2ray_transport_test.go
+ create mode 100644 transport/v2rayxhttp/client.go
+ create mode 100644 transport/v2rayxhttp/client_test.go
+
+diff --git a/constant/v2ray.go b/constant/v2ray.go
+index c3089a6..1811df5 100644
+--- a/constant/v2ray.go
++++ b/constant/v2ray.go
+@@ -6,4 +6,5 @@ const (
+ 	V2RayTransportTypeQUIC        = "quic"
+ 	V2RayTransportTypeGRPC        = "grpc"
+ 	V2RayTransportTypeHTTPUpgrade = "httpupgrade"
++	V2RayTransportTypeXHTTP       = "xhttp"
+ )
+diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
+index 8788151..720abf5 100644
+--- a/option/v2ray_transport.go
++++ b/option/v2ray_transport.go
+@@ -12,12 +12,13 @@ import (
+ )
+ 
+ type _V2RayTransportOptions struct {
+-	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
++	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
+ 	HTTPOptions        V2RayHTTPOptions        `json:"-"`
+ 	WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
+ 	QUICOptions        V2RayQUICOptions        `json:"-"`
+ 	GRPCOptions        V2RayGRPCOptions        `json:"-"`
+ 	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
++	XHTTPOptions       V2RayXHTTPOptions       `json:"-"`
+ }
+ 
+ type V2RayTransportOptions _V2RayTransportOptions
+@@ -35,6 +36,8 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
+ 		v = o.GRPCOptions
+ 	case C.V2RayTransportTypeHTTPUpgrade:
+ 		v = o.HTTPUpgradeOptions
++	case C.V2RayTransportTypeXHTTP:
++		v = o.XHTTPOptions
+ 	case "":
+ 		return nil, E.New("missing transport type")
+ 	default:
+@@ -60,6 +63,8 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
+ 		v = &o.GRPCOptions
+ 	case C.V2RayTransportTypeHTTPUpgrade:
+ 		v = &o.HTTPUpgradeOptions
++	case C.V2RayTransportTypeXHTTP:
++		v = &o.XHTTPOptions
+ 	default:
+ 		return E.New("unknown transport type: " + o.Type)
+ 	}
+@@ -78,6 +83,7 @@ func (o V2RayTransportOptions) DescribeSchema(builder schema.Builder) (*schema.N
+ 			{Value: C.V2RayTransportTypeQUIC, StructType: reflect.TypeFor[V2RayQUICOptions]()},
+ 			{Value: C.V2RayTransportTypeGRPC, StructType: reflect.TypeFor[V2RayGRPCOptions]()},
+ 			{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
++			{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
+ 		}, nil)
+ 	})
+ }
+@@ -113,3 +119,14 @@ type V2RayHTTPUpgradeOptions struct {
+ 	Path    string               `json:"path,omitempty"`
+ 	Headers badoption.HTTPHeader `json:"headers,omitempty"`
+ }
++
++// V2RayXHTTPOptions is the client configuration for the XHTTP transport.
++// The first implementation supports stream-one and stream-up over HTTP/2.
++type V2RayXHTTPOptions struct {
++	Host    string               `json:"host,omitempty"`
++	Path    string               `json:"path,omitempty"`
++	Headers badoption.HTTPHeader `json:"headers,omitempty"`
++	// Mode is one of "auto", "stream-one", "stream-up" or "packet-up".
++	// Empty and "auto" currently map to stream-one.
++	Mode string `json:"mode,omitempty"`
++}
+diff --git a/option/v2ray_transport_test.go b/option/v2ray_transport_test.go
+new file mode 100644
+index 0000000..7ac6587
+--- /dev/null
++++ b/option/v2ray_transport_test.go
+@@ -0,0 +1,26 @@
++package option
++
++import (
++	"testing"
++
++	"github.com/sagernet/sing/common/json"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestV2RayXHTTPOptionsRoundTrip(t *testing.T) {
++	t.Parallel()
++
++	var transport V2RayTransportOptions
++	err := json.Unmarshal([]byte(`{"type":"xhttp","host":"example.com","path":"/x","mode":"stream-up","headers":{"X-Test":"1"}}`), &transport)
++	require.NoError(t, err)
++	require.Equal(t, "xhttp", transport.Type)
++	require.Equal(t, "example.com", transport.XHTTPOptions.Host)
++	require.Equal(t, "/x", transport.XHTTPOptions.Path)
++	require.Equal(t, "stream-up", transport.XHTTPOptions.Mode)
++	require.Equal(t, "1", transport.XHTTPOptions.Headers.Build().Get("X-Test"))
++
++	encoded, err := json.Marshal(transport)
++	require.NoError(t, err)
++	require.JSONEq(t, `{"type":"xhttp","host":"example.com","path":"/x","mode":"stream-up","headers":{"X-Test":"1"}}`, string(encoded))
++}
+diff --git a/transport/v2ray/transport.go b/transport/v2ray/transport.go
+index ab52f55..2f0f881 100644
+--- a/transport/v2ray/transport.go
++++ b/transport/v2ray/transport.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/sagernet/sing-box/transport/v2rayhttp"
+ 	"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"
+ 	"github.com/sagernet/sing-box/transport/v2raywebsocket"
++	"github.com/sagernet/sing-box/transport/v2rayxhttp"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+@@ -62,6 +63,8 @@ func NewClientTransport(ctx context.Context, dialer N.Dialer, serverAddr M.Socks
+ 		return NewQUICClient(ctx, dialer, serverAddr, options.QUICOptions, tlsConfig)
+ 	case C.V2RayTransportTypeHTTPUpgrade:
+ 		return v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
++	case C.V2RayTransportTypeXHTTP:
++		return v2rayxhttp.NewClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
+ 	default:
+ 		return nil, E.New("unknown transport type: " + options.Type)
+ 	}
+diff --git a/transport/v2rayxhttp/client.go b/transport/v2rayxhttp/client.go
+new file mode 100644
+index 0000000..0e7d8dc
+--- /dev/null
++++ b/transport/v2rayxhttp/client.go
+@@ -0,0 +1,366 @@
++package v2rayxhttp
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"slices"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/tls"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"golang.org/x/net/http2"
++)
++
++const (
++	modeAuto      = "auto"
++	modeStreamOne = "stream-one"
++	modeStreamUp  = "stream-up"
++	modePacketUp  = "packet-up"
++)
++
++var _ adapter.V2RayClientTransport = (*Client)(nil)
++
++// Client implements the client side of the XHTTP transport.
++//
++// The first implementation supports stream-one and stream-up over HTTP/2.
++// packet-up and HTTP/3 are intentionally left for later milestones.
++type Client struct {
++	ctx        context.Context
++	serverAddr M.Socksaddr
++	options    option.V2RayXHTTPOptions
++	baseURL    url.URL
++	host       string
++	headers    http.Header
++	mode       string
++	transport  *http2.Transport
++	httpClient *http.Client
++}
++
++func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (*Client, error) {
++	mode := options.Mode
++	switch mode {
++	case "", modeAuto:
++		// stream-one works with servers configured as auto, stream-one and
++		// stream-up (the latter accepts an empty session as stream-one).
++		mode = modeStreamOne
++	case modeStreamOne, modeStreamUp:
++	case modePacketUp:
++		return nil, E.New("v2ray-xhttp: packet-up mode is not implemented yet")
++	default:
++		return nil, E.New("v2ray-xhttp: unknown mode: ", mode)
++	}
++
++	if tlsConfig == nil {
++		return nil, E.New("v2ray-xhttp: TLS is required for stream-one/stream-up")
++	}
++
++	nextProtos := tlsConfig.NextProtos()
++	if len(nextProtos) == 0 {
++		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
++	} else if !slices.Contains(nextProtos, http2.NextProtoTLS) {
++		return nil, E.New("v2ray-xhttp: HTTP/2 is required (set alpn to h2)")
++	}
++
++	var host string
++	if options.Host != "" {
++		host = options.Host
++	} else if tlsConfig.ServerName() != "" {
++		host = tlsConfig.ServerName()
++	} else {
++		host = serverAddr.AddrString()
++	}
++
++	path, rawQuery, _ := strings.Cut(options.Path, "?")
++	if path == "" {
++		path = "/"
++	}
++	if !strings.HasPrefix(path, "/") {
++		path = "/" + path
++	}
++	if !strings.HasSuffix(path, "/") {
++		path += "/"
++	}
++
++	baseURL := url.URL{
++		Scheme:   "https",
++		Host:     host,
++		Path:     path,
++		RawQuery: rawQuery,
++	}
++
++	headers := options.Headers.Build()
++	if headers == nil {
++		headers = make(http.Header)
++	}
++	applyDefaultHeaders(headers)
++
++	tlsDialer := tls.NewDialer(dialer, tlsConfig)
++	transport := &http2.Transport{
++		DialTLSContext: func(dialCtx context.Context, network string, addr string, cfg *tls.STDConfig) (net.Conn, error) {
++			return tlsDialer.DialTLSContext(adapter.ContextForMultiplexSession(dialCtx), serverAddr)
++		},
++	}
++
++	return &Client{
++		ctx:        ctx,
++		serverAddr: serverAddr,
++		options:    options,
++		baseURL:    baseURL,
++		host:       host,
++		headers:    headers,
++		mode:       mode,
++		transport:  transport,
++		httpClient: &http.Client{Transport: transport},
++	}, nil
++}
++
++func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
++	requestCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
++
++	if c.mode == modeStreamUp {
++		return c.dialStreamUp(requestCtx, cancel)
++	}
++	return c.dialStreamOne(requestCtx, cancel)
++}
++
++// dialStreamOne opens a single bidirectional HTTP request. It is the default
++// mode for Xray's Reality and works with an Xray server configured as
++// stream-one or auto.
++func (c *Client) dialStreamOne(ctx context.Context, cancel context.CancelFunc) (net.Conn, error) {
++	reader, writer := io.Pipe()
++	requestURL := c.baseURL
++	request := &http.Request{
++		Method:        http.MethodPost,
++		URL:           &requestURL,
++		Host:          c.host,
++		Header:        c.headers.Clone(),
++		Body:          reader,
++		ContentLength: -1,
++	}
++	request = request.WithContext(ctx)
++	c.applyPadding(request)
++	request.Header.Set("Content-Type", "application/grpc")
++
++	response, err := c.httpClient.Do(request)
++	if err != nil {
++		_ = reader.CloseWithError(err)
++		cancel()
++		return nil, E.Cause(err, "v2ray-xhttp: open stream")
++	}
++	if response.StatusCode != http.StatusOK {
++		_ = response.Body.Close()
++		_ = reader.CloseWithError(E.New("unexpected status: ", response.Status))
++		cancel()
++		return nil, E.New("v2ray-xhttp: unexpected status: ", response.Status)
++	}
++
++	return &Conn{
++		reader:  response.Body,
++		writer:  writer,
++		local:   fixedAddr{name: "local"},
++		remote:  fixedAddr{name: c.serverAddr.String()},
++		onClose: cancel,
++	}, nil
++}
++
++// dialStreamUp opens a long-lived GET for the downlink and a separate POST for
++// the uplink, both bound to a generated session id.
++func (c *Client) dialStreamUp(ctx context.Context, cancel context.CancelFunc) (net.Conn, error) {
++	sessionID := randomSessionID()
++
++	downURL := c.baseURL
++	downURL.Path = appendPath(c.baseURL.Path, sessionID)
++	downRequest := &http.Request{
++		Method: http.MethodGet,
++		URL:    &downURL,
++		Host:   c.host,
++		Header: c.headers.Clone(),
++	}
++	downRequest = downRequest.WithContext(ctx)
++	c.applyPadding(downRequest)
++
++	downResponse, err := c.httpClient.Do(downRequest)
++	if err != nil {
++		cancel()
++		return nil, E.Cause(err, "v2ray-xhttp: open downlink")
++	}
++	if downResponse.StatusCode != http.StatusOK {
++		_ = downResponse.Body.Close()
++		cancel()
++		return nil, E.New("v2ray-xhttp: unexpected downlink status: ", downResponse.Status)
++	}
++
++	reader, writer := io.Pipe()
++	upURL := downURL
++	upRequest := &http.Request{
++		Method:        http.MethodPost,
++		URL:           &upURL,
++		Host:          c.host,
++		Header:        c.headers.Clone(),
++		Body:          reader,
++		ContentLength: -1,
++	}
++	upRequest = upRequest.WithContext(ctx)
++	c.applyPadding(upRequest)
++	upRequest.Header.Set("Content-Type", "application/grpc")
++
++	go func() {
++		upResponse, upErr := c.httpClient.Do(upRequest)
++		if upErr != nil {
++			_ = reader.CloseWithError(upErr)
++			_ = downResponse.Body.Close()
++			return
++		}
++		_, _ = io.Copy(io.Discard, upResponse.Body)
++		_ = upResponse.Body.Close()
++		if upResponse.StatusCode != http.StatusOK {
++			_ = reader.CloseWithError(E.New("unexpected uplink status: ", upResponse.Status))
++			_ = downResponse.Body.Close()
++		}
++	}()
++
++	return &Conn{
++		reader:  downResponse.Body,
++		writer:  writer,
++		local:   fixedAddr{name: "local"},
++		remote:  fixedAddr{name: c.serverAddr.String()},
++		onClose: cancel,
++	}, nil
++}
++
++func (c *Client) applyPadding(request *http.Request) {
++	padding := randomPadding()
++	referer := c.baseURL
++	query := referer.Query()
++	query.Set("x_padding", padding)
++	referer.RawQuery = query.Encode()
++	request.Header.Set("Referer", referer.String())
++}
++
++func (c *Client) Close() error {
++	c.transport.CloseIdleConnections()
++	return nil
++}
++
++type Conn struct {
++	reader    io.ReadCloser
++	writer    *io.PipeWriter
++	local     net.Addr
++	remote    net.Addr
++	onClose   func()
++	closeOnce sync.Once
++	closeErr  error
++}
++
++func (c *Conn) Read(buffer []byte) (int, error) {
++	return c.reader.Read(buffer)
++}
++
++func (c *Conn) Write(buffer []byte) (int, error) {
++	return c.writer.Write(buffer)
++}
++
++func (c *Conn) Close() error {
++	c.closeOnce.Do(func() {
++		_ = c.writer.Close()
++		_ = c.reader.Close()
++		if c.onClose != nil {
++			c.onClose()
++		}
++	})
++	return c.closeErr
++}
++
++func (c *Conn) LocalAddr() net.Addr {
++	return c.local
++}
++
++func (c *Conn) RemoteAddr() net.Addr {
++	return c.remote
++}
++
++func (c *Conn) SetDeadline(t time.Time) error {
++	return nil
++}
++
++func (c *Conn) SetReadDeadline(t time.Time) error {
++	return nil
++}
++
++func (c *Conn) SetWriteDeadline(t time.Time) error {
++	return nil
++}
++
++type fixedAddr struct {
++	name string
++}
++
++func (a fixedAddr) Network() string {
++	return "tcp"
++}
++
++func (a fixedAddr) String() string {
++	return a.name
++}
++
++func appendPath(path string, value string) string {
++	if strings.HasSuffix(path, "/") {
++		return path + value
++	}
++	return path + "/" + value
++}
++
++func applyDefaultHeaders(headers http.Header) {
++	if headers.Get("User-Agent") == "" {
++		headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
++	}
++	if headers.Get("Accept") == "" {
++		headers.Set("Accept", "*/*")
++	}
++	if headers.Get("Accept-Language") == "" {
++		headers.Set("Accept-Language", "en-US,en;q=0.9")
++	}
++	if headers.Get("Sec-Fetch-Dest") == "" {
++		headers.Set("Sec-Fetch-Dest", "empty")
++	}
++	if headers.Get("Sec-Fetch-Mode") == "" {
++		headers.Set("Sec-Fetch-Mode", "cors")
++	}
++	if headers.Get("Sec-Fetch-Site") == "" {
++		headers.Set("Sec-Fetch-Site", "same-origin")
++	}
++}
++
++func randomSessionID() string {
++	var buffer [16]byte
++	if _, err := rand.Read(buffer[:]); err != nil {
++		return "00000000000000000000000000000000"
++	}
++	return hex.EncodeToString(buffer[:])
++}
++
++func randomPadding() string {
++	const minLength = 100
++	const maxLength = 1000
++	var sizeBuffer [2]byte
++	length := minLength
++	if _, err := rand.Read(sizeBuffer[:]); err == nil {
++		length = minLength + int(sizeBuffer[0])%(maxLength-minLength+1)
++	}
++	if length > maxLength {
++		length = maxLength
++	}
++	return strings.Repeat("X", length)
++}
+diff --git a/transport/v2rayxhttp/client_test.go b/transport/v2rayxhttp/client_test.go
+new file mode 100644
+index 0000000..9ce6c95
+--- /dev/null
++++ b/transport/v2rayxhttp/client_test.go
+@@ -0,0 +1,72 @@
++package v2rayxhttp
++
++import (
++	"context"
++	"net/http"
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++func TestAppendPath(t *testing.T) {
++	t.Parallel()
++	if got := appendPath("/x/", "session"); got != "/x/session" {
++		t.Fatalf("unexpected path: %s", got)
++	}
++	if got := appendPath("/x", "session"); got != "/x/session" {
++		t.Fatalf("unexpected path: %s", got)
++	}
++}
++
++func TestRandomPaddingLength(t *testing.T) {
++	t.Parallel()
++	for range 200 {
++		padding := randomPadding()
++		if len(padding) < 100 || len(padding) > 1000 {
++			t.Fatalf("padding length out of range: %d", len(padding))
++		}
++	}
++}
++
++func TestApplyDefaultHeaders(t *testing.T) {
++	t.Parallel()
++	headers := make(http.Header)
++	headers.Set("X-Test", "1")
++	applyDefaultHeaders(headers)
++	if headers.Get("X-Test") != "1" {
++		t.Fatal("custom header was lost")
++	}
++	if headers.Get("User-Agent") == "" || headers.Get("Accept") == "" {
++		t.Fatal("default headers were not applied")
++	}
++}
++
++func TestRejectsPacketUp(t *testing.T) {
++	t.Parallel()
++	_, err := NewClient(
++		context.Background(),
++		nil,
++		M.ParseSocksaddr("127.0.0.1:443"),
++		option.V2RayXHTTPOptions{Mode: modePacketUp},
++		nil,
++	)
++	if err == nil || !strings.Contains(err.Error(), "packet-up") {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}
++
++func TestRejectsMissingTLS(t *testing.T) {
++	t.Parallel()
++	_, err := NewClient(
++		context.Background(),
++		nil,
++		M.ParseSocksaddr("127.0.0.1:443"),
++		option.V2RayXHTTPOptions{Mode: modeStreamOne},
++		nil,
++	)
++	if err == nil || !strings.Contains(err.Error(), "TLS") {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}
+-- 
+2.34.1
+

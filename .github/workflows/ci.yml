@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libx11-dev libgl1-mesa-dev \
+            libgtk-3-dev libayatana-appindicator3-dev
+      - name: Core tests
+        run: cargo test -p protogrid-core
+      - name: Application check
+        run: cargo check -p protogrid-desktop
+
+  fork:
+    name: sing-box fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - name: Clone upstream sing-box
+        run: git clone --depth 1 --branch v1.14.4 https://github.com/SagerNet/sing-box.git forks/sing-box
+      - name: Apply ProtoGrid patches
+        run: |
+          cd forks/sing-box
+          git config user.name "ProtoGrid CI"
+          git config user.email "ci@protogrid.local"
+          git am ../../docs/patches/*.patch
+      - name: Test fork
+        run: |
+          cd forks/sing-box
+          go test -tags "with_quic,with_utls" ./transport/v2rayxhttp/... ./transport/v2raykcp/... ./transport/v2rayxdrive/... ./protocol/vless/... ./option/... ./common/tls/...
+      - name: Build fork
+        run: |
+          cd forks/sing-box
+          mkdir -p ../../dist
+          go build -tags "with_quic,with_utls,with_clash_api,with_gvisor" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4-protogrid.1" \
+            -o ../../dist/sing-box-protogrid ./cmd/sing-box
+

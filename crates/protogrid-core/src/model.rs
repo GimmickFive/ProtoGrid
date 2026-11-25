@@ -1,0 +1,749 @@
+use serde::{Deserialize, Serialize};
+
+use crate::subscription::SubUserInfo;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    #[default]
+    Vless,
+    Vmess,
+    Trojan,
+    Shadowsocks,
+    Hysteria2,
+    Tuic,
+    Masque,
+}
+
+impl Protocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Protocol::Vless => "VLESS",
+            Protocol::Vmess => "VMess",
+            Protocol::Trojan => "Trojan",
+            Protocol::Shadowsocks => "Shadowsocks",
+            Protocol::Hysteria2 => "Hysteria2",
+            Protocol::Tuic => "TUIC",
+            Protocol::Masque => "MASQUE",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Protocol::Shadowsocks => 8388,
+            _ => 443,
+        }
+    }
+
+    pub fn supports(self, core: CoreKind) -> bool {
+        match core {
+            CoreKind::Singbox => true,
+            CoreKind::Xray => matches!(
+                self,
+                Protocol::Vless
+                    | Protocol::Vmess
+                    | Protocol::Trojan
+                    | Protocol::Shadowsocks
+                    | Protocol::Masque
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Security {
+    #[default]
+    None,
+    Tls,
+    Reality,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    #[default]
+    Tcp,
+    Ws,
+    Grpc,
+    Http,
+    HttpUpgrade,
+    Xhttp,
+    Kcp,
+    XDrive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum CoreKind {
+    #[default]
+    #[serde(rename = "singbox")]
+    Singbox,
+    #[serde(rename = "xray")]
+    Xray,
+}
+
+impl CoreKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            CoreKind::Singbox => "sing-box",
+            CoreKind::Xray => "Xray",
+        }
+    }
+
+    pub fn binary_name(self) -> &'static str {
+        match self {
+            CoreKind::Singbox => "sing-box",
+            CoreKind::Xray => "xray",
+        }
+    }
+}
+
+/// Optional features exposed by a specific core build.
+///
+/// Stock sing-box does not implement XHTTP; the ProtoGrid fork does. Keeping this
+/// in a separate struct lets the config generator stay compatible with both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoreCapabilities {
+    pub xhttp: bool,
+    pub kcp: bool,
+    pub xdrive: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleAction {
+    #[default]
+    Proxy,
+    Direct,
+    Block,
+}
+
+impl RuleAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            RuleAction::Proxy => "Через прокси",
+            RuleAction::Direct => "Напрямую",
+            RuleAction::Block => "Блокировать",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleKind {
+    Domain,
+    #[default]
+    DomainSuffix,
+    DomainKeyword,
+    IpCidr,
+    Geoip,
+    Geosite,
+    ProcessName,
+}
+
+impl RuleKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            RuleKind::Domain => "Домен",
+            RuleKind::DomainSuffix => "Суффикс домена",
+            RuleKind::DomainKeyword => "Ключевое слово",
+            RuleKind::IpCidr => "IP / CIDR",
+            RuleKind::Geoip => "GeoIP",
+            RuleKind::Geosite => "GeoSite",
+            RuleKind::ProcessName => "Процесс",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Server {
+    pub id: String,
+    pub name: String,
+    pub protocol: Protocol,
+    pub address: String,
+    pub port: u16,
+    pub uuid: String,
+    pub password: String,
+    pub method: String,
+    pub security: Security,
+    pub sni: String,
+    pub alpn: Vec<String>,
+    pub fingerprint: String,
+    pub allow_insecure: bool,
+    pub flow: String,
+    /// Xray 26 VLESS encryption string (empty or "none" for plain VLESS).
+    pub encryption: String,
+    pub transport: Transport,
+    pub path: String,
+    pub host: String,
+    /// XHTTP uplink mode: auto, packet-up, stream-up or stream-one.
+    pub xhttp_mode: String,
+    pub kcp_mtu: u16,
+    pub kcp_tti: u16,
+    pub kcp_uplink: u32,
+    pub kcp_downlink: u32,
+    pub kcp_congestion: bool,
+    pub kcp_seed: String,
+    pub tcp_fast_open: bool,
+    pub bind_interface: String,
+    pub routing_mark: u32,
+    pub fragment_enabled: bool,
+    pub fragment_packets: String,
+    pub fragment_length: String,
+    pub fragment_delay: String,
+    pub fragment_max_split: String,
+    pub finalmask_tcp: String,
+    pub finalmask_udp: String,
+    pub noise_enabled: bool,
+    pub noise_type: String,
+    pub noise_packet: String,
+    pub noise_rand: String,
+    pub xdrive_service: String,
+    pub xdrive_remote_folder: String,
+    pub xdrive_secrets: String,
+    pub xdrive_s3_endpoint: String,
+    pub xdrive_s3_region: String,
+    pub xdrive_s3_bucket: String,
+    pub xdrive_s3_path_style: bool,
+    pub masque_user: String,
+    pub masque_pass: String,
+    pub pinned_peer_cert_sha256: String,
+    pub masque_remote_dns: String,
+    pub service_name: String,
+    pub reality_public_key: String,
+    pub reality_short_id: String,
+    pub reality_spider_x: String,
+    /// Optional ML-DSA-65 public key for Reality (Xray 26).
+    pub reality_mldsa65_verify: String,
+    pub ss_plugin: String,
+    pub ss_plugin_opts: String,
+    pub vmess_security: String,
+    pub vmess_alter_id: u16,
+    pub obfs: String,
+    pub obfs_password: String,
+    pub up_mbps: u32,
+    pub down_mbps: u32,
+    pub congestion_control: String,
+    pub udp_relay_mode: String,
+    pub subscription_id: Option<String>,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            protocol: Protocol::Vless,
+            address: String::new(),
+            port: Protocol::Vless.default_port(),
+            uuid: String::new(),
+            password: String::new(),
+            method: "aes-256-gcm".into(),
+            security: Security::None,
+            sni: String::new(),
+            alpn: Vec::new(),
+            fingerprint: String::new(),
+            allow_insecure: false,
+            flow: String::new(),
+            encryption: String::new(),
+            transport: Transport::Tcp,
+            path: String::new(),
+            host: String::new(),
+            xhttp_mode: "auto".into(),
+            kcp_mtu: 1350,
+            kcp_tti: 50,
+            kcp_uplink: 5,
+            kcp_downlink: 20,
+            kcp_congestion: false,
+            kcp_seed: String::new(),
+            tcp_fast_open: false,
+            bind_interface: String::new(),
+            routing_mark: 0,
+            fragment_enabled: false,
+            fragment_packets: "tlshello".into(),
+            fragment_length: "100-200".into(),
+            fragment_delay: "10-20".into(),
+            fragment_max_split: "3-6".into(),
+            finalmask_tcp: String::new(),
+            finalmask_udp: String::new(),
+            noise_enabled: false,
+            noise_type: "str".into(),
+            noise_packet: String::new(),
+            noise_rand: "1-3".into(),
+            xdrive_service: "local".into(),
+            xdrive_remote_folder: String::new(),
+            xdrive_secrets: String::new(),
+            xdrive_s3_endpoint: String::new(),
+            xdrive_s3_region: String::new(),
+            xdrive_s3_bucket: String::new(),
+            xdrive_s3_path_style: false,
+            masque_user: String::new(),
+            masque_pass: String::new(),
+            pinned_peer_cert_sha256: String::new(),
+            masque_remote_dns: String::new(),
+            service_name: String::new(),
+            reality_public_key: String::new(),
+            reality_short_id: String::new(),
+            reality_spider_x: String::new(),
+            reality_mldsa65_verify: String::new(),
+            ss_plugin: String::new(),
+            ss_plugin_opts: String::new(),
+            vmess_security: "auto".into(),
+            vmess_alter_id: 0,
+            obfs: String::new(),
+            obfs_password: String::new(),
+            up_mbps: 0,
+            down_mbps: 0,
+            congestion_control: "bbr".into(),
+            udp_relay_mode: "native".into(),
+            subscription_id: None,
+        }
+    }
+}
+
+impl Server {
+    pub fn new(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            port: protocol.default_port(),
+            ..Default::default()
+        }
+    }
+
+    pub fn target(&self) -> String {
+        if self.address.contains(':') && !self.address.starts_with('[') {
+            format!("[{}]:{}", self.address, self.port)
+        } else {
+            format!("{}:{}", self.address, self.port)
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        if self.name.trim().is_empty() {
+            self.target()
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// XHTTP mode normalized to one of the values understood by the cores.
+    pub fn effective_xhttp_mode(&self) -> &str {
+        match self.xhttp_mode.trim() {
+            "packet-up" => "packet-up",
+            "stream-up" => "stream-up",
+            "stream-one" => "stream-one",
+            _ => "auto",
+        }
+    }
+
+    /// Server name used for TLS SNI when the user did not set one explicitly.
+    pub fn effective_sni(&self) -> String {
+        if !self.sni.trim().is_empty() {
+            return self.sni.trim().to_string();
+        }
+        if !self.host.trim().is_empty() && self.host.parse::<std::net::IpAddr>().is_err() {
+            return self.host.trim().to_string();
+        }
+        self.address.trim().to_string()
+    }
+
+    pub fn validate(&self, core: CoreKind) -> Result<(), String> {
+        self.validate_with(core, CoreCapabilities::default())
+    }
+
+    pub fn validate_with(
+        &self,
+        core: CoreKind,
+        capabilities: CoreCapabilities,
+    ) -> Result<(), String> {
+        if self.address.trim().is_empty() {
+            return Err("не указан адрес сервера".into());
+        }
+        if self.port == 0 {
+            return Err("не указан порт".into());
+        }
+        if !self.protocol.supports(core) {
+            return Err(format!(
+                "протокол {} не поддерживается ядром {}. Выберите sing-box.",
+                self.protocol.label(),
+                core.name()
+            ));
+        }
+        match self.protocol {
+            Protocol::Vless | Protocol::Vmess => {
+                if self.uuid.trim().is_empty() {
+                    return Err("не указан UUID".into());
+                }
+            }
+            Protocol::Trojan | Protocol::Hysteria2 => {
+                if self.password.is_empty() {
+                    return Err("не указан пароль".into());
+                }
+            }
+            Protocol::Shadowsocks => {
+                if self.method.trim().is_empty() {
+                    return Err("не указан метод шифрования".into());
+                }
+                if self.password.is_empty() {
+                    return Err("не указан пароль".into());
+                }
+            }
+            Protocol::Tuic => {
+                if self.uuid.trim().is_empty() || self.password.is_empty() {
+                    return Err("не указаны UUID и пароль".into());
+                }
+            }
+            Protocol::Masque => {}
+        }
+        if self.security == Security::Reality && self.reality_public_key.trim().is_empty() {
+            return Err("для Reality не указан публичный ключ (pbk)".into());
+        }
+        if self.security == Security::Reality
+            && !matches!(self.protocol, Protocol::Vless | Protocol::Vmess)
+        {
+            return Err("Reality поддерживается только для VLESS и VMess".into());
+        }
+        if self.transport == Transport::Xhttp && core == CoreKind::Singbox && !capabilities.xhttp {
+            return Err(
+                "транспорт XHTTP требует sing-box с поддержкой XHTTP (ProtoGrid fork)".into(),
+            );
+        }
+        if self.transport == Transport::Kcp && core == CoreKind::Singbox && !capabilities.kcp {
+            return Err(
+                "транспорт mKCP требует sing-box с поддержкой mKCP (ProtoGrid fork)".into(),
+            );
+        }
+        if self.transport == Transport::XDrive && core == CoreKind::Singbox && !capabilities.xdrive
+        {
+            return Err(
+                "транспорт XDRIVE требует sing-box с поддержкой XDRIVE (ProtoGrid fork)".into(),
+            );
+        }
+        if self.transport == Transport::Http && core == CoreKind::Xray {
+            return Err(
+                "Xray 26+ больше не поддерживает транспорт HTTP/2. Используйте XHTTP или sing-box."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Subscription {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub auto_update: bool,
+    /// Unix timestamp (seconds) of the last successful refresh.
+    pub last_updated: Option<i64>,
+    pub userinfo: Option<SubUserInfo>,
+    pub last_error: Option<String>,
+}
+
+impl Default for Subscription {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            url: String::new(),
+            auto_update: true,
+            last_updated: None,
+            userinfo: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoutingRule {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub action: RuleAction,
+    pub kind: RuleKind,
+    pub value: String,
+}
+
+impl Default for RoutingRule {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            enabled: true,
+            action: RuleAction::Proxy,
+            kind: RuleKind::DomainSuffix,
+            value: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Settings {
+    pub core: CoreKind,
+    pub tun_enabled: bool,
+    pub system_proxy: bool,
+    /// sing-box mixed inbound port (HTTP + SOCKS on the same port).
+    pub mixed_port: u16,
+    /// Xray SOCKS inbound port.
+    pub socks_port: u16,
+    /// Xray HTTP inbound port; also used for the system proxy.
+    pub http_port: u16,
+    pub allow_lan: bool,
+    pub ipv6: bool,
+    pub dns_remote: String,
+    pub clash_api_port: u16,
+    pub log_level: String,
+    pub test_url: String,
+    pub final_action: RuleAction,
+    pub close_to_tray: bool,
+    pub auto_connect: bool,
+    pub auto_update_subscriptions: bool,
+    pub auto_select: bool,
+    pub fake_dns: bool,
+    pub singbox_path: String,
+    pub xray_path: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            core: CoreKind::Singbox,
+            tun_enabled: false,
+            system_proxy: true,
+            mixed_port: 2080,
+            socks_port: 10808,
+            http_port: 10809,
+            allow_lan: false,
+            ipv6: false,
+            dns_remote: "https://1.1.1.1/dns-query".into(),
+            clash_api_port: 9090,
+            log_level: "info".into(),
+            test_url: "https://www.gstatic.com/generate_204".into(),
+            final_action: RuleAction::Proxy,
+            close_to_tray: true,
+            auto_connect: false,
+            auto_update_subscriptions: true,
+            auto_select: false,
+            fake_dns: false,
+            singbox_path: String::new(),
+            xray_path: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// HTTP port that clients (and the system proxy) should use.
+    pub fn effective_http_port(&self) -> u16 {
+        match self.core {
+            CoreKind::Singbox => self.mixed_port,
+            CoreKind::Xray => self.http_port,
+        }
+    }
+
+    pub fn effective_socks_port(&self) -> u16 {
+        match self.core {
+            CoreKind::Singbox => self.mixed_port,
+            CoreKind::Xray => self.socks_port,
+        }
+    }
+
+    pub fn core_path(&self) -> &str {
+        match self.core {
+            CoreKind::Singbox => &self.singbox_path,
+            CoreKind::Xray => &self.xray_path,
+        }
+    }
+
+    pub fn sanitize(&mut self) {
+        if self.mixed_port == 0 {
+            self.mixed_port = 2080;
+        }
+        if self.socks_port == 0 {
+            self.socks_port = 10808;
+        }
+        if self.http_port == 0 {
+            self.http_port = 10809;
+        }
+        if self.clash_api_port == 0 {
+            self.clash_api_port = 9090;
+        }
+        if self.dns_remote.trim().is_empty() {
+            self.dns_remote = "https://1.1.1.1/dns-query".into();
+        }
+        if self.test_url.trim().is_empty() {
+            self.test_url = "https://www.gstatic.com/generate_204".into();
+        }
+        let level = self.log_level.to_ascii_lowercase();
+        if !matches!(
+            level.as_str(),
+            "trace" | "debug" | "info" | "warn" | "error"
+        ) {
+            self.log_level = "info".into();
+        } else {
+            self.log_level = level;
+        }
+        self.singbox_path = self.singbox_path.trim().to_string();
+        self.xray_path = self.xray_path.trim().to_string();
+    }
+
+    /// Fields that require a core restart when changed.
+    pub fn network_eq(&self, other: &Settings) -> bool {
+        self.core == other.core
+            && self.tun_enabled == other.tun_enabled
+            && self.mixed_port == other.mixed_port
+            && self.socks_port == other.socks_port
+            && self.http_port == other.http_port
+            && self.allow_lan == other.allow_lan
+            && self.ipv6 == other.ipv6
+            && self.dns_remote == other.dns_remote
+            && self.clash_api_port == other.clash_api_port
+            && self.log_level == other.log_level
+            && self.singbox_path == other.singbox_path
+            && self.xray_path == other.xray_path
+            && self.final_action == other.final_action
+            && self.auto_select == other.auto_select
+            && self.fake_dns == other.fake_dns
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppConfig {
+    pub version: u32,
+    pub servers: Vec<Server>,
+    pub subscriptions: Vec<Subscription>,
+    pub rules: Vec<RoutingRule>,
+    pub settings: Settings,
+    pub active_server_id: Option<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            servers: Vec::new(),
+            subscriptions: Vec::new(),
+            rules: default_rules(),
+            settings: Settings::default(),
+            active_server_id: None,
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn normalize(&mut self) {
+        self.version = 1;
+        self.settings.sanitize();
+        for server in &mut self.servers {
+            if server.id.trim().is_empty() {
+                server.id = uuid::Uuid::new_v4().to_string();
+            }
+            server.address = server.address.trim().to_string();
+            server.sni = server.sni.trim().to_string();
+            server.host = server.host.trim().to_string();
+            server.path = server.path.trim().to_string();
+            server.service_name = server.service_name.trim().to_string();
+            server.flow = server.flow.trim().to_string();
+            server.alpn = server
+                .alpn
+                .iter()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+        }
+        for sub in &mut self.subscriptions {
+            if sub.id.trim().is_empty() {
+                sub.id = uuid::Uuid::new_v4().to_string();
+            }
+            sub.url = sub.url.trim().to_string();
+        }
+        for rule in &mut self.rules {
+            if rule.id.trim().is_empty() {
+                rule.id = uuid::Uuid::new_v4().to_string();
+            }
+        }
+        match &self.active_server_id {
+            Some(id) if self.servers.iter().any(|s| &s.id == id) => {}
+            _ => self.active_server_id = self.servers.first().map(|s| s.id.clone()),
+        }
+    }
+
+    pub fn server(&self, id: &str) -> Option<&Server> {
+        self.servers.iter().find(|s| s.id == id)
+    }
+
+    pub fn active_server(&self) -> Option<&Server> {
+        self.active_server_id
+            .as_deref()
+            .and_then(|id| self.server(id))
+    }
+}
+
+pub fn default_rules() -> Vec<RoutingRule> {
+    vec![
+        RoutingRule {
+            id: "default-private-ip".into(),
+            name: "Локальная сеть".into(),
+            enabled: true,
+            action: RuleAction::Direct,
+            kind: RuleKind::IpCidr,
+            value: "127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10".into(),
+        },
+        RoutingRule {
+            id: "default-local-domains".into(),
+            name: "Локальные домены".into(),
+            enabled: true,
+            action: RuleAction::Direct,
+            kind: RuleKind::DomainSuffix,
+            value: "local, localhost, lan, home.arpa".into(),
+        },
+        RoutingRule {
+            id: "default-ads".into(),
+            name: "Блокировка рекламы".into(),
+            enabled: true,
+            action: RuleAction::Block,
+            kind: RuleKind::Geosite,
+            value: "category-ads-all".into(),
+        },
+        RoutingRule {
+            id: "default-ru-geoip".into(),
+            name: "Обход РФ (IP)".into(),
+            enabled: true,
+            action: RuleAction::Direct,
+            kind: RuleKind::Geoip,
+            value: "ru".into(),
+        },
+        RoutingRule {
+            id: "default-ru-geosite".into(),
+            name: "Обход РФ (домены)".into(),
+            enabled: true,
+            action: RuleAction::Direct,
+            kind: RuleKind::Geosite,
+            value: "category-ru".into(),
+        },
+    ]
+}
+
+pub fn routing_preset(name: &str) -> Option<(Vec<RoutingRule>, RuleAction)> {
+    match name {
+        "smart" => Some((default_rules(), RuleAction::Proxy)),
+        "global" => Some((
+            vec![RoutingRule {
+                id: "preset-private-ip".into(),
+                name: "Локальная сеть".into(),
+                enabled: true,
+                action: RuleAction::Direct,
+                kind: RuleKind::IpCidr,
+                value: "127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10".into(),
+            }],
+            RuleAction::Proxy,
+        )),
+        "direct" => Some((Vec::new(), RuleAction::Direct)),
+        _ => None,
+    }
+}

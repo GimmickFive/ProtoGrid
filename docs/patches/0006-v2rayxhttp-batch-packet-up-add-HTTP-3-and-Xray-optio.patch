@@ -1,0 +1,360 @@
+From c41dbdf3e2e29dce1ccb5306050c1162ddf22144 Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 06:50:26 +0300
+Subject: [PATCH 06/12] v2rayxhttp: batch packet-up, add HTTP/3 and Xray
+ options
+
+---
+ option/v2ray_transport.go      |  16 +++
+ option/v2ray_transport_test.go |   7 ++
+ transport/v2rayxhttp/client.go | 192 +++++++++++++++++++++++++--------
+ 3 files changed, 168 insertions(+), 47 deletions(-)
+
+diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
+index 2317da1..87a940a 100644
+--- a/option/v2ray_transport.go
++++ b/option/v2ray_transport.go
+@@ -1,6 +1,7 @@
+ package option
+ 
+ import (
++	stdjson "encoding/json"
+ 	"reflect"
+ 
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -139,6 +140,21 @@ type V2RayXHTTPOptions struct {
+ 	ScMaxEachPostBytes int `json:"sc_max_each_post_bytes,omitempty"`
+ 	// ScMinPostsIntervalMs batches small writes before a POST. Defaults to 30 ms.
+ 	ScMinPostsIntervalMs int `json:"sc_min_posts_interval_ms,omitempty"`
++	// Xmux is accepted for Xray compatibility. HTTP/2 and HTTP/3 connection
++	// pooling already provides multiplexing.
++	Xmux *V2RayXHTTPXmuxOptions `json:"xmux,omitempty"`
++	// DownloadSettings is accepted for Xray compatibility. The current client
++	// keeps the downlink on the main server.
++	DownloadSettings stdjson.RawMessage `json:"download_settings,omitempty"`
++}
++
++type V2RayXHTTPXmuxOptions struct {
++	MaxConcurrency   int `json:"max_concurrency,omitempty"`
++	MaxConnections   int `json:"max_connections,omitempty"`
++	CMaxReuseTimes   int `json:"c_max_reuse_times,omitempty"`
++	HMaxRequestTimes int `json:"h_max_request_times,omitempty"`
++	HMaxReusableSecs int `json:"h_max_reusable_secs,omitempty"`
++	HKeepAlivePeriod int `json:"h_keep_alive_period,omitempty"`
+ }
+ 
+ // V2RayKCPOptions configures the client side of mKCP.
+diff --git a/option/v2ray_transport_test.go b/option/v2ray_transport_test.go
+index 7ac6587..4eeba18 100644
+--- a/option/v2ray_transport_test.go
++++ b/option/v2ray_transport_test.go
+@@ -20,6 +20,13 @@ func TestV2RayXHTTPOptionsRoundTrip(t *testing.T) {
+ 	require.Equal(t, "stream-up", transport.XHTTPOptions.Mode)
+ 	require.Equal(t, "1", transport.XHTTPOptions.Headers.Build().Get("X-Test"))
+ 
++	xmuxTransport := V2RayTransportOptions{}
++	err = json.Unmarshal([]byte(`{"type":"xhttp","mode":"packet-up","xmux":{"max_concurrency":8},"download_settings":{"host":"cdn.example.com"}}`), &xmuxTransport)
++	require.NoError(t, err)
++	require.NotNil(t, xmuxTransport.XHTTPOptions.Xmux)
++	require.Equal(t, 8, xmuxTransport.XHTTPOptions.Xmux.MaxConcurrency)
++	require.NotEmpty(t, xmuxTransport.XHTTPOptions.DownloadSettings)
++
+ 	encoded, err := json.Marshal(transport)
+ 	require.NoError(t, err)
+ 	require.JSONEq(t, `{"type":"xhttp","host":"example.com","path":"/x","mode":"stream-up","headers":{"X-Test":"1"}}`, string(encoded))
+diff --git a/transport/v2rayxhttp/client.go b/transport/v2rayxhttp/client.go
+index 5991de5..ff77f99 100644
+--- a/transport/v2rayxhttp/client.go
++++ b/transport/v2rayxhttp/client.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"crypto/rand"
++	stdtls "crypto/tls"
+ 	"encoding/hex"
+ 	"io"
+ 	"net"
+@@ -15,6 +16,8 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/sagernet/quic-go"
++	"github.com/sagernet/quic-go/http3"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/tls"
+ 	"github.com/sagernet/sing-box/option"
+@@ -46,7 +49,8 @@ type Client struct {
+ 	host       string
+ 	headers    http.Header
+ 	mode       string
+-	transport  *http2.Transport
++	transport  http.RoundTripper
++	h3         *http3.Transport
+ 	httpClient *http.Client
+ }
+ 
+@@ -67,10 +71,13 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 	}
+ 
+ 	nextProtos := tlsConfig.NextProtos()
+-	if len(nextProtos) == 0 {
+-		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
+-	} else if !slices.Contains(nextProtos, http2.NextProtoTLS) {
+-		return nil, E.New("v2ray-xhttp: HTTP/2 is required (set alpn to h2)")
++	useH3 := len(nextProtos) == 1 && nextProtos[0] == http3.NextProtoH3
++	if !useH3 {
++		if len(nextProtos) == 0 {
++			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
++		} else if !slices.Contains(nextProtos, http2.NextProtoTLS) {
++			return nil, E.New("v2ray-xhttp: HTTP/2 or HTTP/3 is required (set alpn to h2 or h3)")
++		}
+ 	}
+ 
+ 	var host string
+@@ -106,11 +113,42 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 	}
+ 	applyDefaultHeaders(headers)
+ 
+-	tlsDialer := tls.NewDialer(dialer, tlsConfig)
+-	transport := &http2.Transport{
+-		DialTLSContext: func(dialCtx context.Context, network string, addr string, cfg *tls.STDConfig) (net.Conn, error) {
+-			return tlsDialer.DialTLSContext(adapter.ContextForMultiplexSession(dialCtx), serverAddr)
+-		},
++	var roundTripper http.RoundTripper
++	var h3Transport *http3.Transport
++	if useH3 {
++		stdConfig, err := tlsConfig.STDConfig()
++		if err != nil {
++			return nil, E.Cause(err, "v2ray-xhttp: HTTP/3 requires standard TLS")
++		}
++		stdConfig.NextProtos = []string{http3.NextProtoH3}
++		h3Transport = &http3.Transport{
++			TLSClientConfig: stdConfig,
++			QUICConfig:      &quic.Config{},
++			Dial: func(dialCtx context.Context, addr string, cfg *stdtls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
++				conn, err := dialer.DialContext(dialCtx, N.NetworkUDP, serverAddr)
++				if err != nil {
++					return nil, err
++				}
++				quicConn, err := quic.DialEarlyConn(dialCtx, conn, cfg, quicConfig)
++				if err != nil {
++					_ = conn.Close()
++					return nil, err
++				}
++				go func() {
++					<-quicConn.Context().Done()
++					_ = conn.Close()
++				}()
++				return quicConn, nil
++			},
++		}
++		roundTripper = h3Transport
++	} else {
++		tlsDialer := tls.NewDialer(dialer, tlsConfig)
++		roundTripper = &http2.Transport{
++			DialTLSContext: func(dialCtx context.Context, network string, addr string, cfg *tls.STDConfig) (net.Conn, error) {
++				return tlsDialer.DialTLSContext(adapter.ContextForMultiplexSession(dialCtx), serverAddr)
++			},
++		}
+ 	}
+ 
+ 	return &Client{
+@@ -121,8 +159,9 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 		host:       host,
+ 		headers:    headers,
+ 		mode:       mode,
+-		transport:  transport,
+-		httpClient: &http.Client{Transport: transport},
++		transport:  roundTripper,
++		h3:         h3Transport,
++		httpClient: &http.Client{Transport: roundTripper},
+ 	}, nil
+ }
+ 
+@@ -273,11 +312,24 @@ func (c *Client) dialPacketUp(ctx context.Context, cancel context.CancelFunc) (n
+ 		return nil, E.New("v2ray-xhttp: unexpected downlink status: ", downResponse.Status)
+ 	}
+ 
++	maxChunk := c.options.ScMaxEachPostBytes
++	if maxChunk <= 0 {
++		maxChunk = 1_000_000
++	}
++	intervalMs := c.options.ScMinPostsIntervalMs
++	if intervalMs <= 0 {
++		intervalMs = 30
++	}
+ 	writer := &packetWriter{
+ 		client:   c,
+ 		ctx:      ctx,
+ 		url:      downURL,
+-		maxChunk: 1_000_000,
++		maxChunk: maxChunk,
++		interval: time.Duration(intervalMs) * time.Millisecond,
++		onError: func(error) {
++			cancel()
++			_ = downResponse.Body.Close()
++		},
+ 	}
+ 	return &Conn{
+ 		reader:  downResponse.Body,
+@@ -298,7 +350,12 @@ func (c *Client) applyPadding(request *http.Request) {
+ }
+ 
+ func (c *Client) Close() error {
+-	c.transport.CloseIdleConnections()
++	if c.h3 != nil {
++		return c.h3.Close()
++	}
++	if h2, isH2 := c.transport.(*http2.Transport); isH2 {
++		h2.CloseIdleConnections()
++	}
+ 	return nil
+ }
+ 
+@@ -368,10 +425,14 @@ type packetWriter struct {
+ 	ctx      context.Context
+ 	url      url.URL
+ 	maxChunk int
++	interval time.Duration
+ 	buffer   []byte
+ 	seq      int64
+ 	mu       sync.Mutex
++	timer    *time.Timer
++	err      error
+ 	closed   bool
++	onError  func(error)
+ }
+ 
+ func (w *packetWriter) Write(p []byte) (int, error) {
+@@ -380,15 +441,19 @@ func (w *packetWriter) Write(p []byte) (int, error) {
+ 	if w.closed {
+ 		return 0, io.ErrClosedPipe
+ 	}
++	if w.err != nil {
++		return 0, w.err
++	}
+ 	w.buffer = append(w.buffer, p...)
+-	for len(w.buffer) > 0 {
+-		size := len(w.buffer)
+-		if size > w.maxChunk {
+-			size = w.maxChunk
+-		}
+-		if err := w.flushChunk(size); err != nil {
++	if len(w.buffer) >= w.maxChunk {
++		if err := w.flushLocked(); err != nil {
++			w.failLocked(err)
+ 			return 0, err
+ 		}
++		return len(p), nil
++	}
++	if w.timer == nil {
++		w.timer = time.AfterFunc(w.interval, w.flushAsync)
+ 	}
+ 	return len(p), nil
+ }
+@@ -397,42 +462,75 @@ func (w *packetWriter) Close() error {
+ 	w.mu.Lock()
+ 	defer w.mu.Unlock()
+ 	if w.closed {
+-		return nil
++		return w.err
++	}
++	if w.timer != nil {
++		w.timer.Stop()
++		w.timer = nil
+ 	}
+ 	w.closed = true
+ 	if len(w.buffer) > 0 {
+-		return w.flushChunk(len(w.buffer))
++		if err := w.flushLocked(); err != nil {
++			w.failLocked(err)
++		}
+ 	}
+-	return nil
++	return w.err
+ }
+ 
+-func (w *packetWriter) flushChunk(size int) error {
+-	chunk := w.buffer[:size]
+-	w.buffer = w.buffer[size:]
+-
+-	requestURL := w.url
+-	requestURL.Path = appendPath(w.url.Path, strconv.FormatInt(w.seq, 10))
+-	w.seq++
+-
+-	request := &http.Request{
+-		Method:        http.MethodPost,
+-		URL:           &requestURL,
+-		Host:          w.client.host,
+-		Header:        w.client.headers.Clone(),
+-		Body:          io.NopCloser(bytes.NewReader(chunk)),
+-		ContentLength: int64(len(chunk)),
++func (w *packetWriter) flushAsync() {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	w.timer = nil
++	if w.closed || w.err != nil || len(w.buffer) == 0 {
++		return
+ 	}
+-	request = request.WithContext(w.ctx)
+-	w.client.applyPadding(request)
++	if err := w.flushLocked(); err != nil {
++		w.failLocked(err)
++	}
++}
+ 
+-	response, err := w.client.httpClient.Do(request)
+-	if err != nil {
+-		return E.Cause(err, "v2ray-xhttp: upload packet")
++func (w *packetWriter) failLocked(err error) {
++	if w.err == nil {
++		w.err = err
++		if w.onError != nil {
++			go w.onError(err)
++		}
+ 	}
+-	_, _ = io.Copy(io.Discard, response.Body)
+-	_ = response.Body.Close()
+-	if response.StatusCode != http.StatusOK {
+-		return E.New("v2ray-xhttp: unexpected uplink status: ", response.Status)
++}
++
++func (w *packetWriter) flushLocked() error {
++	for len(w.buffer) > 0 {
++		size := len(w.buffer)
++		if size > w.maxChunk {
++			size = w.maxChunk
++		}
++		chunk := w.buffer[:size]
++		w.buffer = w.buffer[size:]
++
++		requestURL := w.url
++		requestURL.Path = appendPath(w.url.Path, strconv.FormatInt(w.seq, 10))
++		w.seq++
++
++		request := &http.Request{
++			Method:        http.MethodPost,
++			URL:           &requestURL,
++			Host:          w.client.host,
++			Header:        w.client.headers.Clone(),
++			Body:          io.NopCloser(bytes.NewReader(chunk)),
++			ContentLength: int64(len(chunk)),
++		}
++		request = request.WithContext(w.ctx)
++		w.client.applyPadding(request)
++
++		response, err := w.client.httpClient.Do(request)
++		if err != nil {
++			return E.Cause(err, "v2ray-xhttp: upload packet")
++		}
++		_, _ = io.Copy(io.Discard, response.Body)
++		_ = response.Body.Close()
++		if response.StatusCode != http.StatusOK {
++			return E.New("v2ray-xhttp: unexpected uplink status: ", response.Status)
++		}
+ 	}
+ 	return nil
+ }
+-- 
+2.34.1
+

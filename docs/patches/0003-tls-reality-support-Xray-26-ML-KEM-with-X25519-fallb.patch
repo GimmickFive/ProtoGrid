@@ -1,0 +1,150 @@
+From eb7a34336c20726307196c56e5cee3412ab4612d Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 06:14:22 +0300
+Subject: [PATCH 03/12] tls/reality: support Xray 26 ML-KEM with X25519
+ fallback
+
+---
+ common/tls/client.go         | 13 ++++++++++
+ common/tls/reality_client.go | 49 +++++++++++++++++++++++++-----------
+ 2 files changed, 47 insertions(+), 15 deletions(-)
+
+diff --git a/common/tls/client.go b/common/tls/client.go
+index 7b30368..c130940 100644
+--- a/common/tls/client.go
++++ b/common/tls/client.go
+@@ -159,6 +159,19 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
+ 	tlsConn, err := aTLS.ClientHandshake(ctx, conn, d.config)
+ 	if err != nil {
+ 		conn.Close()
++		// Xray 26 rejects Reality handshakes without X25519MLKEM768,
++		// while Xray <= 25 only understands plain X25519. Try the legacy
++		// handshake once before giving up.
++		if realityConfig, isReality := d.config.(*RealityClientConfig); isReality && !realityConfig.X25519Only() && ctx.Err() == nil {
++			retryConn, retryErr := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
++			if retryErr == nil {
++				retryTLSConn, retryErr := aTLS.ClientHandshake(ctx, retryConn, realityConfig.CloneX25519Only())
++				if retryErr == nil {
++					return retryTLSConn, nil
++				}
++				retryConn.Close()
++			}
++		}
+ 		var echErr *tls.ECHRejectionError
+ 		if echRetry && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
+ 			if echConfig, isECH := d.config.(ECHCapableConfig); isECH {
+diff --git a/common/tls/reality_client.go b/common/tls/reality_client.go
+index be4806f..3ce2412 100644
+--- a/common/tls/reality_client.go
++++ b/common/tls/reality_client.go
+@@ -23,6 +23,7 @@ import (
+ 	"net"
+ 	"net/http"
+ 	"reflect"
++	"slices"
+ 	"strings"
+ 	"time"
+ 	"unsafe"
+@@ -30,7 +31,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/option"
+-	"github.com/sagernet/sing/common"
+ 	"github.com/sagernet/sing/common/debug"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -50,6 +50,9 @@ type RealityClientConfig struct {
+ 	uClient   *UTLSClientConfig
+ 	publicKey []byte
+ 	shortID   [8]byte
++	// x25519Only is set for the fallback attempt used with servers that do
++	// not understand X25519MLKEM768 (Xray <= 25).
++	x25519Only bool
+ }
+ 
+ func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
+@@ -85,7 +88,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+ 		return nil, E.New("invalid short_id")
+ 	}
+ 
+-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
++	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, false}
+ 	if options.KernelRx || options.KernelTx {
+ 		if !C.IsLinux {
+ 			return nil, E.New("kTLS is only supported on Linux")
+@@ -100,6 +103,16 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+ 	return config, nil
+ }
+ 
++func (e *RealityClientConfig) CloneX25519Only() *RealityClientConfig {
++	clone := *e
++	clone.x25519Only = true
++	return &clone
++}
++
++func (e *RealityClientConfig) X25519Only() bool {
++	return e.x25519Only
++}
++
+ func (e *RealityClientConfig) ServerName() string {
+ 	return e.uClient.ServerName()
+ }
+@@ -146,22 +159,24 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	for _, extension := range uConn.Extensions {
+-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
+-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
+-				return curveID != utls.X25519MLKEM768
+-			})
++	if e.x25519Only {
++		for _, extension := range uConn.Extensions {
++			if curves, ok := extension.(*utls.SupportedCurvesExtension); ok {
++				curves.Curves = slices.DeleteFunc(curves.Curves, func(curveID utls.CurveID) bool {
++					return curveID == utls.X25519MLKEM768
++				})
++			}
++			if keyShares, ok := extension.(*utls.KeyShareExtension); ok {
++				keyShares.KeyShares = slices.DeleteFunc(keyShares.KeyShares, func(share utls.KeyShare) bool {
++					return share.Group == utls.X25519MLKEM768
++				})
++			}
+ 		}
+-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
+-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
+-				return share.Group != utls.X25519MLKEM768
+-			})
++		err = uConn.BuildHandshakeState()
++		if err != nil {
++			return nil, err
+ 		}
+ 	}
+-	err = uConn.BuildHandshakeState()
+-	if err != nil {
+-		return nil, err
+-	}
+ 
+ 	if len(uConfig.NextProtos) > 0 {
+ 		for _, extension := range uConn.Extensions {
+@@ -201,6 +216,9 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+ 		return nil, E.New("nil KeyShareKeys")
+ 	}
+ 	ecdheKey := keyShareKeys.Ecdhe
++	if ecdheKey == nil {
++		ecdheKey = keyShareKeys.MlkemEcdhe
++	}
+ 	if ecdheKey == nil {
+ 		return nil, E.New("nil ecdheKey")
+ 	}
+@@ -280,6 +298,7 @@ func (e *RealityClientConfig) Clone() Config {
+ 		e.uClient.Clone().(*UTLSClientConfig),
+ 		e.publicKey,
+ 		e.shortID,
++		e.x25519Only,
+ 	}
+ }
+ 
+-- 
+2.34.1
+

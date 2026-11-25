@@ -1,0 +1,278 @@
+From b46910b34ea7ebcb0bd53b64742e8ebe4d522d90 Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 08:06:11 +0300
+Subject: [PATCH 11/12] v2rayxhttp: implement separate downloadSettings
+ downlink
+
+---
+ option/v2ray_transport.go      |  26 ++++++--
+ option/v2ray_transport_test.go |   6 +-
+ transport/v2rayxhttp/client.go | 115 +++++++++++++++++++++++++++------
+ 3 files changed, 121 insertions(+), 26 deletions(-)
+
+diff --git a/option/v2ray_transport.go b/option/v2ray_transport.go
+index a91790e..d332608 100644
+--- a/option/v2ray_transport.go
++++ b/option/v2ray_transport.go
+@@ -1,7 +1,6 @@
+ package option
+ 
+ import (
+-	stdjson "encoding/json"
+ 	"reflect"
+ 
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -149,9 +148,28 @@ type V2RayXHTTPOptions struct {
+ 	// Xmux is accepted for Xray compatibility. HTTP/2 and HTTP/3 connection
+ 	// pooling already provides multiplexing.
+ 	Xmux *V2RayXHTTPXmuxOptions `json:"xmux,omitempty"`
+-	// DownloadSettings is accepted for Xray compatibility. The current client
+-	// keeps the downlink on the main server.
+-	DownloadSettings stdjson.RawMessage `json:"download_settings,omitempty"`
++	// DownloadSettings is accepted for Xray compatibility. The download half
++	// may use a separate address, host and path.
++	DownloadSettings *V2RayXHTTPDownloadOptions `json:"download_settings,omitempty"`
++}
++
++type V2RayXHTTPDownloadOptions struct {
++	Address       string                              `json:"address,omitempty"`
++	Port          int                                 `json:"port,omitempty"`
++	Security      string                              `json:"security,omitempty"`
++	TLSSettings   *V2RayXHTTPDownloadTLSOptions       `json:"tls_settings,omitempty"`
++	XHTTPSettings *V2RayXHTTPDownloadTransportOptions `json:"xhttp_settings,omitempty"`
++}
++
++type V2RayXHTTPDownloadTLSOptions struct {
++	ServerName string   `json:"server_name,omitempty"`
++	Insecure   bool     `json:"insecure,omitempty"`
++	ALPN       []string `json:"alpn,omitempty"`
++}
++
++type V2RayXHTTPDownloadTransportOptions struct {
++	Host string `json:"host,omitempty"`
++	Path string `json:"path,omitempty"`
+ }
+ 
+ type V2RayXHTTPXmuxOptions struct {
+diff --git a/option/v2ray_transport_test.go b/option/v2ray_transport_test.go
+index 4eeba18..26f1cac 100644
+--- a/option/v2ray_transport_test.go
++++ b/option/v2ray_transport_test.go
+@@ -21,11 +21,13 @@ func TestV2RayXHTTPOptionsRoundTrip(t *testing.T) {
+ 	require.Equal(t, "1", transport.XHTTPOptions.Headers.Build().Get("X-Test"))
+ 
+ 	xmuxTransport := V2RayTransportOptions{}
+-	err = json.Unmarshal([]byte(`{"type":"xhttp","mode":"packet-up","xmux":{"max_concurrency":8},"download_settings":{"host":"cdn.example.com"}}`), &xmuxTransport)
++	err = json.Unmarshal([]byte(`{"type":"xhttp","mode":"packet-up","xmux":{"max_concurrency":8},"download_settings":{"address":"cdn.example.com","port":443,"xhttp_settings":{"path":"/dl","host":"dl.example.com"}}}`), &xmuxTransport)
+ 	require.NoError(t, err)
+ 	require.NotNil(t, xmuxTransport.XHTTPOptions.Xmux)
+ 	require.Equal(t, 8, xmuxTransport.XHTTPOptions.Xmux.MaxConcurrency)
+-	require.NotEmpty(t, xmuxTransport.XHTTPOptions.DownloadSettings)
++	require.NotNil(t, xmuxTransport.XHTTPOptions.DownloadSettings)
++	require.Equal(t, "cdn.example.com", xmuxTransport.XHTTPOptions.DownloadSettings.Address)
++	require.Equal(t, "/dl", xmuxTransport.XHTTPOptions.DownloadSettings.XHTTPSettings.Path)
+ 
+ 	encoded, err := json.Marshal(transport)
+ 	require.NoError(t, err)
+diff --git a/transport/v2rayxhttp/client.go b/transport/v2rayxhttp/client.go
+index ff77f99..2d53a4d 100644
+--- a/transport/v2rayxhttp/client.go
++++ b/transport/v2rayxhttp/client.go
+@@ -52,6 +52,10 @@ type Client struct {
+ 	transport  http.RoundTripper
+ 	h3         *http3.Transport
+ 	httpClient *http.Client
++
++	downloadURL    *url.URL
++	downloadHost   string
++	downloadClient *http.Client
+ }
+ 
+ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (*Client, error) {
+@@ -151,17 +155,71 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 		}
+ 	}
+ 
++	var downloadURL *url.URL
++	var downloadHost string
++	var downloadClient *http.Client
++	if options.DownloadSettings != nil {
++		if useH3 {
++			return nil, E.New("v2ray-xhttp: download_settings with HTTP/3 is not supported")
++		}
++		download := options.DownloadSettings
++		address := download.Address
++		if address == "" {
++			address = serverAddr.AddrString()
++		}
++		port := uint16(download.Port)
++		if port == 0 {
++			port = serverAddr.Port
++		}
++		downloadTLS := tlsConfig.Clone()
++		if download.TLSSettings != nil {
++			if download.TLSSettings.ServerName != "" {
++				downloadTLS.SetServerName(download.TLSSettings.ServerName)
++			}
++			if len(download.TLSSettings.ALPN) > 0 {
++				downloadTLS.SetNextProtos(download.TLSSettings.ALPN)
++			}
++		}
++		downloadServer := M.ParseSocksaddrHostPort(address, port)
++		downloadDialer := tls.NewDialer(dialer, downloadTLS)
++		downloadClient = &http.Client{Transport: &http2.Transport{
++			DialTLSContext: func(dialCtx context.Context, network string, addr string, cfg *tls.STDConfig) (net.Conn, error) {
++				return downloadDialer.DialTLSContext(adapter.ContextForMultiplexSession(dialCtx), downloadServer)
++			},
++		}}
++		downloadHost = host
++		downloadPath := path
++		if download.XHTTPSettings != nil {
++			if download.XHTTPSettings.Host != "" {
++				downloadHost = download.XHTTPSettings.Host
++			}
++			if download.XHTTPSettings.Path != "" {
++				downloadPath = download.XHTTPSettings.Path
++			}
++		}
++		if !strings.HasPrefix(downloadPath, "/") {
++			downloadPath = "/" + downloadPath
++		}
++		if !strings.HasSuffix(downloadPath, "/") {
++			downloadPath += "/"
++		}
++		downloadURL = &url.URL{Scheme: "https", Host: downloadHost, Path: downloadPath}
++	}
++
+ 	return &Client{
+-		ctx:        ctx,
+-		serverAddr: serverAddr,
+-		options:    options,
+-		baseURL:    baseURL,
+-		host:       host,
+-		headers:    headers,
+-		mode:       mode,
+-		transport:  roundTripper,
+-		h3:         h3Transport,
+-		httpClient: &http.Client{Transport: roundTripper},
++		ctx:            ctx,
++		serverAddr:     serverAddr,
++		options:        options,
++		baseURL:        baseURL,
++		host:           host,
++		headers:        headers,
++		mode:           mode,
++		transport:      roundTripper,
++		h3:             h3Transport,
++		httpClient:     &http.Client{Transport: roundTripper},
++		downloadURL:    downloadURL,
++		downloadHost:   downloadHost,
++		downloadClient: downloadClient,
+ 	}, nil
+ }
+ 
+@@ -223,18 +281,17 @@ func (c *Client) dialStreamOne(ctx context.Context, cancel context.CancelFunc) (
+ func (c *Client) dialStreamUp(ctx context.Context, cancel context.CancelFunc) (net.Conn, error) {
+ 	sessionID := randomSessionID()
+ 
+-	downURL := c.baseURL
+-	downURL.Path = appendPath(c.baseURL.Path, sessionID)
++	downURL, downClient, downHost := c.downlink(sessionID)
+ 	downRequest := &http.Request{
+ 		Method: http.MethodGet,
+ 		URL:    &downURL,
+-		Host:   c.host,
++		Host:   downHost,
+ 		Header: c.headers.Clone(),
+ 	}
+ 	downRequest = downRequest.WithContext(ctx)
+ 	c.applyPadding(downRequest)
+ 
+-	downResponse, err := c.httpClient.Do(downRequest)
++	downResponse, err := downClient.Do(downRequest)
+ 	if err != nil {
+ 		cancel()
+ 		return nil, E.Cause(err, "v2ray-xhttp: open downlink")
+@@ -246,7 +303,8 @@ func (c *Client) dialStreamUp(ctx context.Context, cancel context.CancelFunc) (n
+ 	}
+ 
+ 	reader, writer := io.Pipe()
+-	upURL := downURL
++	upURL := c.baseURL
++	upURL.Path = appendPath(c.baseURL.Path, sessionID)
+ 	upRequest := &http.Request{
+ 		Method:        http.MethodPost,
+ 		URL:           &upURL,
+@@ -290,18 +348,17 @@ func (c *Client) dialStreamUp(ctx context.Context, cancel context.CancelFunc) (n
+ func (c *Client) dialPacketUp(ctx context.Context, cancel context.CancelFunc) (net.Conn, error) {
+ 	sessionID := randomSessionID()
+ 
+-	downURL := c.baseURL
+-	downURL.Path = appendPath(c.baseURL.Path, sessionID)
++	downURL, downClient, downHost := c.downlink(sessionID)
+ 	downRequest := &http.Request{
+ 		Method: http.MethodGet,
+ 		URL:    &downURL,
+-		Host:   c.host,
++		Host:   downHost,
+ 		Header: c.headers.Clone(),
+ 	}
+ 	downRequest = downRequest.WithContext(ctx)
+ 	c.applyPadding(downRequest)
+ 
+-	downResponse, err := c.httpClient.Do(downRequest)
++	downResponse, err := downClient.Do(downRequest)
+ 	if err != nil {
+ 		cancel()
+ 		return nil, E.Cause(err, "v2ray-xhttp: open downlink")
+@@ -316,6 +373,8 @@ func (c *Client) dialPacketUp(ctx context.Context, cancel context.CancelFunc) (n
+ 	if maxChunk <= 0 {
+ 		maxChunk = 1_000_000
+ 	}
++	uploadURL := c.baseURL
++	uploadURL.Path = appendPath(c.baseURL.Path, sessionID)
+ 	intervalMs := c.options.ScMinPostsIntervalMs
+ 	if intervalMs <= 0 {
+ 		intervalMs = 30
+@@ -323,7 +382,7 @@ func (c *Client) dialPacketUp(ctx context.Context, cancel context.CancelFunc) (n
+ 	writer := &packetWriter{
+ 		client:   c,
+ 		ctx:      ctx,
+-		url:      downURL,
++		url:      uploadURL,
+ 		maxChunk: maxChunk,
+ 		interval: time.Duration(intervalMs) * time.Millisecond,
+ 		onError: func(error) {
+@@ -340,6 +399,17 @@ func (c *Client) dialPacketUp(ctx context.Context, cancel context.CancelFunc) (n
+ 	}, nil
+ }
+ 
++func (c *Client) downlink(sessionID string) (url.URL, *http.Client, string) {
++	if c.downloadURL != nil {
++		downURL := *c.downloadURL
++		downURL.Path = appendPath(c.downloadURL.Path, sessionID)
++		return downURL, c.downloadClient, c.downloadHost
++	}
++	downURL := c.baseURL
++	downURL.Path = appendPath(c.baseURL.Path, sessionID)
++	return downURL, c.httpClient, c.host
++}
++
+ func (c *Client) applyPadding(request *http.Request) {
+ 	padding := randomPadding()
+ 	referer := c.baseURL
+@@ -356,6 +426,11 @@ func (c *Client) Close() error {
+ 	if h2, isH2 := c.transport.(*http2.Transport); isH2 {
+ 		h2.CloseIdleConnections()
+ 	}
++	if c.downloadClient != nil {
++		if h2, isH2 := c.downloadClient.Transport.(*http2.Transport); isH2 {
++			h2.CloseIdleConnections()
++		}
++	}
+ 	return nil
+ }
+ 
+-- 
+2.34.1
+

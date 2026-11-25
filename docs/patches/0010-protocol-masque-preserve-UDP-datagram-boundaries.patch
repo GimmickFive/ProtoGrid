@@ -1,0 +1,188 @@
+From 2cbcf6620fd9121424df1df515864cde0def17c8 Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 07:58:06 +0300
+Subject: [PATCH 10/12] protocol/masque: preserve UDP datagram boundaries
+
+---
+ protocol/masque/outbound.go | 129 ++++++++++++++++++++++++++++++------
+ 1 file changed, 107 insertions(+), 22 deletions(-)
+
+diff --git a/protocol/masque/outbound.go b/protocol/masque/outbound.go
+index e8a84a1..82b1b70 100644
+--- a/protocol/masque/outbound.go
++++ b/protocol/masque/outbound.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"net"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -106,7 +107,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		return nil, E.Cause(err, "create MASQUE client")
+ 	}
+ 	return &Outbound{
+-		Adapter:  outbound.NewAdapter(C.TypeMasque, tag, []string{N.NetworkTCP}, nil),
++		Adapter:  outbound.NewAdapter(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
+ 		client:   client,
+ 		dialer:   &masqueDialer{settings: settings},
+ 		ctx:      xrayCtx,
+@@ -117,25 +118,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	switch N.NetworkName(network) {
+ 	case N.NetworkTCP:
+-		return h.dial(ctx, destination, false)
++		return h.dialTCP(ctx, destination)
+ 	case N.NetworkUDP:
+-		conn, err := h.dial(ctx, destination, true)
+-		if err != nil {
+-			return nil, err
+-		}
+-		return conn, nil
++		return h.dialPacketConn(ctx, destination)
+ 	default:
+ 		return nil, E.New("masque: unsupported network: ", network)
+ 	}
+ }
+ 
+-func (h *Outbound) dial(ctx context.Context, destination M.Socksaddr, udp bool) (*masqueConn, error) {
+-	targetNetwork := xnet.Network_TCP
+-	if udp {
+-		targetNetwork = xnet.Network_UDP
+-	}
++func (h *Outbound) dialTCP(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+ 	target := xnet.Destination{
+-		Network: targetNetwork,
++		Network: xnet.Network_TCP,
+ 		Address: xnet.ParseAddress(destination.AddrString()),
+ 		Port:    xnet.Port(destination.Port),
+ 	}
+@@ -169,23 +162,115 @@ type masqueAddr string
+ func (a masqueAddr) Network() string { return "masque" }
+ func (a masqueAddr) String() string  { return string(a) }
+ 
+-func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+-	conn, err := h.dial(ctx, destination, true)
+-	if err != nil {
+-		return nil, err
++// datagramReader turns one channel item into exactly one MultiBuffer, keeping
++// UDP datagram boundaries.
++type datagramReader struct {
++	ch   <-chan []byte
++	done <-chan struct{}
++}
++
++func (r *datagramReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
++	select {
++	case data, ok := <-r.ch:
++		if !ok {
++			return nil, E.New("masque: packet channel closed")
++		}
++		buffer := buf.New()
++		_, _ = buffer.Write(data)
++		return buf.MultiBuffer{buffer}, nil
++	case <-r.done:
++		return nil, E.New("masque: closed")
++	}
++}
++
++type datagramWriter struct {
++	ch   chan<- []byte
++	done <-chan struct{}
++}
++
++func (w *datagramWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
++	defer buf.ReleaseMulti(mb)
++	data := make([]byte, mb.Len())
++	mb.Copy(data)
++	select {
++	case w.ch <- data:
++		return nil
++	case <-w.done:
++		return E.New("masque: closed")
+ 	}
+-	return &masquePacketConn{masqueConn: conn}, nil
+ }
+ 
+ type masquePacketConn struct {
+-	*masqueConn
++	readCh      chan []byte
++	writeCh     chan []byte
++	done        chan struct{}
++	closeOnce   sync.Once
++	destination M.Socksaddr
++}
++
++func (h *Outbound) dialPacketConn(ctx context.Context, destination M.Socksaddr) (*masquePacketConn, error) {
++	target := xnet.Destination{
++		Network: xnet.Network_UDP,
++		Address: xnet.ParseAddress(destination.AddrString()),
++		Port:    xnet.Port(destination.Port),
++	}
++	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{Target: target}})
++	packetConn := &masquePacketConn{
++		readCh:      make(chan []byte, 64),
++		writeCh:     make(chan []byte, 64),
++		done:        make(chan struct{}),
++		destination: destination,
++	}
++	link := &transport.Link{
++		Reader: &datagramReader{ch: packetConn.writeCh, done: packetConn.done},
++		Writer: &datagramWriter{ch: packetConn.readCh, done: packetConn.done},
++	}
++	go func() {
++		_ = h.client.Process(ctx, link, h.dialer)
++		packetConn.Close()
++	}()
++	return packetConn, nil
++}
++
++func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	return h.dialPacketConn(ctx, destination)
+ }
+ 
+ func (c *masquePacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+-	n, err := c.Read(buffer)
+-	return n, c.RemoteAddr(), err
++	select {
++	case data := <-c.readCh:
++		return copy(buffer, data), c.RemoteAddr(), nil
++	case <-c.done:
++		return 0, c.RemoteAddr(), net.ErrClosed
++	}
+ }
+ 
+ func (c *masquePacketConn) WriteTo(buffer []byte, _ net.Addr) (int, error) {
+-	return c.Write(buffer)
++	data := append([]byte(nil), buffer...)
++	select {
++	case c.writeCh <- data:
++		return len(buffer), nil
++	case <-c.done:
++		return 0, net.ErrClosed
++	}
+ }
++
++func (c *masquePacketConn) Read(buffer []byte) (int, error) {
++	n, _, err := c.ReadFrom(buffer)
++	return n, err
++}
++
++func (c *masquePacketConn) Write(buffer []byte) (int, error) {
++	return c.WriteTo(buffer, c.RemoteAddr())
++}
++
++func (c *masquePacketConn) Close() error {
++	c.closeOnce.Do(func() { close(c.done) })
++	return nil
++}
++
++func (c *masquePacketConn) LocalAddr() net.Addr              { return masqueAddr("masque-local") }
++func (c *masquePacketConn) RemoteAddr() net.Addr             { return masqueAddr(c.destination.String()) }
++func (c *masquePacketConn) SetDeadline(time.Time) error      { return nil }
++func (c *masquePacketConn) SetReadDeadline(time.Time) error  { return nil }
++func (c *masquePacketConn) SetWriteDeadline(time.Time) error { return nil }
+-- 
+2.34.1
+

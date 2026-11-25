@@ -1,0 +1,224 @@
+From 7fced0236e7ac39c48a59098e272949afcfa893b Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 05:58:05 +0300
+Subject: [PATCH 02/12] transport/v2rayxhttp: add packet-up mode
+
+---
+ transport/v2rayxhttp/client.go      | 134 ++++++++++++++++++++++++++--
+ transport/v2rayxhttp/client_test.go |   4 +-
+ 2 files changed, 130 insertions(+), 8 deletions(-)
+
+diff --git a/transport/v2rayxhttp/client.go b/transport/v2rayxhttp/client.go
+index 0e7d8dc..5991de5 100644
+--- a/transport/v2rayxhttp/client.go
++++ b/transport/v2rayxhttp/client.go
+@@ -1,6 +1,7 @@
+ package v2rayxhttp
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"crypto/rand"
+ 	"encoding/hex"
+@@ -9,6 +10,7 @@ import (
+ 	"net/http"
+ 	"net/url"
+ 	"slices"
++	"strconv"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -55,9 +57,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ 		// stream-one works with servers configured as auto, stream-one and
+ 		// stream-up (the latter accepts an empty session as stream-one).
+ 		mode = modeStreamOne
+-	case modeStreamOne, modeStreamUp:
+-	case modePacketUp:
+-		return nil, E.New("v2ray-xhttp: packet-up mode is not implemented yet")
++	case modeStreamOne, modeStreamUp, modePacketUp:
+ 	default:
+ 		return nil, E.New("v2ray-xhttp: unknown mode: ", mode)
+ 	}
+@@ -129,10 +129,14 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
+ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ 	requestCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+ 
+-	if c.mode == modeStreamUp {
++	switch c.mode {
++	case modeStreamUp:
+ 		return c.dialStreamUp(requestCtx, cancel)
++	case modePacketUp:
++		return c.dialPacketUp(requestCtx, cancel)
++	default:
++		return c.dialStreamOne(requestCtx, cancel)
+ 	}
+-	return c.dialStreamOne(requestCtx, cancel)
+ }
+ 
+ // dialStreamOne opens a single bidirectional HTTP request. It is the default
+@@ -240,6 +244,50 @@ func (c *Client) dialStreamUp(ctx context.Context, cancel context.CancelFunc) (n
+ 	}, nil
+ }
+ 
++// dialPacketUp opens a long-lived GET for the downlink and uploads data as a
++// sequence of small POST requests. It is slower than stream-up on a direct
++// connection, but works through CDNs that cannot proxy a streaming request
++// body.
++func (c *Client) dialPacketUp(ctx context.Context, cancel context.CancelFunc) (net.Conn, error) {
++	sessionID := randomSessionID()
++
++	downURL := c.baseURL
++	downURL.Path = appendPath(c.baseURL.Path, sessionID)
++	downRequest := &http.Request{
++		Method: http.MethodGet,
++		URL:    &downURL,
++		Host:   c.host,
++		Header: c.headers.Clone(),
++	}
++	downRequest = downRequest.WithContext(ctx)
++	c.applyPadding(downRequest)
++
++	downResponse, err := c.httpClient.Do(downRequest)
++	if err != nil {
++		cancel()
++		return nil, E.Cause(err, "v2ray-xhttp: open downlink")
++	}
++	if downResponse.StatusCode != http.StatusOK {
++		_ = downResponse.Body.Close()
++		cancel()
++		return nil, E.New("v2ray-xhttp: unexpected downlink status: ", downResponse.Status)
++	}
++
++	writer := &packetWriter{
++		client:   c,
++		ctx:      ctx,
++		url:      downURL,
++		maxChunk: 1_000_000,
++	}
++	return &Conn{
++		reader:  downResponse.Body,
++		writer:  writer,
++		local:   fixedAddr{name: "local"},
++		remote:  fixedAddr{name: c.serverAddr.String()},
++		onClose: cancel,
++	}, nil
++}
++
+ func (c *Client) applyPadding(request *http.Request) {
+ 	padding := randomPadding()
+ 	referer := c.baseURL
+@@ -256,7 +304,7 @@ func (c *Client) Close() error {
+ 
+ type Conn struct {
+ 	reader    io.ReadCloser
+-	writer    *io.PipeWriter
++	writer    io.WriteCloser
+ 	local     net.Addr
+ 	remote    net.Addr
+ 	onClose   func()
+@@ -315,6 +363,80 @@ func (a fixedAddr) String() string {
+ 	return a.name
+ }
+ 
++type packetWriter struct {
++	client   *Client
++	ctx      context.Context
++	url      url.URL
++	maxChunk int
++	buffer   []byte
++	seq      int64
++	mu       sync.Mutex
++	closed   bool
++}
++
++func (w *packetWriter) Write(p []byte) (int, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if w.closed {
++		return 0, io.ErrClosedPipe
++	}
++	w.buffer = append(w.buffer, p...)
++	for len(w.buffer) > 0 {
++		size := len(w.buffer)
++		if size > w.maxChunk {
++			size = w.maxChunk
++		}
++		if err := w.flushChunk(size); err != nil {
++			return 0, err
++		}
++	}
++	return len(p), nil
++}
++
++func (w *packetWriter) Close() error {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	if w.closed {
++		return nil
++	}
++	w.closed = true
++	if len(w.buffer) > 0 {
++		return w.flushChunk(len(w.buffer))
++	}
++	return nil
++}
++
++func (w *packetWriter) flushChunk(size int) error {
++	chunk := w.buffer[:size]
++	w.buffer = w.buffer[size:]
++
++	requestURL := w.url
++	requestURL.Path = appendPath(w.url.Path, strconv.FormatInt(w.seq, 10))
++	w.seq++
++
++	request := &http.Request{
++		Method:        http.MethodPost,
++		URL:           &requestURL,
++		Host:          w.client.host,
++		Header:        w.client.headers.Clone(),
++		Body:          io.NopCloser(bytes.NewReader(chunk)),
++		ContentLength: int64(len(chunk)),
++	}
++	request = request.WithContext(w.ctx)
++	w.client.applyPadding(request)
++
++	response, err := w.client.httpClient.Do(request)
++	if err != nil {
++		return E.Cause(err, "v2ray-xhttp: upload packet")
++	}
++	_, _ = io.Copy(io.Discard, response.Body)
++	_ = response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		return E.New("v2ray-xhttp: unexpected uplink status: ", response.Status)
++	}
++	return nil
++}
++
+ func appendPath(path string, value string) string {
+ 	if strings.HasSuffix(path, "/") {
+ 		return path + value
+diff --git a/transport/v2rayxhttp/client_test.go b/transport/v2rayxhttp/client_test.go
+index 9ce6c95..e4527f0 100644
+--- a/transport/v2rayxhttp/client_test.go
++++ b/transport/v2rayxhttp/client_test.go
+@@ -43,7 +43,7 @@ func TestApplyDefaultHeaders(t *testing.T) {
+ 	}
+ }
+ 
+-func TestRejectsPacketUp(t *testing.T) {
++func TestPacketUpRequiresTLS(t *testing.T) {
+ 	t.Parallel()
+ 	_, err := NewClient(
+ 		context.Background(),
+@@ -52,7 +52,7 @@ func TestRejectsPacketUp(t *testing.T) {
+ 		option.V2RayXHTTPOptions{Mode: modePacketUp},
+ 		nil,
+ 	)
+-	if err == nil || !strings.Contains(err.Error(), "packet-up") {
++	if err == nil || !strings.Contains(err.Error(), "TLS") {
+ 		t.Fatalf("unexpected error: %v", err)
+ 	}
+ }
+-- 
+2.34.1
+

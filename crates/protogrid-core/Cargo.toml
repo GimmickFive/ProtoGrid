@@ -1,0 +1,22 @@
+[package]
+name = "protogrid-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core logic for ProtoGrid: share links, subscriptions and config generation for sing-box / Xray"
+
+[dependencies]
+base64 = "0.22"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["net", "time", "rt", "macros"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinInet", "Win32_Foundation"] }
+winreg = "0.52"

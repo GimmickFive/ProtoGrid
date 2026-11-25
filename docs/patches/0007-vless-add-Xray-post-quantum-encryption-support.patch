@@ -1,0 +1,214 @@
+From f2f6fd036197841aaef532b6dca4ba329371fdda Mon Sep 17 00:00:00 2001
+From: ProtoGrid Fork <protogrid@localhost>
+Date: Wed, 25 Nov 2026 06:57:40 +0300
+Subject: [PATCH 07/12] vless: add Xray post-quantum encryption support
+
+---
+ option/vless.go                   |  1 +
+ protocol/vless/encryption.go      | 74 +++++++++++++++++++++++++++++++
+ protocol/vless/encryption_test.go | 25 +++++++++++
+ protocol/vless/outbound.go        | 30 +++++++++++++
+ 4 files changed, 130 insertions(+)
+ create mode 100644 protocol/vless/encryption.go
+ create mode 100644 protocol/vless/encryption_test.go
+
+diff --git a/option/vless.go b/option/vless.go
+index 1f13537..185e593 100644
+--- a/option/vless.go
++++ b/option/vless.go
+@@ -24,4 +24,5 @@ type VLESSOutboundOptions struct {
+ 	Multiplex      *OutboundMultiplexOptions `json:"multiplex,omitempty"`
+ 	Transport      *V2RayTransportOptions    `json:"transport,omitempty"`
+ 	PacketEncoding *string                   `json:"packet_encoding,omitempty"`
++	Encryption     string                    `json:"encryption,omitempty"`
+ }
+diff --git a/protocol/vless/encryption.go b/protocol/vless/encryption.go
+new file mode 100644
+index 0000000..dff68bc
+--- /dev/null
++++ b/protocol/vless/encryption.go
+@@ -0,0 +1,74 @@
++package vless
++
++import (
++	"encoding/base64"
++	"strings"
++
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++type parsedEncryption struct {
++	keys    [][]byte
++	xorMode uint32
++	seconds uint32
++	padding string
++}
++
++// parseEncryption accepts both Xray's full `mlkem768x25519plus...` string and
++// a plain dot-separated key list.
++func parseEncryption(raw string) (*parsedEncryption, error) {
++	if raw == "" || raw == "none" {
++		return nil, nil
++	}
++	parts := strings.Split(raw, ".")
++	parsed := &parsedEncryption{}
++	keyParts := parts
++	if len(parts) >= 4 && parts[0] == "mlkem768x25519plus" {
++		switch parts[1] {
++		case "native":
++		case "xorpub":
++			parsed.xorMode = 1
++		case "random":
++			parsed.xorMode = 2
++		default:
++			return nil, E.New("unknown VLESS encryption xor mode: ", parts[1])
++		}
++		switch parts[2] {
++		case "1rtt":
++		case "0rtt":
++			parsed.seconds = 1
++		default:
++			return nil, E.New("unknown VLESS encryption RTT mode: ", parts[2])
++		}
++		keyParts = parts[3:]
++		paddingLength := 0
++		for _, part := range keyParts {
++			if len(part) < 20 {
++				paddingLength += len(part) + 1
++			}
++		}
++		tail := strings.Join(keyParts, ".")
++		if paddingLength > 0 {
++			if paddingLength > len(tail) {
++				return nil, E.New("invalid VLESS encryption padding")
++			}
++			parsed.padding = tail[:paddingLength-1]
++			tail = tail[paddingLength:]
++		}
++		keyParts = strings.Split(tail, ".")
++	}
++	for _, part := range keyParts {
++		key, err := base64.RawURLEncoding.DecodeString(part)
++		if err != nil {
++			return nil, E.Cause(err, "decode VLESS encryption key")
++		}
++		if len(key) != 32 && len(key) != 1184 {
++			return nil, E.New("invalid VLESS encryption key length: ", len(key))
++		}
++		parsed.keys = append(parsed.keys, key)
++	}
++	if len(parsed.keys) == 0 {
++		return nil, E.New("empty VLESS encryption key list")
++	}
++	return parsed, nil
++}
+diff --git a/protocol/vless/encryption_test.go b/protocol/vless/encryption_test.go
+new file mode 100644
+index 0000000..3bfc6e6
+--- /dev/null
++++ b/protocol/vless/encryption_test.go
+@@ -0,0 +1,25 @@
++package vless
++
++import "testing"
++
++func TestParseEncryption(t *testing.T) {
++	t.Parallel()
++	parsed, err := parseEncryption("mlkem768x25519plus.native.0rtt.L-szld8wMtMX2g8EfuLJiOHmG1Iqei6ZDjSdsSWHPCY")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if parsed == nil || len(parsed.keys) != 1 || len(parsed.keys[0]) != 32 {
++		t.Fatalf("unexpected keys: %+v", parsed)
++	}
++	if parsed.xorMode != 0 || parsed.seconds != 1 {
++		t.Fatalf("unexpected mode: %+v", parsed)
++	}
++}
++
++func TestParseEncryptionNone(t *testing.T) {
++	t.Parallel()
++	parsed, err := parseEncryption("none")
++	if err != nil || parsed != nil {
++		t.Fatalf("unexpected result: %+v %v", parsed, err)
++	}
++}
+diff --git a/protocol/vless/outbound.go b/protocol/vless/outbound.go
+index c0ece0a..9422f0e 100644
+--- a/protocol/vless/outbound.go
++++ b/protocol/vless/outbound.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+ 	N "github.com/sagernet/sing/common/network"
++	xenc "github.com/xtls/xray-core/proxy/vless/encryption"
+ )
+ 
+ func RegisterOutbound(registry *outbound.Registry) {
+@@ -45,6 +46,7 @@ type Outbound struct {
+ 	transport       adapter.V2RayClientTransport
+ 	packetAddr      bool
+ 	xudp            bool
++	encryption      *xenc.ClientInstance
+ }
+ 
+ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
+@@ -96,6 +98,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if options.Encryption != "" && options.Encryption != "none" {
++		parsed, err := parseEncryption(options.Encryption)
++		if err != nil {
++			return nil, err
++		}
++		instance := &xenc.ClientInstance{}
++		if err := instance.Init(parsed.keys, parsed.xorMode, parsed.seconds, parsed.padding); err != nil {
++			return nil, E.Cause(err, "initialize VLESS encryption")
++		}
++		outbound.encryption = instance
++	}
+ 	outbound.multiplexDialer, err = mux.NewClientWithOptions((*vlessDialer)(outbound), logger, common.PtrValueOrDefault(options.Multiplex))
+ 	if err != nil {
+ 		return nil, err
+@@ -185,6 +198,13 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 
+ type vlessDialer Outbound
+ 
++func (h *vlessDialer) wrapEncryption(conn net.Conn) (net.Conn, error) {
++	if h.encryption == nil {
++		return conn, nil
++	}
++	return h.encryption.Handshake(conn)
++}
++
+ func (h *vlessDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	ctx, metadata := adapter.ExtendContext(ctx)
+ 	metadata.Outbound = h.Tag()
+@@ -201,6 +221,11 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	conn, err = h.wrapEncryption(conn)
++	if err != nil {
++		common.Close(conn)
++		return nil, err
++	}
+ 	switch N.NetworkName(network) {
+ 	case N.NetworkTCP:
+ 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
+@@ -244,6 +269,11 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
+ 		common.Close(conn)
+ 		return nil, err
+ 	}
++	conn, err = h.wrapEncryption(conn)
++	if err != nil {
++		common.Close(conn)
++		return nil, err
++	}
+ 	if h.xudp {
+ 		return h.client.DialEarlyXUDPPacketConn(conn, destination)
+ 	} else if h.packetAddr {
+-- 
+2.34.1
+
