@@ -325,6 +325,11 @@ fn xray_outbound(server: &Server, tag: &str) -> Result<Value, String> {
         Protocol::Tuic => return Err("TUIC не поддерживается Xray. Выберите sing-box.".into()),
         Protocol::Masque => unreachable!("handled above"),
     };
+    let mut value = value;
+    if server.transport == Transport::XDrive {
+        // Xray requires mux for the XDRIVE transport.
+        value["mux"] = json!({"enabled": true, "concurrency": 8});
+    }
     Ok(value)
 }
 
@@ -714,6 +719,19 @@ mod tests {
         server.path = "/x".into();
         let config = build_config(&[server], "srv-1", &Settings::default(), &[]).unwrap();
         assert_eq!(config["outbounds"][0]["streamSettings"]["network"], "xhttp");
+    }
+
+    #[test]
+    fn xdrive_enables_mux() {
+        let mut server = sample_server();
+        server.transport = Transport::XDrive;
+        server.security = Security::Tls;
+        server.reality_public_key.clear();
+        server.encryption = "mlkem768x25519plus.native.0rtt.abc".into();
+        let config = build_config(&[server], "srv-1", &Settings::default(), &[]).unwrap();
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["streamSettings"]["network"], "xdrive");
+        assert_eq!(outbound["mux"]["enabled"], true);
     }
 
     #[test]

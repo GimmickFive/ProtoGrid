@@ -124,6 +124,9 @@ fn main() {
             xhttp: true,
             kcp: true,
             xdrive: true,
+            mldsa65: true,
+            masque: true,
+            noise: true,
         },
     )
     .unwrap();

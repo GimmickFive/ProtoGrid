@@ -170,6 +170,8 @@ fn parse_vless(link: &str) -> Result<Server, String> {
             "mldsa65_verify",
             "mldsa65-verify",
             "mldsa65",
+            // Xray 26 share links use `pqv` for the ML-DSA-65 verify key.
+            "pqv",
         ],
     );
     if server.security == Security::Reality && server.fingerprint.is_empty() {
@@ -715,6 +717,20 @@ mod tests {
         assert_eq!(server.transport, Transport::Ws);
         assert_eq!(server.path, "/ws");
         assert_eq!(server.security, Security::Tls);
+    }
+
+    #[test]
+    fn vless_reality_pqv_link() {
+        let server = parse_link(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&encryption=none&fp=chrome&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0&sid=5dea&sni=google.com&pqv=AUPvLj2DprKVWapHtfUpu8apkVo0E7d1Nf2soNGRppUQ#R",
+        )
+        .unwrap();
+        assert_eq!(server.security, Security::Reality);
+        assert_eq!(server.reality_short_id, "5dea");
+        assert_eq!(
+            server.reality_mldsa65_verify,
+            "AUPvLj2DprKVWapHtfUpu8apkVo0E7d1Nf2soNGRppUQ"
+        );
     }
 
     #[test]

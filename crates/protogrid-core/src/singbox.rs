@@ -313,7 +313,7 @@ fn remote_dns(settings: &Settings) -> Value {
     })
 }
 
-fn tls_object(server: &Server) -> Option<Value> {
+fn tls_object(server: &Server, capabilities: CoreCapabilities) -> Option<Value> {
     let forced = matches!(server.protocol, Protocol::Hysteria2 | Protocol::Tuic);
     if server.security == Security::None && !forced {
         return None;
@@ -360,7 +360,7 @@ fn tls_object(server: &Server) -> Option<Value> {
         if !server.reality_short_id.trim().is_empty() {
             reality.insert("short_id".into(), json!(server.reality_short_id.trim()));
         }
-        if !server.reality_mldsa65_verify.trim().is_empty() {
+        if capabilities.mldsa65 && !server.reality_mldsa65_verify.trim().is_empty() {
             reality.insert(
                 "mldsa65_verify".into(),
                 json!(server.reality_mldsa65_verify.trim()),
@@ -485,7 +485,7 @@ fn outbound(server: &Server, capabilities: CoreCapabilities) -> Result<Value, St
     let tag = &server.id;
     let address = server.address.trim();
     let port = server.port;
-    let tls = tls_object(server);
+    let tls = tls_object(server, capabilities);
     let transport = transport_object(server, capabilities)?;
 
     let mut object = match server.protocol {
@@ -623,7 +623,42 @@ fn outbound(server: &Server, capabilities: CoreCapabilities) -> Result<Value, St
     if let Some(transport) = transport {
         object["transport"] = transport;
     }
+    if server.noise_enabled {
+        if !capabilities.noise {
+            return Err(
+                "sing-box без поддержки finalmask noise. Установите форк ProtoGrid или выберите Xray."
+                    .into(),
+            );
+        }
+        object["finalmask"] = noise_object(server);
+    }
     Ok(object)
+}
+
+/// Xray-compatible UDP noise mask. Only the first datagram to each destination
+/// is prefixed with decoy packets (Xray semantics with the default reset).
+fn noise_object(server: &Server) -> Value {
+    let noise_rand = if server.noise_packet.trim().is_empty() {
+        server.noise_rand.trim()
+    } else {
+        "0-0"
+    };
+    json!({
+        "udp": [{
+            "type": "noise",
+            "settings": {
+                "noise": [{
+                    "type": if server.noise_type.trim().is_empty() {
+                        "str"
+                    } else {
+                        server.noise_type.trim()
+                    },
+                    "packet": server.noise_packet,
+                    "rand": noise_rand,
+                }]
+            }
+        }]
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -732,6 +767,99 @@ mod tests {
         server.reality_public_key = "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0".into();
         server.fingerprint = "chrome".into();
         server
+    }
+
+    #[test]
+    fn mldsa65_requires_fork_capability() {
+        let mut server = sample_server();
+        server.reality_mldsa65_verify = "AUPv-test".into();
+        let settings = Settings::default();
+
+        let stock = build_config(
+            &[server.clone()],
+            "srv-1",
+            &settings,
+            &[],
+            Some("1.14.4"),
+            None,
+        )
+        .unwrap();
+        let stock_out = stock["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "srv-1")
+            .unwrap();
+        assert!(stock_out["tls"]["reality"].get("mldsa65_verify").is_none());
+
+        let fork = build_config_with_capabilities(
+            &[server],
+            "srv-1",
+            &settings,
+            &[],
+            Some("1.14.4-protogrid.1"),
+            None,
+            CoreCapabilities {
+                xhttp: true,
+                kcp: true,
+                xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
+            },
+        )
+        .unwrap();
+        let fork_out = fork["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "srv-1")
+            .unwrap();
+        assert_eq!(fork_out["tls"]["reality"]["mldsa65_verify"], "AUPv-test");
+    }
+
+    #[test]
+    fn masque_requires_fork_capability() {
+        let mut server = sample_server();
+        server.protocol = Protocol::Masque;
+        server.security = Security::Tls;
+        server.reality_public_key.clear();
+        let settings = Settings::default();
+
+        let stock = build_config(
+            &[server.clone()],
+            "srv-1",
+            &settings,
+            &[],
+            Some("1.14.4"),
+            None,
+        );
+        assert!(stock.is_err());
+
+        let fork = build_config_with_capabilities(
+            &[server],
+            "srv-1",
+            &settings,
+            &[],
+            Some("1.14.4-protogrid.1"),
+            None,
+            CoreCapabilities {
+                xhttp: true,
+                kcp: true,
+                xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
+            },
+        )
+        .unwrap();
+        let outbound = fork["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "srv-1")
+            .unwrap();
+        assert_eq!(outbound["type"], "masque");
     }
 
     #[test]
@@ -848,6 +976,9 @@ mod tests {
                 xhttp: true,
                 kcp: true,
                 xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
             },
         )
         .unwrap();
@@ -904,6 +1035,54 @@ mod tests {
     }
 
     #[test]
+    fn noise_finalmask_emitted() {
+        let mut server = sample_server();
+        server.security = Security::Tls;
+        server.reality_public_key.clear();
+        server.noise_enabled = true;
+        server.noise_packet = "abcd".into();
+        let capabilities = CoreCapabilities {
+            noise: true,
+            ..Default::default()
+        };
+        let config = build_config_with_capabilities(
+            &[server.clone()],
+            "srv-1",
+            &Settings::default(),
+            &[],
+            Some("1.14.4-protogrid.1"),
+            None,
+            capabilities,
+        )
+        .unwrap();
+        let outbound = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "srv-1")
+            .unwrap();
+        assert_eq!(outbound["finalmask"]["udp"][0]["type"], "noise");
+        assert_eq!(
+            outbound["finalmask"]["udp"][0]["settings"]["noise"][0]["packet"],
+            "abcd"
+        );
+        assert_eq!(
+            outbound["finalmask"]["udp"][0]["settings"]["noise"][0]["rand"],
+            "0-0"
+        );
+
+        assert!(build_config(
+            &[server],
+            "srv-1",
+            &Settings::default(),
+            &[],
+            Some("1.14.4"),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
     fn masque_singbox_outbound() {
         let mut server = sample_server();
         server.protocol = Protocol::Masque;
@@ -912,8 +1091,23 @@ mod tests {
         server.masque_user = "user".into();
         server.masque_pass = "pass".into();
         server.pinned_peer_cert_sha256 = "abcd".into();
-        let config =
-            build_config(&[server], "srv-1", &Settings::default(), &[], None, None).unwrap();
+        let config = build_config_with_capabilities(
+            &[server],
+            "srv-1",
+            &Settings::default(),
+            &[],
+            Some("1.14.4-protogrid.1"),
+            None,
+            CoreCapabilities {
+                xhttp: true,
+                kcp: true,
+                xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
+            },
+        )
+        .unwrap();
         let outbound = config["outbounds"]
             .as_array()
             .unwrap()
@@ -956,6 +1150,9 @@ mod tests {
                 xhttp: true,
                 kcp: true,
                 xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
             },
         )
         .unwrap();
@@ -1000,6 +1197,9 @@ mod tests {
                 xhttp: true,
                 kcp: true,
                 xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
             },
         )
         .unwrap();
@@ -1037,6 +1237,9 @@ mod tests {
                 xhttp: true,
                 kcp: true,
                 xdrive: true,
+                mldsa65: true,
+                masque: true,
+                noise: true,
             },
         )
         .unwrap();

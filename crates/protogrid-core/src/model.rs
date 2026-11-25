@@ -37,7 +37,7 @@ impl Protocol {
 
     pub fn supports(self, core: CoreKind) -> bool {
         match core {
-            CoreKind::Singbox => true,
+            CoreKind::Singbox | CoreKind::Protogrid => true,
             CoreKind::Xray => matches!(
                 self,
                 Protocol::Vless
@@ -75,11 +75,15 @@ pub enum Transport {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum CoreKind {
-    #[default]
     #[serde(rename = "singbox")]
     Singbox,
     #[serde(rename = "xray")]
     Xray,
+    /// The ProtoGrid sing-box fork: a separate core with its own binary,
+    /// path and capabilities (XHTTP, mKCP, XDRIVE, MASQUE).
+    #[default]
+    #[serde(rename = "protogrid")]
+    Protogrid,
 }
 
 impl CoreKind {
@@ -87,14 +91,21 @@ impl CoreKind {
         match self {
             CoreKind::Singbox => "sing-box",
             CoreKind::Xray => "Xray",
+            CoreKind::Protogrid => "ProtoGrid",
         }
     }
 
     pub fn binary_name(self) -> &'static str {
         match self {
-            CoreKind::Singbox => "sing-box",
+            CoreKind::Singbox | CoreKind::Protogrid => "sing-box",
             CoreKind::Xray => "xray",
         }
+    }
+
+    /// The ProtoGrid fork speaks the sing-box config language. Everything that
+    /// is true for sing-box (ports, TUN, config generation) is true for it too.
+    pub fn is_singbox_like(self) -> bool {
+        matches!(self, CoreKind::Singbox | CoreKind::Protogrid)
     }
 }
 
@@ -107,6 +118,13 @@ pub struct CoreCapabilities {
     pub xhttp: bool,
     pub kcp: bool,
     pub xdrive: bool,
+    /// REALITY ML-DSA-65 server verification (Xray 26 / ProtoGrid fork).
+    /// Stock sing-box rejects the `mldsa65_verify` option.
+    pub mldsa65: bool,
+    /// MASQUE outbound (Xray / ProtoGrid fork). Stock sing-box has no such protocol.
+    pub masque: bool,
+    /// Xray-compatible UDP finalmask noise (ProtoGrid fork / Xray).
+    pub noise: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -404,20 +422,31 @@ impl Server {
         {
             return Err("Reality поддерживается только для VLESS и VMess".into());
         }
-        if self.transport == Transport::Xhttp && core == CoreKind::Singbox && !capabilities.xhttp {
+        if self.transport == Transport::Xhttp && core.is_singbox_like() && !capabilities.xhttp {
             return Err(
                 "транспорт XHTTP требует sing-box с поддержкой XHTTP (ProtoGrid fork)".into(),
             );
         }
-        if self.transport == Transport::Kcp && core == CoreKind::Singbox && !capabilities.kcp {
+        if self.transport == Transport::Kcp && core.is_singbox_like() && !capabilities.kcp {
             return Err(
                 "транспорт mKCP требует sing-box с поддержкой mKCP (ProtoGrid fork)".into(),
             );
         }
-        if self.transport == Transport::XDrive && core == CoreKind::Singbox && !capabilities.xdrive
-        {
+        if self.transport == Transport::XDrive && core.is_singbox_like() && !capabilities.xdrive {
             return Err(
                 "транспорт XDRIVE требует sing-box с поддержкой XDRIVE (ProtoGrid fork)".into(),
+            );
+        }
+        if self.protocol == Protocol::Masque && core.is_singbox_like() && !capabilities.masque {
+            return Err(
+                "протокол MASQUE требует sing-box с поддержкой MASQUE (ProtoGrid fork) или Xray"
+                    .into(),
+            );
+        }
+        if self.noise_enabled && core.is_singbox_like() && !capabilities.noise {
+            return Err(
+                "UDP noise требует sing-box с поддержкой finalmask (ProtoGrid fork) или Xray"
+                    .into(),
             );
         }
         if self.transport == Transport::Http && core == CoreKind::Xray {
@@ -507,12 +536,14 @@ pub struct Settings {
     pub fake_dns: bool,
     pub singbox_path: String,
     pub xray_path: String,
+    /// Path to the ProtoGrid sing-box fork. Kept separate from `singbox_path`.
+    pub protogrid_path: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            core: CoreKind::Singbox,
+            core: CoreKind::Protogrid,
             tun_enabled: false,
             system_proxy: true,
             mixed_port: 2080,
@@ -532,6 +563,7 @@ impl Default for Settings {
             fake_dns: false,
             singbox_path: String::new(),
             xray_path: String::new(),
+            protogrid_path: String::new(),
         }
     }
 }
@@ -540,14 +572,14 @@ impl Settings {
     /// HTTP port that clients (and the system proxy) should use.
     pub fn effective_http_port(&self) -> u16 {
         match self.core {
-            CoreKind::Singbox => self.mixed_port,
+            CoreKind::Singbox | CoreKind::Protogrid => self.mixed_port,
             CoreKind::Xray => self.http_port,
         }
     }
 
     pub fn effective_socks_port(&self) -> u16 {
         match self.core {
-            CoreKind::Singbox => self.mixed_port,
+            CoreKind::Singbox | CoreKind::Protogrid => self.mixed_port,
             CoreKind::Xray => self.socks_port,
         }
     }
@@ -556,6 +588,7 @@ impl Settings {
         match self.core {
             CoreKind::Singbox => &self.singbox_path,
             CoreKind::Xray => &self.xray_path,
+            CoreKind::Protogrid => &self.protogrid_path,
         }
     }
 
@@ -589,6 +622,7 @@ impl Settings {
         }
         self.singbox_path = self.singbox_path.trim().to_string();
         self.xray_path = self.xray_path.trim().to_string();
+        self.protogrid_path = self.protogrid_path.trim().to_string();
     }
 
     /// Fields that require a core restart when changed.
@@ -605,6 +639,7 @@ impl Settings {
             && self.log_level == other.log_level
             && self.singbox_path == other.singbox_path
             && self.xray_path == other.xray_path
+            && self.protogrid_path == other.protogrid_path
             && self.final_action == other.final_action
             && self.auto_select == other.auto_select
             && self.fake_dns == other.fake_dns
@@ -731,7 +766,8 @@ pub fn default_rules() -> Vec<RoutingRule> {
 
 pub fn routing_preset(name: &str) -> Option<(Vec<RoutingRule>, RuleAction)> {
     match name {
-        "smart" => Some((default_rules(), RuleAction::Proxy)),
+        // The UI calls the smart-bypass preset "bypass"; older callers use "smart".
+        "smart" | "bypass" => Some((default_rules(), RuleAction::Proxy)),
         "global" => Some((
             vec![RoutingRule {
                 id: "preset-private-ip".into(),
@@ -745,5 +781,20 @@ pub fn routing_preset(name: &str) -> Option<(Vec<RoutingRule>, RuleAction)> {
         )),
         "direct" => Some((Vec::new(), RuleAction::Direct)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_preset_accepts_ui_ids() {
+        for id in ["bypass", "smart", "global", "direct"] {
+            assert!(routing_preset(id).is_some(), "preset {id} must resolve");
+        }
+        assert_eq!(routing_preset("bypass").unwrap().1, RuleAction::Proxy);
+        assert_eq!(routing_preset("direct").unwrap().0.len(), 0);
+        assert!(routing_preset("unknown").is_none());
     }
 }
