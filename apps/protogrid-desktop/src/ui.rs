@@ -315,6 +315,34 @@ fn medium_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("Medium".into()))
 }
 
+/// Equal-width grid that always spans the full available width.
+///
+/// `ui.columns` keeps the outer item spacing out of the last column, which
+/// leaves card grids a few pixels short of the content edge. This helper
+/// measures the columns explicitly and inserts the gaps itself.
+fn card_grid(ui: &mut Ui, columns: usize, gap: f32, mut add: impl FnMut(&mut Ui, usize)) {
+    if columns == 0 {
+        return;
+    }
+    let available = ui.available_width();
+    let width = ((available - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
+    let inherited_spacing = ui.spacing().item_spacing;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for index in 0..columns {
+            if index > 0 {
+                ui.add_space(gap);
+            }
+            ui.allocate_ui_with_layout(Vec2::new(width, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing = inherited_spacing;
+                ui.set_min_width(width);
+                ui.set_max_width(width);
+                add(ui, index);
+            });
+        }
+    });
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum BtnKind {
     Primary,
@@ -1636,10 +1664,9 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
         .and_then(|server| snapshot.pings.get(&server.id).copied().flatten())
         .unwrap_or(0);
 
-    ui.spacing_mut().item_spacing.x = 14.0;
-    ui.columns(4, |columns| {
-        stat_card(
-            &mut columns[0],
+    card_grid(ui, 4, 14.0, |ui, index| match index {
+        0 => stat_card(
+            ui,
             p,
             egui_phosphor::regular::ARROW_DOWN,
             "Входящий",
@@ -1650,9 +1677,9 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             &down_values,
             p.accent_2,
             p.accent_soft,
-        );
-        stat_card(
-            &mut columns[1],
+        ),
+        1 => stat_card(
+            ui,
             p,
             egui_phosphor::regular::ARROW_UP,
             "Исходящий",
@@ -1663,9 +1690,9 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             &up_values,
             p.cyan,
             p.cyan_soft,
-        );
-        stat_card(
-            &mut columns[2],
+        ),
+        2 => stat_card(
+            ui,
             p,
             egui_phosphor::regular::ACTIVITY,
             "Задержка",
@@ -1678,9 +1705,9 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             &ping_values,
             p.green,
             p.green_soft,
-        );
-        stat_card(
-            &mut columns[3],
+        ),
+        _ => stat_card(
+            ui,
             p,
             egui_phosphor::regular::WIFI_HIGH,
             "Соединения",
@@ -1695,20 +1722,28 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             &conn_values,
             p.violet,
             p.violet_soft,
-        );
+        ),
     });
     ui.add_space(14.0);
 
     let available = ui.available_width();
     let gap = 14.0;
     let left = (available - gap) * 0.618;
-    let right = (available - gap - left).max(280.0);
+    let right = available - gap - left;
+    let inherited_spacing = ui.spacing().item_spacing;
     ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         ui.allocate_ui_with_layout(Vec2::new(left, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing = inherited_spacing;
+            ui.set_min_width(left);
+            ui.set_max_width(left);
             speed_card(ui, p, view, snapshot, engine, &points);
         });
         ui.add_space(gap);
         ui.allocate_ui_with_layout(Vec2::new(right, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing = inherited_spacing;
+            ui.set_min_width(right);
+            ui.set_max_width(right);
             route_card(ui, p, view, snapshot);
         });
     });
@@ -1829,34 +1864,33 @@ fn speed_card(
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0, p.line);
             ui.add_space(10.0);
-            ui.columns(3, |columns| {
-                let avg_up = if points.is_empty() {
-                    0.0
-                } else {
-                    points.iter().map(|point| point.up).sum::<f32>() / points.len() as f32
-                };
-                let avg_down = if points.is_empty() {
-                    0.0
-                } else {
-                    points.iter().map(|point| point.down).sum::<f32>() / points.len() as f32
-                };
-                let texts = [
-                    ("Получено", bytes_f(view.totals.down)),
-                    ("Отправлено", bytes_f(view.totals.up)),
-                    (
-                        "Средняя скорость",
-                        format!("↑ {}  ↓ {}", rate_plain(avg_up), rate_plain(avg_down)),
-                    ),
-                ];
-                for (index, (label, value)) in texts.iter().enumerate() {
-                    columns[index].label(
-                        RichText::new(label.to_uppercase())
-                            .size(9.5)
-                            .color(p.faint)
-                            .family(FontFamily::Name("Medium".into())),
-                    );
-                    columns[index].label(theme::semibold(value, 14.0));
-                }
+            let avg_up = if points.is_empty() {
+                0.0
+            } else {
+                points.iter().map(|point| point.up).sum::<f32>() / points.len() as f32
+            };
+            let avg_down = if points.is_empty() {
+                0.0
+            } else {
+                points.iter().map(|point| point.down).sum::<f32>() / points.len() as f32
+            };
+            let texts = [
+                ("Получено", bytes_f(view.totals.down)),
+                ("Отправлено", bytes_f(view.totals.up)),
+                (
+                    "Средняя скорость",
+                    format!("↑ {}  ↓ {}", rate_plain(avg_up), rate_plain(avg_down)),
+                ),
+            ];
+            card_grid(ui, 3, 16.0, |ui, index| {
+                let (label, value) = &texts[index];
+                ui.label(
+                    RichText::new(label.to_uppercase())
+                        .size(9.5)
+                        .color(p.faint)
+                        .family(FontFamily::Name("Medium".into())),
+                );
+                ui.label(theme::semibold(value, 14.0));
             });
             ui.add_space(14.0);
             let _ = snapshot;
@@ -1988,83 +2022,73 @@ fn info_card(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
         .inner_margin(Margin::symmetric(18, 15))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.columns(4, |columns| {
-                info_cell(
-                    &mut columns[0],
-                    p,
-                    "Сессия",
-                    &snapshot
-                        .connected_at
-                        .map(|start| uptime(now_ms() - start))
-                        .unwrap_or_else(|| "—".into()),
-                    "с момента подключения",
-                );
-                let server = snapshot.active_server();
-                let name = server
-                    .map(|server| server.display_name().to_string())
-                    .unwrap_or_else(|| "Сервер не выбран".into());
-                let meta = server
-                    .map(|server| {
-                        format!(
-                            "{} · {} · {}",
-                            protocol_name(server.protocol),
-                            security_short(server.security),
-                            server_target(server)
-                        )
-                    })
-                    .unwrap_or_else(|| "Добавьте подключение".into());
-                info_cell(&mut columns[1], p, "Активный сервер", &name, &meta);
-                let settings = &snapshot.config.settings;
-                let ports = match settings.core {
-                    CoreKind::Singbox => format!("mixed:{}", settings.mixed_port),
-                    CoreKind::Xray => format!(
-                        "socks:{} · http:{}",
-                        settings.socks_port, settings.http_port
-                    ),
-                };
-                info_cell(
-                    &mut columns[2],
-                    p,
-                    "Локально",
-                    &ports,
-                    &format!(
-                        "LAN: {} · TUN: {}",
-                        if settings.allow_lan {
-                            "вкл"
-                        } else {
-                            "нет"
-                        },
-                        if settings.tun_enabled {
-                            "вкл"
-                        } else {
-                            "нет"
-                        }
-                    ),
-                );
-                let core = snapshot.core(settings.core);
-                info_cell(
-                    &mut columns[3],
-                    p,
-                    "Ядро",
-                    &format!(
-                        "{} {}",
-                        settings.core.name(),
-                        core.and_then(|core| core.version.clone())
-                            .unwrap_or_default()
-                    ),
-                    &format!(
-                        "{}маршрутизация: {}",
-                        snapshot
-                            .pid
-                            .map(|pid| format!("PID {pid} · "))
-                            .unwrap_or_default(),
-                        match settings.final_action {
-                            RuleAction::Proxy => "через прокси",
-                            RuleAction::Direct => "напрямую",
-                            RuleAction::Block => "блокировка",
-                        }
-                    ),
-                );
+            let session = snapshot
+                .connected_at
+                .map(|start| uptime(now_ms() - start))
+                .unwrap_or_else(|| "—".into());
+            let server = snapshot.active_server();
+            let name = server
+                .map(|server| server.display_name().to_string())
+                .unwrap_or_else(|| "Сервер не выбран".into());
+            let meta = server
+                .map(|server| {
+                    format!(
+                        "{} · {} · {}",
+                        protocol_name(server.protocol),
+                        security_short(server.security),
+                        server_target(server)
+                    )
+                })
+                .unwrap_or_else(|| "Добавьте подключение".into());
+            let settings = &snapshot.config.settings;
+            let ports = match settings.core {
+                CoreKind::Singbox => format!("mixed:{}", settings.mixed_port),
+                CoreKind::Xray => format!(
+                    "socks:{} · http:{}",
+                    settings.socks_port, settings.http_port
+                ),
+            };
+            let lan_tun = format!(
+                "LAN: {} · TUN: {}",
+                if settings.allow_lan {
+                    "вкл"
+                } else {
+                    "нет"
+                },
+                if settings.tun_enabled {
+                    "вкл"
+                } else {
+                    "нет"
+                }
+            );
+            let core = snapshot.core(settings.core);
+            let core_value = format!(
+                "{} {}",
+                settings.core.name(),
+                core.and_then(|core| core.version.clone())
+                    .unwrap_or_default()
+            );
+            let core_hint = format!(
+                "{}маршрутизация: {}",
+                snapshot
+                    .pid
+                    .map(|pid| format!("PID {pid} · "))
+                    .unwrap_or_default(),
+                match settings.final_action {
+                    RuleAction::Proxy => "через прокси",
+                    RuleAction::Direct => "напрямую",
+                    RuleAction::Block => "блокировка",
+                }
+            );
+            let cells = [
+                ("Сессия", session.as_str(), "с момента подключения"),
+                ("Активный сервер", name.as_str(), meta.as_str()),
+                ("Локально", ports.as_str(), lan_tun.as_str()),
+                ("Ядро", core_value.as_str(), core_hint.as_str()),
+            ];
+            card_grid(ui, 4, 0.0, |ui, index| {
+                let (label, value, hint) = cells[index];
+                info_cell(ui, p, label, value, hint);
             });
             let _ = engine;
         });
@@ -2859,14 +2883,10 @@ fn subscriptions_page(
         return;
     }
 
-    ui.spacing_mut().item_spacing.x = 14.0;
     for pair in subs.chunks(3) {
-        ui.columns(3, |columns| {
-            for (index, sub) in pair.iter().enumerate() {
-                subscription_card(&mut columns[index], p, view, snapshot, engine, sub);
-            }
-            for empty in pair.len()..3 {
-                let _ = columns[empty].allocate_space(Vec2::ZERO);
+        card_grid(ui, 3, 14.0, |ui, index| {
+            if let Some(sub) = pair.get(index) {
+                subscription_card(ui, p, view, snapshot, engine, sub);
             }
         });
         ui.add_space(14.0);
@@ -2969,8 +2989,8 @@ fn subscription_card(
                     );
                 });
             });
+            ui.add_space(8.0);
             if let Some(error) = &sub.last_error {
-                ui.add_space(8.0);
                 ui.add(
                     egui::Label::new(
                         RichText::new(format!("{}  {error}", egui_phosphor::regular::WARNING))
@@ -2979,8 +2999,10 @@ fn subscription_card(
                     )
                     .truncate(),
                 );
+            } else {
+                ui.add_space(19.0);
             }
-            ui.add_space(13.0);
+            ui.add_space(5.0);
             let info = sub.userinfo.as_ref();
             let used = info.map(|info| info.used()).unwrap_or(0);
             let total = info.map(|info| info.total).unwrap_or(0);
@@ -2989,23 +3011,18 @@ fn subscription_card(
             } else {
                 0
             };
-            ui.spacing_mut().item_spacing.x = 7.0;
-            ui.columns(3, |columns| {
-                mini_box(&mut columns[0], p, "Серверы", &servers.to_string());
-                mini_box(
-                    &mut columns[1],
-                    p,
-                    "Трафик",
-                    &if used > 0 { bytes(used) } else { "—".into() },
-                );
-                mini_box(
-                    &mut columns[2],
-                    p,
-                    "Срок",
-                    &info
-                        .map(|info| date(info.expire))
-                        .unwrap_or_else(|| "—".into()),
-                );
+            let traffic = if used > 0 { bytes(used) } else { "—".into() };
+            let expires = info
+                .map(|info| date(info.expire))
+                .unwrap_or_else(|| "—".into());
+            let boxes = [
+                ("Серверы", servers.to_string()),
+                ("Трафик", traffic),
+                ("Срок", expires),
+            ];
+            card_grid(ui, 3, 7.0, |ui, index| {
+                let (label, value) = &boxes[index];
+                mini_box(ui, p, label, value);
             });
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -3137,35 +3154,22 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
         },
     );
 
-    ui.spacing_mut().item_spacing.x = 12.0;
-    ui.columns(3, |columns| {
-        preset_card(
-            &mut columns[0],
-            p,
-            "bypass",
-            "Обход РФ",
-            "Российские сайты напрямую, остальное — через прокси",
-            snapshot,
-            engine,
-        );
-        preset_card(
-            &mut columns[1],
-            p,
-            "global",
-            "Глобальный прокси",
-            "Весь трафик идёт через выбранный сервер",
-            snapshot,
-            engine,
-        );
-        preset_card(
-            &mut columns[2],
-            p,
-            "direct",
-            "Прямой",
-            "Прокси отключён, правила игнорируются",
-            snapshot,
-            engine,
-        );
+    card_grid(ui, 3, 12.0, |ui, index| {
+        let presets = [
+            (
+                "bypass",
+                "Обход РФ",
+                "Российские сайты напрямую, остальное — через прокси",
+            ),
+            (
+                "global",
+                "Глобальный прокси",
+                "Весь трафик идёт через выбранный сервер",
+            ),
+            ("direct", "Прямой", "Прокси отключён, правила игнорируются"),
+        ];
+        let (id, title, text) = presets[index];
+        preset_card(ui, p, id, title, text, snapshot, engine);
     });
     ui.add_space(14.0);
 
@@ -3286,44 +3290,50 @@ fn preset_card(
                 && snapshot.config.rules.len() > 1
         }
     };
-    Frame::new()
-        .fill(if active { p.accent_soft } else { p.panel })
-        .stroke(Stroke::new(1.0, if active { p.accent } else { p.line }))
-        .corner_radius(12)
-        .inner_margin(Margin::same(15))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            let response = ui
-                .horizontal(|ui| {
-                    let (radio, _) = ui.allocate_exact_size(Vec2::splat(19.0), Sense::hover());
-                    ui.painter().circle_stroke(
-                        radio.center(),
-                        9.0,
-                        Stroke::new(1.5, if active { p.accent } else { p.line_strong }),
-                    );
-                    if active {
-                        ui.painter().circle_filled(radio.center(), 5.0, p.accent);
-                    }
-                    ui.vertical(|ui| {
-                        ui.label(theme::semibold(title, 13.0));
-                        ui.label(RichText::new(text).size(11.0).color(p.faint));
-                    });
-                    if active {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(egui_phosphor::regular::CHECK)
-                                    .size(14.0)
-                                    .color(p.accent_2),
-                            );
-                        });
-                    }
-                })
-                .response;
-            let response = ui.interact(response.rect, ui.id().with(("preset", id)), Sense::click());
-            if response.clicked() {
-                engine.apply_routing_preset(id);
-            }
-        });
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 82.0), Sense::click());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(12),
+        if active { p.accent_soft } else { p.panel },
+        Stroke::new(1.0, if active { p.accent } else { p.line }),
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink(15.0);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = 12.0;
+    let (radio, _) = child.allocate_exact_size(Vec2::splat(19.0), Sense::hover());
+    if active {
+        child.painter().circle_filled(radio.center(), 9.5, p.accent);
+        child.painter().text(
+            radio.center(),
+            Align2::CENTER_CENTER,
+            egui_phosphor::regular::CHECK,
+            FontId::new(11.0, FontFamily::Proportional),
+            Color32::WHITE,
+        );
+    } else {
+        child
+            .painter()
+            .circle_stroke(radio.center(), 9.0, Stroke::new(1.5, p.line_strong));
+    }
+    let remaining = child.available_width();
+    child.allocate_ui_with_layout(
+        Vec2::new(remaining, 0.0),
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.set_max_width(remaining);
+            ui.label(theme::semibold(title, 13.0));
+            ui.label(RichText::new(text).size(11.0).color(p.faint));
+        },
+    );
+    if response.clicked() {
+        engine.apply_routing_preset(id);
+    }
 }
 
 fn rules_header(ui: &mut Ui, p: &Palette) {
@@ -3525,40 +3535,32 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
         })
         .fold(0.0_f32, f32::max);
 
-    ui.spacing_mut().item_spacing.x = 12.0;
-    ui.columns(4, |columns| {
-        mini_stat(
-            &mut columns[0],
+    card_grid(ui, 4, 12.0, |ui, index| match index {
+        0 => mini_stat(
+            ui,
             p,
             "Через прокси",
             &bytes_f(proxy_total),
             "за сеанс",
             None,
-        );
-        mini_stat(
-            &mut columns[1],
-            p,
-            "Напрямую",
-            &bytes_f(direct_total),
-            "за сеанс",
-            None,
-        );
-        mini_stat(
-            &mut columns[2],
+        ),
+        1 => mini_stat(ui, p, "Напрямую", &bytes_f(direct_total), "за сеанс", None),
+        2 => mini_stat(
+            ui,
             p,
             "Доля прокси",
             &format!("{share}%"),
             "",
             Some((share, p.accent)),
-        );
-        mini_stat(
-            &mut columns[3],
+        ),
+        _ => mini_stat(
+            ui,
             p,
             "Пиковая скорость",
             &rate_plain(peak),
             &format!("за {}", range_label(view.chart_range)),
             None,
-        );
+        ),
     });
     ui.add_space(14.0);
 
@@ -3620,11 +3622,11 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0, p.line);
             ui.add_space(10.0);
-            ui.columns(4, |columns| {
-                let proxy = view.totals.proxy_down + view.totals.proxy_up;
-                let direct = view.totals.direct_down + view.totals.direct_up;
-                chart_foot(
-                    &mut columns[0],
+            let proxy = view.totals.proxy_down + view.totals.proxy_up;
+            let direct = view.totals.direct_down + view.totals.direct_up;
+            card_grid(ui, 4, 14.0, |ui, index| match index {
+                0 => chart_foot(
+                    ui,
                     p,
                     "Прокси ↓ / ↑",
                     &format!(
@@ -3632,9 +3634,9 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
                         bytes_f(view.totals.proxy_down),
                         bytes_f(view.totals.proxy_up)
                     ),
-                );
-                chart_foot(
-                    &mut columns[1],
+                ),
+                1 => chart_foot(
+                    ui,
                     p,
                     "Напрямую ↓ / ↑",
                     &format!(
@@ -3642,14 +3644,9 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
                         bytes_f(view.totals.direct_down),
                         bytes_f(view.totals.direct_up)
                     ),
-                );
-                chart_foot(
-                    &mut columns[2],
-                    p,
-                    "Всего за сеанс",
-                    &bytes_f(proxy + direct),
-                );
-                chart_foot(&mut columns[3], p, "Доля прокси", &format!("{share}%"));
+                ),
+                2 => chart_foot(ui, p, "Всего за сеанс", &bytes_f(proxy + direct)),
+                _ => chart_foot(ui, p, "Доля прокси", &format!("{share}%")),
             });
             let _ = snapshot;
         });
@@ -4106,14 +4103,20 @@ fn settings_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
     }
 
     ui.spacing_mut().item_spacing.x = 14.0;
-    ui.columns(2, |columns| {
-        settings_connection(&mut columns[0], p, view, snapshot, engine, &mut draft);
-        settings_interface(&mut columns[1], p, view, snapshot, engine, &mut draft);
+    card_grid(ui, 2, 14.0, |ui, index| {
+        if index == 0 {
+            settings_connection(ui, p, view, snapshot, engine, &mut draft);
+        } else {
+            settings_interface(ui, p, view, snapshot, engine, &mut draft);
+        }
     });
     ui.add_space(14.0);
-    ui.columns(2, |columns| {
-        settings_dns(&mut columns[0], p, view, snapshot, &mut draft);
-        settings_core(&mut columns[1], p, view, snapshot, engine, &mut draft);
+    card_grid(ui, 2, 14.0, |ui, index| {
+        if index == 0 {
+            settings_dns(ui, p, view, snapshot, &mut draft);
+        } else {
+            settings_core(ui, p, view, snapshot, engine, &mut draft);
+        }
     });
     ui.add_space(14.0);
     settings_about(ui, p, snapshot, engine);
@@ -4491,9 +4494,12 @@ fn settings_core(
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.spacing_mut().item_spacing.x = 8.0;
-                ui.columns(2, |columns| {
-                    core_option(&mut columns[0], p, snapshot, CoreKind::Singbox, draft);
-                    core_option(&mut columns[1], p, snapshot, CoreKind::Xray, draft);
+                card_grid(ui, 2, 8.0, |ui, index| {
+                    if index == 0 {
+                        core_option(ui, p, snapshot, CoreKind::Singbox, draft);
+                    } else {
+                        core_option(ui, p, snapshot, CoreKind::Xray, draft);
+                    }
                 });
             });
         let (line, _) =
@@ -4627,67 +4633,73 @@ fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine
                 .inner_margin(Margin::symmetric(18, 14))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.columns(3, |columns| {
-                        columns[0].label(
-                            RichText::new("Версия")
-                                .size(9.5)
-                                .color(p.faint)
-                                .family(FontFamily::Name("Medium".into())),
-                        );
-                        columns[0].label(theme::medium(
-                            format!("{} · {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS),
-                            12.5,
-                        ));
-                        columns[0].label(
-                            RichText::new("Без WebView и телеметрии")
-                                .size(10.0)
-                                .color(p.faint),
-                        );
-                        columns[1].label(
-                            RichText::new("Папка данных")
-                                .size(9.5)
-                                .color(p.faint)
-                                .family(FontFamily::Name("Medium".into())),
-                        );
-                        columns[1].add(
-                            egui::Label::new(
-                                RichText::new(&snapshot.data_dir)
-                                    .size(11.0)
-                                    .color(p.muted)
-                                    .family(FontFamily::Monospace),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
-                        columns[1].label(
-                            RichText::new(&snapshot.config_path)
-                                .size(9.5)
-                                .color(p.faint)
-                                .family(FontFamily::Monospace),
-                        );
-                        columns[2].label(
-                            RichText::new("Данные")
-                                .size(9.5)
-                                .color(p.faint)
-                                .family(FontFamily::Name("Medium".into())),
-                        );
-                        columns[2].label(
-                            RichText::new("Настройки, подписки и кэш ядер хранятся локально.")
-                                .size(10.5)
-                                .color(p.muted),
-                        );
-                        if columns[2]
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Открыть папку").size(11.0).color(p.muted),
+                    card_grid(ui, 3, 0.0, |ui, index| match index {
+                        0 => {
+                            ui.label(
+                                RichText::new("Версия")
+                                    .size(9.5)
+                                    .color(p.faint)
+                                    .family(FontFamily::Name("Medium".into())),
+                            );
+                            ui.label(theme::medium(
+                                format!("{} · {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS),
+                                12.5,
+                            ));
+                            ui.label(
+                                RichText::new("Без WebView и телеметрии")
+                                    .size(10.0)
+                                    .color(p.faint),
+                            );
+                        }
+                        1 => {
+                            ui.label(
+                                RichText::new("Папка данных")
+                                    .size(9.5)
+                                    .color(p.faint)
+                                    .family(FontFamily::Name("Medium".into())),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&snapshot.data_dir)
+                                        .size(11.0)
+                                        .color(p.muted)
+                                        .family(FontFamily::Monospace),
                                 )
-                                .fill(p.panel_2)
-                                .stroke(Stroke::new(1.0, p.line))
-                                .corner_radius(7),
-                            )
-                            .clicked()
-                        {
-                            engine.open_data_dir();
+                                .truncate()
+                                .selectable(false),
+                            );
+                            ui.label(
+                                RichText::new(&snapshot.config_path)
+                                    .size(9.5)
+                                    .color(p.faint)
+                                    .family(FontFamily::Monospace),
+                            );
+                        }
+                        _ => {
+                            ui.label(
+                                RichText::new("Данные")
+                                    .size(9.5)
+                                    .color(p.faint)
+                                    .family(FontFamily::Name("Medium".into())),
+                            );
+                            ui.label(
+                                RichText::new("Настройки, подписки и кэш ядер хранятся локально.")
+                                    .size(10.5)
+                                    .color(p.muted),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Открыть папку").size(11.0).color(p.muted),
+                                    )
+                                    .fill(p.panel_2)
+                                    .stroke(Stroke::new(1.0, p.line))
+                                    .corner_radius(7),
+                                )
+                                .clicked()
+                            {
+                                engine.open_data_dir();
+                            }
                         }
                     });
                 });
