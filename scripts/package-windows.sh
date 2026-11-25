@@ -16,20 +16,23 @@ echo "==> installer (NSIS)"
 makensis installer/protogrid.nsi
 
 echo "==> portable package"
-rm -rf "${OUT}-portable"
+# Keep an existing data/ directory: it holds the portable profile and logs.
 mkdir -p "${OUT}-portable"
-cp "$EXE" "${OUT}-portable/ProtoGrid.exe"
-cp LICENSE "${OUT}-portable/LICENSE.txt"
+cp -f "$EXE" "${OUT}-portable/ProtoGrid.exe"
+cp -f LICENSE "${OUT}-portable/LICENSE.txt"
 # Presence of this marker switches the profile to <exe dir>\data.
 : > "${OUT}-portable/portable.txt"
 python3 - "${OUT}-portable" <<'PY'
 import pathlib, sys, zipfile
 src = pathlib.Path(sys.argv[1])
 out = src.parent / (src.name + ".zip")
+# Only the launcher files go into the archive; data/ is user-specific.
+files = ["ProtoGrid.exe", "LICENSE.txt", "portable.txt"]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-    for path in sorted(src.rglob("*")):
+    for name in files:
+        path = src / name
         if path.is_file():
-            z.write(path, path.relative_to(src.parent))
+            z.write(path, pathlib.Path(src.name) / name)
 print(out)
 PY
 
