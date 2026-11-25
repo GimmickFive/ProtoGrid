@@ -5871,6 +5871,7 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
     egui::Panel::left("sidebar")
         .exact_size(if collapsed { 72.0 } else { 236.0 })
         .resizable(false)
+        .show_separator_line(false)
         .frame(Frame::new().fill(p.sidebar).inner_margin(Margin {
             left: sidebar_margin,
             right: sidebar_margin,
@@ -5881,16 +5882,18 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
             let screen = ui.ctx().input(|input| input.viewport_rect());
             let content = ui.max_rect();
             sidebar(ui, &p, view, snapshot, collapsed);
-            let x = content.right() + sidebar_margin as f32 - 0.5;
-            ui.painter().line_segment(
-                [egui::pos2(x, screen.top()), egui::pos2(x, screen.bottom())],
-                Stroke::new(1.0, p.line),
+            let x = content.right() + sidebar_margin as f32 - 1.0;
+            ui.painter().rect_filled(
+                Rect::from_min_size(egui::pos2(x, screen.top()), Vec2::new(1.0, screen.height())),
+                0,
+                p.line,
             );
         });
 
     egui::Panel::top("topbar")
         .exact_size(64.0)
         .resizable(false)
+        .show_separator_line(false)
         .frame(
             Frame::new()
                 .fill(p.bg)
@@ -5899,13 +5902,14 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
         .show(ui, |ui| {
             let content = ui.max_rect();
             topbar(ui, &p, view, snapshot, engine);
-            let y = content.bottom() - 0.5;
-            ui.painter().line_segment(
-                [
+            let y = content.bottom() - 1.0;
+            ui.painter().rect_filled(
+                Rect::from_min_size(
                     egui::pos2(content.left() - 24.0, y),
-                    egui::pos2(content.right() + 24.0, y),
-                ],
-                Stroke::new(1.0, p.line),
+                    Vec2::new(content.width() + 48.0, 1.0),
+                ),
+                0,
+                p.line,
             );
         });
 
