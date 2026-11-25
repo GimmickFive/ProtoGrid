@@ -139,7 +139,7 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 | Hysteria2 | QUIC | Salamander obfs, up/down |
 | TUIC | QUIC | congestion control, UDP relay mode |
 
-`*` XHTTP в sing-box доступен только в форке ProtoGrid; стоковый sing-box его не поддерживает. mKCP и VLESS Encryption также добавлены в форк. См. `docs/xhttp-fork-plan.md` и `docs/xray-parity-plan.md`.
+`*` XHTTP в sing-box доступен только в форке ProtoGrid; стоковый sing-box его не поддерживает. mKCP, VLESS Encryption и UDP noise (Xray `finalmask`) также добавлены в форк. См. `docs/xhttp-fork-plan.md` и `docs/xray-parity-plan.md`.
 
 ### Xray-core
 
@@ -194,7 +194,7 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 - Нет ShadowsocksR (`ssr://`), Hysteria v1, WireGuard и цепочек прокси.
 - XHTTP в стоковом sing-box не поддерживается; нужен форк ProtoGrid. XHTTP-серверная сторона в форке пока не реализована.
-- mKCP, VLESS Encryption и XHTTP/3 доступны только в форке ProtoGrid.
+- mKCP, VLESS Encryption, XHTTP/3 и UDP noise (`finalmask`) доступны только в форке ProtoGrid. Noise маскирует только исходящие UDP-сокеты (mKCP, QUIC/HTTP3); для TCP-транспортов он не действует.
 - XDRIVE local и S3 проверены; Google Drive требует OAuth-учётных данных. Reality ML-DSA-65 проверен на production; MASQUE TCP/UDP работает.
 - Нет автоматического скачивания `wintun.dll`.
 - Системный прокси переключается целиком; прежние ручные настройки не восстанавливаются.
