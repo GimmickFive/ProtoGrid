@@ -1,0 +1,93 @@
+From 229eddc3d6f531cecb63b327875ebbdbccecf351 Mon Sep 17 00:00:00 2001
+From: ProtoGrid <protogrid@localhost>
+Date: Thu, 26 Nov 2026 02:20:31 +0300
+Subject: [PATCH] v2raykcp: route mKCP socket through finalmask dialer
+
+mKCP dialed its UDP socket through Xray's system dialer, bypassing sing-box dialer options. When a finalmask is configured, pass an empty Xray FinalMask whose dialUDP delegates to our dialer, keeping the mask applied once.
+---
+ transport/v2raykcp/client.go | 42 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/transport/v2raykcp/client.go b/transport/v2raykcp/client.go
+index 78da99b..6f3a133 100644
+--- a/transport/v2raykcp/client.go
++++ b/transport/v2raykcp/client.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	xnet "github.com/xtls/xray-core/common/net"
+ 	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/finalmask"
+ 	"github.com/xtls/xray-core/transport/internet/kcp"
+ )
+ 
+@@ -23,21 +24,52 @@ var _ adapter.V2RayClientTransport = (*Client)(nil)
+ // compatible with Xray servers.
+ type Client struct {
+ 	ctx        context.Context
++	dialer     N.Dialer
+ 	serverAddr M.Socksaddr
+ 	options    option.V2RayKCPOptions
+ 	tlsConfig  tls.Config
+ }
+ 
+ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayKCPOptions, tlsConfig tls.Config) (*Client, error) {
+-	_ = dialer
+ 	return &Client{
+ 		ctx:        ctx,
++		dialer:     dialer,
+ 		serverAddr: serverAddr,
+ 		options:    options,
+ 		tlsConfig:  tlsConfig,
+ 	}, nil
+ }
+ 
++// finalMask routes Xray's mKCP dialer through the sing-box dialer so that
++// finalmask (noise) and dialer options such as detour/interface apply to the
++// underlying UDP socket. The masks themselves are already applied by the
++// wrapped dialer's DialContext, so the Xray mask list stays empty.
++func (c *Client) finalMask() *finalmask.FinalMask {
++	dialUDP := func(ctx context.Context, _ xnet.Destination) (net.PacketConn, net.Addr, error) {
++		conn, err := c.dialer.DialContext(ctx, N.NetworkUDP, c.serverAddr)
++		if err != nil {
++			return nil, nil, err
++		}
++		return &connectedPacketConn{Conn: conn}, conn.RemoteAddr(), nil
++	}
++	return finalmask.NewFinalMask(nil, nil, nil, nil, dialUDP, nil)
++}
++
++// connectedPacketConn adapts a connected UDP connection to net.PacketConn for
++// Xray's FinalMask wrapper, which writes with an explicit destination.
++type connectedPacketConn struct {
++	net.Conn
++}
++
++func (c *connectedPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
++	n, err := c.Conn.Read(p)
++	return n, c.Conn.RemoteAddr(), err
++}
++
++func (c *connectedPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
++	return c.Conn.Write(p)
++}
++
+ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ 	destination := xnet.UDPDestination(
+ 		xnet.ParseAddress(c.serverAddr.AddrString()),
+@@ -70,10 +102,14 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ 		settings.MaxSendingWindow = 2 * 1024 * 1024
+ 	}
+ 
+-	conn, err := kcp.DialKCP(ctx, destination, &internet.MemoryStreamConfig{
++	streamConfig := &internet.MemoryStreamConfig{
+ 		ProtocolName:     "mkcp",
+ 		ProtocolSettings: settings,
+-	})
++	}
++	if finalMaskDialer, ok := c.dialer.(interface{ FinalMaskEnabled() bool }); ok && finalMaskDialer.FinalMaskEnabled() {
++		streamConfig.FinalMask = c.finalMask()
++	}
++	conn, err := kcp.DialKCP(ctx, destination, streamConfig)
+ 	if err != nil {
+ 		return nil, E.Cause(err, "v2ray-kcp: dial")
+ 	}

@@ -1,0 +1,540 @@
+From 5e4867da6f4c4a62eb1a1d63c9228d16b2372e57 Mon Sep 17 00:00:00 2001
+From: ProtoGrid <protogrid@localhost>
+Date: Thu, 26 Nov 2026 02:20:27 +0300
+Subject: [PATCH 1/3] finalmask: add Xray-compatible UDP noise mask
+
+Noise emits decoy datagrams before the first packet to a destination and follows Xray's reset/rand/type semantics so the same finalmask settings work with both cores.
+---
+ common/finalmask/noise.go      | 291 +++++++++++++++++++++++++++++++++
+ common/finalmask/noise_test.go | 187 +++++++++++++++++++++
+ option/finalmask.go            |  16 ++
+ option/outbound.go             |   1 +
+ 4 files changed, 495 insertions(+)
+ create mode 100644 common/finalmask/noise.go
+ create mode 100644 common/finalmask/noise_test.go
+ create mode 100644 option/finalmask.go
+
+diff --git a/common/finalmask/noise.go b/common/finalmask/noise.go
+new file mode 100644
+index 0000000..77f4b9a
+--- /dev/null
++++ b/common/finalmask/noise.go
+@@ -0,0 +1,291 @@
++// Package finalmask implements Xray-compatible UDP stream masks.
++//
++// Only the "noise" mask is supported for now: before the first datagram sent
++// to a destination (and again after "reset" expires) it emits decoy packets,
++// so UDP transports such as mKCP and QUIC do not start with a recognisable
++// client fingerprint. The implementation follows Xray's
++// transport/internet/finalmask/noise semantics.
++package finalmask
++
++import (
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"math/big"
++	"net"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// WrapPacketConn applies every configured UDP mask to an unconnected packet
++// connection. Masks are applied in the order they appear in the configuration.
++func WrapPacketConn(conn net.PacketConn, options option.FinalMaskOptions) (net.PacketConn, error) {
++	for _, mask := range options.UDP {
++		state, err := newNoiseState(mask)
++		if err != nil {
++			return nil, err
++		}
++		conn = &noisePacketConn{
++			PacketConn: conn,
++			state:      state,
++		}
++	}
++	return conn, nil
++}
++
++// WrapConn applies every configured UDP mask to a connected datagram
++// connection (for example a QUIC socket returned by DialContext).
++func WrapConn(conn net.Conn, options option.FinalMaskOptions) (net.Conn, error) {
++	for _, mask := range options.UDP {
++		state, err := newNoiseState(mask)
++		if err != nil {
++			return nil, err
++		}
++		conn = &noiseConn{
++			Conn:  conn,
++			state: state,
++		}
++	}
++	return conn, nil
++}
++
++type noiseItem struct {
++	packet   []byte
++	randMin  int64
++	randMax  int64
++	delayMin int64
++	delayMax int64
++}
++
++type noiseState struct {
++	items    []noiseItem
++	resetMin int64
++	resetMax int64
++	mu       sync.Mutex
++	expires  map[string]time.Time
++}
++
++type noisePacketConn struct {
++	net.PacketConn
++	state *noiseState
++}
++
++func (c *noisePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
++	c.state.beforeWrite(addr.String(), func(packet []byte) {
++		_, _ = c.PacketConn.WriteTo(packet, addr)
++	})
++	return c.PacketConn.WriteTo(p, addr)
++}
++
++type noiseConn struct {
++	net.Conn
++	state *noiseState
++}
++
++func (c *noiseConn) Write(p []byte) (int, error) {
++	c.state.beforeWrite("", func(packet []byte) {
++		_, _ = c.Conn.Write(packet)
++	})
++	return c.Conn.Write(p)
++}
++
++type noiseSettings struct {
++	Reset json.RawMessage `json:"reset"`
++	Noise []struct {
++		Type      string          `json:"type"`
++		Packet    json.RawMessage `json:"packet"`
++		Rand      json.RawMessage `json:"rand"`
++		RandRange json.RawMessage `json:"randRange"`
++		Delay     json.RawMessage `json:"delay"`
++	} `json:"noise"`
++	Script string `json:"script"`
++}
++
++func newNoiseState(mask option.FinalMaskUDPOptions) (*noiseState, error) {
++	switch strings.ToLower(strings.TrimSpace(mask.Type)) {
++	case "noise":
++	case "":
++		return nil, E.New("finalmask: udp mask type is empty")
++	default:
++		return nil, E.New("finalmask: unsupported udp mask type: ", mask.Type)
++	}
++	var settings noiseSettings
++	if len(mask.Settings) > 0 {
++		if err := json.Unmarshal(mask.Settings, &settings); err != nil {
++			return nil, E.Cause(err, "finalmask: decode noise settings")
++		}
++	}
++	if settings.Script != "" {
++		return nil, E.New("finalmask: noise scripts are not supported")
++	}
++	if len(settings.Noise) == 0 {
++		return nil, E.New("finalmask: noise settings contain no items")
++	}
++	resetMin, resetMax, err := parseRange(settings.Reset)
++	if err != nil {
++		return nil, E.Cause(err, "finalmask: noise reset")
++	}
++	items := make([]noiseItem, 0, len(settings.Noise))
++	for index, item := range settings.Noise {
++		if strings.EqualFold(strings.TrimSpace(item.Type), "exp") {
++			return nil, E.New("finalmask: noise type \"exp\" is not supported")
++		}
++		packet, err := parsePacket(item.Packet, item.Type)
++		if err != nil {
++			return nil, E.Cause(err, "finalmask: noise item #", index)
++		}
++		randMin, randMax, err := parseRange(item.Rand)
++		if err != nil {
++			return nil, E.Cause(err, "finalmask: noise item #", index, " rand")
++		}
++		if len(packet) > 0 && randMax > 0 {
++			return nil, E.New("finalmask: noise item #", index, " sets both packet and rand")
++		}
++		delayMin, delayMax, err := parseRange(item.Delay)
++		if err != nil {
++			return nil, E.Cause(err, "finalmask: noise item #", index, " delay")
++		}
++		items = append(items, noiseItem{
++			packet:   packet,
++			randMin:  randMin,
++			randMax:  randMax,
++			delayMin: delayMin,
++			delayMax: delayMax,
++		})
++	}
++	return &noiseState{
++		items:    items,
++		resetMin: resetMin,
++		resetMax: resetMax,
++		expires:  make(map[string]time.Time),
++	}, nil
++}
++
++func (s *noiseState) beforeWrite(key string, send func([]byte)) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	expires := s.expires[key]
++	if expires.IsZero() || (s.resetMax > 0 && time.Now().After(expires)) {
++		for _, item := range s.items {
++			send(s.buildPacket(item))
++			delay := randBetween(item.delayMin, item.delayMax)
++			if delay > 0 {
++				time.Sleep(time.Duration(delay) * time.Millisecond)
++			}
++		}
++	}
++	s.expires[key] = time.Now().Add(time.Duration(randBetween(s.resetMin, s.resetMax)) * time.Second)
++}
++
++func (s *noiseState) buildPacket(item noiseItem) []byte {
++	if len(item.packet) > 0 {
++		return item.packet
++	}
++	if item.randMax <= 0 {
++		return nil
++	}
++	packet := make([]byte, randBetween(item.randMin, item.randMax))
++	if _, err := rand.Read(packet); err != nil {
++		return nil
++	}
++	return packet
++}
++
++func parsePacket(data json.RawMessage, kind string) ([]byte, error) {
++	if len(data) == 0 {
++		return nil, nil
++	}
++	switch strings.ToLower(strings.TrimSpace(kind)) {
++	case "", "array":
++		var packet []byte
++		if err := json.Unmarshal(data, &packet); err != nil {
++			return nil, E.Cause(err, "packet must be a byte array")
++		}
++		return packet, nil
++	case "str":
++		var value string
++		if err := json.Unmarshal(data, &value); err != nil {
++			return nil, E.Cause(err, "packet must be a string")
++		}
++		return []byte(value), nil
++	case "hex":
++		var value string
++		if err := json.Unmarshal(data, &value); err != nil {
++			return nil, E.Cause(err, "packet must be a hex string")
++		}
++		return hex.DecodeString(value)
++	case "base64":
++		var value string
++		if err := json.Unmarshal(data, &value); err != nil {
++			return nil, E.Cause(err, "packet must be a base64 string")
++		}
++		return base64.StdEncoding.DecodeString(value)
++	default:
++		return nil, E.New("unknown packet type: ", kind)
++	}
++}
++
++// parseRange accepts "1-3", "5" or a plain JSON number, matching Xray's
++// Int32Range. An empty value is treated as zero.
++func parseRange(data json.RawMessage) (int64, int64, error) {
++	if len(data) == 0 {
++		return 0, 0, nil
++	}
++	var value string
++	if err := json.Unmarshal(data, &value); err == nil {
++		return parseRangeString(value)
++	}
++	var number int64
++	if err := json.Unmarshal(data, &number); err == nil {
++		return number, number, nil
++	}
++	return 0, 0, E.New("invalid range, expected \"from-to\" or a number")
++}
++
++func parseRangeString(value string) (int64, int64, error) {
++	value = strings.TrimSpace(value)
++	if value == "" {
++		return 0, 0, nil
++	}
++	if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
++		return parsed, parsed, nil
++	}
++	separator := strings.Index(value[1:], "-")
++	if separator < 0 {
++		return 0, 0, E.New("invalid range: ", value)
++	}
++	separator++
++	from, err := strconv.ParseInt(value[:separator], 10, 64)
++	if err != nil {
++		return 0, 0, E.Cause(err, "invalid range: ", value)
++	}
++	to, err := strconv.ParseInt(value[separator+1:], 10, 64)
++	if err != nil {
++		return 0, 0, E.Cause(err, "invalid range: ", value)
++	}
++	if from > to {
++		from, to = to, from
++	}
++	return from, to, nil
++}
++
++func randBetween(from int64, to int64) int64 {
++	if from > to {
++		from, to = to, from
++	}
++	if to-from <= 1 {
++		return from
++	}
++	value, err := rand.Int(rand.Reader, big.NewInt(to-from))
++	if err != nil {
++		return from
++	}
++	return from + value.Int64()
++}
+diff --git a/common/finalmask/noise_test.go b/common/finalmask/noise_test.go
+new file mode 100644
+index 0000000..bd1456e
+--- /dev/null
++++ b/common/finalmask/noise_test.go
+@@ -0,0 +1,187 @@
++package finalmask
++
++import (
++	"bytes"
++	"encoding/json"
++	"net"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++type capturePacketConn struct {
++	mu      sync.Mutex
++	written [][]byte
++}
++
++func (c *capturePacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.written = append(c.written, bytes.Clone(p))
++	return len(p), nil
++}
++
++func (c *capturePacketConn) packets() [][]byte {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return append([][]byte(nil), c.written...)
++}
++
++func (c *capturePacketConn) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, nil }
++func (c *capturePacketConn) Close() error                           { return nil }
++func (c *capturePacketConn) LocalAddr() net.Addr                    { return &net.UDPAddr{} }
++func (c *capturePacketConn) SetDeadline(time.Time) error            { return nil }
++func (c *capturePacketConn) SetReadDeadline(time.Time) error        { return nil }
++func (c *capturePacketConn) SetWriteDeadline(time.Time) error       { return nil }
++
++func wrapNoise(t *testing.T, settings string) (*capturePacketConn, net.PacketConn) {
++	t.Helper()
++	raw := &capturePacketConn{}
++	conn, err := WrapPacketConn(raw, option.FinalMaskOptions{
++		UDP: []option.FinalMaskUDPOptions{{
++			Type:     "noise",
++			Settings: json.RawMessage(settings),
++		}},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return raw, conn
++}
++
++func TestNoiseSendsPacketOncePerAddress(t *testing.T) {
++	raw, conn := wrapNoise(t, `{"noise":[{"type":"str","packet":"abcd","rand":"0-0"}]}`)
++	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
++
++	payload := []byte("real-handshake")
++	if _, err := conn.WriteTo(payload, addr); err != nil {
++		t.Fatal(err)
++	}
++	sent := raw.packets()
++	if len(sent) != 2 {
++		t.Fatalf("expected noise and payload, got %d packets", len(sent))
++	}
++	if string(sent[0]) != "abcd" {
++		t.Fatalf("unexpected noise packet: %q", sent[0])
++	}
++	if !bytes.Equal(sent[1], payload) {
++		t.Fatalf("unexpected payload: %q", sent[1])
++	}
++
++	if _, err := conn.WriteTo(payload, addr); err != nil {
++		t.Fatal(err)
++	}
++	if sent = raw.packets(); len(sent) != 3 {
++		t.Fatalf("noise must not repeat before reset, got %d packets", len(sent))
++	}
++}
++
++func TestNoiseRandomLength(t *testing.T) {
++	raw, conn := wrapNoise(t, `{"noise":[{"rand":"16-17"}]}`)
++	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
++	if _, err := conn.WriteTo([]byte("x"), addr); err != nil {
++		t.Fatal(err)
++	}
++	sent := raw.packets()
++	if len(sent) != 2 {
++		t.Fatalf("expected noise and payload, got %d packets", len(sent))
++	}
++	if len(sent[0]) != 16 {
++		t.Fatalf("unexpected random packet length: %d", len(sent[0]))
++	}
++}
++
++func TestNoisePacketEncodings(t *testing.T) {
++	cases := []struct {
++		settings string
++		expected []byte
++	}{
++		{`{"noise":[{"type":"hex","packet":"0d0a"}]}`, []byte{0x0d, 0x0a}},
++		{`{"noise":[{"type":"base64","packet":"DQo="}]}`, []byte{0x0d, 0x0a}},
++		{`{"noise":[{"packet":[13,10]}]}`, []byte{0x0d, 0x0a}},
++	}
++	for _, testCase := range cases {
++		raw, conn := wrapNoise(t, testCase.settings)
++		addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
++		if _, err := conn.WriteTo([]byte("x"), addr); err != nil {
++			t.Fatal(err)
++		}
++		sent := raw.packets()
++		if len(sent) != 2 || !bytes.Equal(sent[0], testCase.expected) {
++			t.Fatalf("%s: unexpected packets %v", testCase.settings, sent)
++		}
++	}
++}
++
++type captureConn struct {
++	mu      sync.Mutex
++	written [][]byte
++}
++
++func (c *captureConn) Read([]byte) (int, error)         { return 0, nil }
++func (c *captureConn) Close() error                     { return nil }
++func (c *captureConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
++func (c *captureConn) RemoteAddr() net.Addr             { return &net.UDPAddr{} }
++func (c *captureConn) SetDeadline(time.Time) error      { return nil }
++func (c *captureConn) SetReadDeadline(time.Time) error  { return nil }
++func (c *captureConn) SetWriteDeadline(time.Time) error { return nil }
++
++func (c *captureConn) Write(p []byte) (int, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.written = append(c.written, bytes.Clone(p))
++	return len(p), nil
++}
++
++func TestNoiseConnectedConn(t *testing.T) {
++	raw := &captureConn{}
++	conn, err := WrapConn(raw, option.FinalMaskOptions{
++		UDP: []option.FinalMaskUDPOptions{{
++			Type:     "noise",
++			Settings: json.RawMessage(`{"noise":[{"type":"str","packet":"abcd","rand":"0-0"}]}`),
++		}},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := conn.Write([]byte("quic-initial")); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := conn.Write([]byte("second")); err != nil {
++		t.Fatal(err)
++	}
++	raw.mu.Lock()
++	defer raw.mu.Unlock()
++	if len(raw.written) != 3 {
++		t.Fatalf("expected noise + 2 payloads, got %d writes", len(raw.written))
++	}
++	if string(raw.written[0]) != "abcd" {
++		t.Fatalf("unexpected noise packet: %q", raw.written[0])
++	}
++}
++
++func TestNoiseRejectsUnsupportedMask(t *testing.T) {
++	_, err := WrapPacketConn(&capturePacketConn{}, option.FinalMaskOptions{
++		UDP: []option.FinalMaskUDPOptions{{Type: "salamander"}},
++	})
++	if err == nil {
++		t.Fatal("expected unsupported mask error")
++	}
++}
++
++func TestParseRange(t *testing.T) {
++	from, to, err := parseRange(json.RawMessage(`"10-20"`))
++	if err != nil || from != 10 || to != 20 {
++		t.Fatalf("unexpected range %d-%d: %v", from, to, err)
++	}
++	from, to, err = parseRange(json.RawMessage(`25`))
++	if err != nil || from != 25 || to != 25 {
++		t.Fatalf("unexpected range %d-%d: %v", from, to, err)
++	}
++	from, to, err = parseRange(nil)
++	if err != nil || from != 0 || to != 0 {
++		t.Fatalf("unexpected range %d-%d: %v", from, to, err)
++	}
++}
+diff --git a/option/finalmask.go b/option/finalmask.go
+new file mode 100644
+index 0000000..f0a804c
+--- /dev/null
++++ b/option/finalmask.go
+@@ -0,0 +1,16 @@
++package option
++
++import "encoding/json"
++
++// FinalMaskOptions mirrors Xray's finalmask stream option. Only UDP masks are
++// implemented; TCP transports do not have a mask hook in sing-box yet.
++type FinalMaskOptions struct {
++	UDP []FinalMaskUDPOptions `json:"udp,omitempty"`
++}
++
++// FinalMaskUDPOptions is a single UDP mask entry. Settings stays raw so that
++// the mask decoder can accept Xray's schemas (string or numeric ranges).
++type FinalMaskUDPOptions struct {
++	Type     string          `json:"type"`
++	Settings json.RawMessage `json:"settings,omitempty"`
++}
+diff --git a/option/outbound.go b/option/outbound.go
+index 5780929..770d5d8 100644
+--- a/option/outbound.go
++++ b/option/outbound.go
+@@ -106,6 +106,7 @@ type AbstractDialerOptions struct {
+ 	NetworkType                badoption.Listable[InterfaceType] `json:"network_type,omitempty"`
+ 	FallbackNetworkType        badoption.Listable[InterfaceType] `json:"fallback_network_type,omitempty"`
+ 	FallbackDelay              badoption.Duration                `json:"fallback_delay,omitempty"`
++	FinalMask                  *FinalMaskOptions                 `json:"finalmask,omitempty"`
+ 
+ 	// Deprecated: migrated to domain resolver
+ 	DomainStrategy DomainStrategy `json:"domain_strategy,omitempty" schema:"omit"`

@@ -1,0 +1,221 @@
+From 481fe5bcc3f6412c59325160a89211eb221749d2 Mon Sep 17 00:00:00 2001
+From: ProtoGrid <protogrid@localhost>
+Date: Thu, 26 Nov 2026 02:20:29 +0300
+Subject: [PATCH 2/3] dialer: apply finalmask to UDP sockets
+
+The outbound dialer wraps ListenPacket and connected UDP DialContext results, so QUIC, HTTP/3 and other UDP transports get the configured masks without per-transport changes.
+---
+ common/dialer/dialer.go         |   3 +
+ common/dialer/finalmask.go      |  61 ++++++++++++++++
+ common/dialer/finalmask_test.go | 120 ++++++++++++++++++++++++++++++++
+ 3 files changed, 184 insertions(+)
+ create mode 100644 common/dialer/finalmask.go
+ create mode 100644 common/dialer/finalmask_test.go
+
+diff --git a/common/dialer/dialer.go b/common/dialer/dialer.go
+index 7c0b9b5..54213cc 100644
+--- a/common/dialer/dialer.go
++++ b/common/dialer/dialer.go
+@@ -98,6 +98,9 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 			time.Duration(dialOptions.FallbackDelay),
+ 		)
+ 	}
++	if dialOptions.FinalMask != nil {
++		dialer = newFinalMaskDialer(dialer, *dialOptions.FinalMask)
++	}
+ 	return dialer, nil
+ }
+ 
+diff --git a/common/dialer/finalmask.go b/common/dialer/finalmask.go
+new file mode 100644
+index 0000000..ad1f46a
+--- /dev/null
++++ b/common/dialer/finalmask.go
+@@ -0,0 +1,61 @@
++package dialer
++
++import (
++	"context"
++	"net"
++	"strings"
++
++	"github.com/sagernet/sing-box/common/finalmask"
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// finalMaskDialer wraps UDP sockets returned by the underlying dialer with the
++// configured stream masks (currently noise). TCP is untouched.
++type finalMaskDialer struct {
++	N.Dialer
++	options option.FinalMaskOptions
++}
++
++func newFinalMaskDialer(dialer N.Dialer, options option.FinalMaskOptions) N.Dialer {
++	return &finalMaskDialer{
++		Dialer:  dialer,
++		options: options,
++	}
++}
++
++func (d *finalMaskDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	conn, err := d.Dialer.DialContext(ctx, network, destination)
++	if err != nil {
++		return nil, err
++	}
++	if !strings.HasPrefix(network, N.NetworkUDP) {
++		return conn, nil
++	}
++	wrapped, err := finalmask.WrapConn(conn, d.options)
++	if err != nil {
++		_ = conn.Close()
++		return nil, err
++	}
++	return wrapped, nil
++}
++
++func (d *finalMaskDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	conn, err := d.Dialer.ListenPacket(ctx, destination)
++	if err != nil {
++		return nil, err
++	}
++	wrapped, err := finalmask.WrapPacketConn(conn, d.options)
++	if err != nil {
++		_ = conn.Close()
++		return nil, err
++	}
++	return wrapped, nil
++}
++
++// FinalMaskEnabled lets transports that dial on their own (mKCP) detect that
++// they should route their socket through this dialer.
++func (d *finalMaskDialer) FinalMaskEnabled() bool {
++	return true
++}
+diff --git a/common/dialer/finalmask_test.go b/common/dialer/finalmask_test.go
+new file mode 100644
+index 0000000..8e136b8
+--- /dev/null
++++ b/common/dialer/finalmask_test.go
+@@ -0,0 +1,120 @@
++package dialer
++
++import (
++	"context"
++	"encoding/json"
++	"net"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++type fakePacketConn struct {
++	mu      sync.Mutex
++	written [][]byte
++}
++
++func (c *fakePacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.written = append(c.written, append([]byte(nil), p...))
++	return len(p), nil
++}
++
++func (c *fakePacketConn) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, nil }
++func (c *fakePacketConn) Close() error                           { return nil }
++func (c *fakePacketConn) LocalAddr() net.Addr                    { return &net.UDPAddr{} }
++func (c *fakePacketConn) SetDeadline(time.Time) error            { return nil }
++func (c *fakePacketConn) SetReadDeadline(time.Time) error        { return nil }
++func (c *fakePacketConn) SetWriteDeadline(time.Time) error       { return nil }
++
++type fakeDialer struct {
++	packet *fakePacketConn
++	conn   net.Conn
++}
++
++func (d *fakeDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return d.conn, nil
++}
++
++func (d *fakeDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return d.packet, nil
++}
++
++func testFinalMask(t *testing.T) option.FinalMaskOptions {
++	t.Helper()
++	var mask option.FinalMaskOptions
++	err := json.Unmarshal([]byte(`{"udp":[{"type":"noise","settings":{"noise":[{"type":"str","packet":"abcd","rand":"0-0"}]}}]}`), &mask)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return mask
++}
++
++func TestFinalMaskDialerWrapsListenPacket(t *testing.T) {
++	raw := &fakePacketConn{}
++	wrapped := newFinalMaskDialer(&fakeDialer{packet: raw}, testFinalMask(t))
++
++	conn, err := wrapped.ListenPacket(context.Background(), M.Socksaddr{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
++	if _, err = conn.WriteTo([]byte("payload"), addr); err != nil {
++		t.Fatal(err)
++	}
++	raw.mu.Lock()
++	defer raw.mu.Unlock()
++	if len(raw.written) != 2 || string(raw.written[0]) != "abcd" {
++		t.Fatalf("unexpected packets: %v", raw.written)
++	}
++}
++
++type fakeConn struct {
++	mu      sync.Mutex
++	written [][]byte
++}
++
++func (c *fakeConn) Read([]byte) (int, error)         { return 0, nil }
++func (c *fakeConn) Close() error                     { return nil }
++func (c *fakeConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
++func (c *fakeConn) RemoteAddr() net.Addr             { return &net.UDPAddr{} }
++func (c *fakeConn) SetDeadline(time.Time) error      { return nil }
++func (c *fakeConn) SetReadDeadline(time.Time) error  { return nil }
++func (c *fakeConn) SetWriteDeadline(time.Time) error { return nil }
++
++func (c *fakeConn) Write(p []byte) (int, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.written = append(c.written, append([]byte(nil), p...))
++	return len(p), nil
++}
++
++func TestFinalMaskDialerWrapsUDPAndIgnoresTCP(t *testing.T) {
++	raw := &fakeConn{}
++	wrapped := newFinalMaskDialer(&fakeDialer{conn: raw}, testFinalMask(t))
++
++	conn, err := wrapped.DialContext(context.Background(), "tcp", M.Socksaddr{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if conn != net.Conn(raw) {
++		t.Fatal("tcp connection must not be wrapped")
++	}
++
++	conn, err = wrapped.DialContext(context.Background(), "udp", M.Socksaddr{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = conn.Write([]byte("payload")); err != nil {
++		t.Fatal(err)
++	}
++	raw.mu.Lock()
++	defer raw.mu.Unlock()
++	if len(raw.written) != 2 || string(raw.written[0]) != "abcd" {
++		t.Fatalf("unexpected packets: %v", raw.written)
++	}
++}

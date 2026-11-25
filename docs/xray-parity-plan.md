@@ -22,7 +22,7 @@
 | WireGuard | да | да | есть |
 | Balancers: leastPing / leastLoad | да | частично (`urltest`) | sing-box `urltest`; Xray `observatory` + `leastLoad` |
 | fakedns | да | нет | FakeDNS через sing-box `fakeip` |
-| sockopt / finalmask / fragment / noise | да | частично | TFO, interface, mark, fragment, noise + произвольные TCP/UDP finalmask-маски JSON (filter/header-custom проверены) |
+| sockopt / finalmask / fragment / noise | да | частично | TFO, interface, mark, fragment; `finalmask.udp` noise в форке (mKCP и UDP-диалеры QUIC/HTTP3); произвольные TCP/UDP finalmask-маски JSON — только Xray |
 | Xray Stats API | да | Clash API | совместимость через Clash API |
 | Серверные inbounds Xray | да | частично | не цель клиента |
 
@@ -55,7 +55,7 @@ UDP DNS:            71 байт
 
 6. Balancers: sing-box `urltest`; Xray `observatory` + `leastLoad` — сделано.
 7. fakedns: FakeDNS через sing-box `fakeip` — сделано.
-8. sockopt/finalmask: TFO, interface, mark, fragment, noise + raw JSON для любых TCP/UDP масок; filter/header-custom проверены.
+8. sockopt/finalmask: TFO, interface, mark, fragment; noise (`finalmask.udp`) реализован в форке для UDP-сокетов — mKCP через Xray-совместимый `MemoryStreamConfig.FinalMask` и QUIC/UDP-диалеры через обёртку `dialer`. Raw JSON для произвольных TCP/UDP масок и `filter`/`header-custom` остаются только в Xray.
 9. Полный набор полей XHTTP/Reality/TLS из share-ссылок и Clash — частично.
 
 ### P2 — экзотика
@@ -87,6 +87,7 @@ UDP DNS:            71 байт
 - MASQUE: локальный Xray MASQUE-сервер + TLS-пиннинг; TCP → `301`, UDP DNS → `71` байт.
 - XHTTP downloadSettings: отдельный host/path/соединение (`DL GET /dl/...`), TCP → `301`, UDP DNS → `71` байт.
 - Finalmask: `fragment`, `noise`, `filter`, `header-custom`; `xray run -test` → `Configuration OK`.
+- Finalmask noise в форке: mKCP и QUIC (`transport: quic`) — первый UDP-пакет к серверу `abcd`, затем KCP/QUIC-пакеты (проверено локальным сниффером); `sing-box check` принимает `finalmask`.
 - `cargo test --workspace`: 46 + 1 тест; `cargo clippy` без предупреждений.
 - FakeDNS: `dns.final=dns-remote`, правило A/AAAA → fakeip; `dig @1.1.1.1 example.com` вернул `198.18.0.2`.
 - auto-select: `urltest` вместо `selector`; Xray — `observatory` + `leastLoad`, `xray run -test` → `Configuration OK`.
