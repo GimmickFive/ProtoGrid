@@ -140,19 +140,44 @@ pub fn install_fonts(ctx: &egui::Context) {
         ))),
     );
     fonts.font_data.insert(
+        "inter-bold".to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/Inter-Bold.ttf"
+        ))),
+    );
+    // JetBrains Mono is the monospace face used by the reference concept.
+    fonts.font_data.insert(
+        "jetbrains".to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/JetBrainsMono-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "jetbrains-medium".to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/JetBrainsMono-Medium.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "jetbrains-bold".to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/JetBrainsMono-Bold.ttf"
+        ))),
+    );
+    // DejaVu Sans Mono stays as a glyph fallback behind JetBrains Mono.
+    fonts.font_data.insert(
         "mono".to_owned(),
         Arc::new(FontData::from_static(include_bytes!(
             "../assets/DejaVuSansMono.ttf"
         ))),
     );
 
-    load_system_fonts(&mut fonts);
-
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "inter".to_owned());
 
     let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
-    monospace.insert(0, "mono".to_owned());
+    monospace.insert(0, "jetbrains".to_owned());
+    monospace.insert(1, "mono".to_owned());
 
     let semibold = FontFamily::Name("Semibold".into());
     fonts.families.insert(
@@ -163,36 +188,49 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(medium, vec!["inter-medium".to_owned(), "inter".to_owned()]);
+    let bold = FontFamily::Name("Bold".into());
+    fonts
+        .families
+        .insert(bold, vec!["inter-bold".to_owned(), "inter".to_owned()]);
+    let mono_medium = FontFamily::Name("MonoMedium".into());
+    fonts.families.insert(
+        mono_medium,
+        vec![
+            "jetbrains-medium".to_owned(),
+            "jetbrains".to_owned(),
+            "mono".to_owned(),
+        ],
+    );
+    let mono_bold = FontFamily::Name("MonoBold".into());
+    fonts.families.insert(
+        mono_bold,
+        vec![
+            "jetbrains-bold".to_owned(),
+            "jetbrains".to_owned(),
+            "mono".to_owned(),
+        ],
+    );
 
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    if let Some(keys) = fonts.families.get_mut(&FontFamily::Name("Medium".into())) {
-        keys.insert(keys.len().min(1), "phosphor".into());
-    }
-    if let Some(keys) = fonts.families.get_mut(&FontFamily::Name("Semibold".into())) {
-        keys.insert(keys.len().min(1), "phosphor".into());
-    }
-    ctx.set_fonts(fonts);
-}
-
-fn load_system_fonts(fonts: &mut FontDefinitions) {
-    #[cfg(windows)]
-    {
-        let dir = std::path::Path::new(r"C:\Windows\Fonts");
-        for (name, file) in [
-            ("inter", "segoeui.ttf"),
-            ("inter-medium", "segoeui.ttf"),
-            ("inter-semibold", "segoeuib.ttf"),
-            ("mono", "consola.ttf"),
-        ] {
-            if let Ok(bytes) = std::fs::read(dir.join(file)) {
-                fonts
-                    .font_data
-                    .insert(name.to_owned(), Arc::new(FontData::from_owned(bytes)));
-            }
+    // Inter ships Private Use Area glyphs that would shadow the Phosphor
+    // codepoints; the bundled Inter files have those cmap entries stripped, so
+    // the icon font can safely sit right after the text font.
+    for family in [
+        FontFamily::Proportional,
+        FontFamily::Monospace,
+        FontFamily::Name("Medium".into()),
+        FontFamily::Name("Semibold".into()),
+        FontFamily::Name("Bold".into()),
+        FontFamily::Name("MonoMedium".into()),
+        FontFamily::Name("MonoBold".into()),
+    ] {
+        if let Some(keys) = fonts.families.get_mut(&family) {
+            keys.retain(|key| key != "phosphor");
+            let position = keys.len().min(1);
+            keys.insert(position, "phosphor".into());
         }
     }
-    #[cfg(not(windows))]
-    let _ = fonts;
+    ctx.set_fonts(fonts);
 }
 
 pub fn install(ctx: &egui::Context, dark: bool) {
@@ -310,6 +348,12 @@ pub fn heading(text: impl Into<String>) -> egui::RichText {
 pub fn semibold(text: impl Into<String>, size: f32) -> egui::RichText {
     egui::RichText::new(text.into())
         .family(FontFamily::Name("Semibold".into()))
+        .size(size)
+}
+
+pub fn bold(text: impl Into<String>, size: f32) -> egui::RichText {
+    egui::RichText::new(text.into())
+        .family(FontFamily::Name("Bold".into()))
         .size(size)
 }
 

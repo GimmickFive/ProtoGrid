@@ -14,6 +14,7 @@ use protogrid_core::model::{
 use crate::engine::{
     now_ms, ConnStatus, Engine, LogEntry, Snapshot, ToastEvent, ToastKind, TrafficStats,
 };
+use crate::installer::CoreFeatures;
 use crate::theme::{self, Palette};
 
 /* -------------------------------------------------------------------------- */
@@ -60,7 +61,7 @@ impl Page {
             Page::Servers => egui_phosphor::regular::HARD_DRIVES,
             Page::Subscriptions => egui_phosphor::regular::STACK,
             Page::Routing => egui_phosphor::regular::SIGNPOST,
-            Page::Charts => egui_phosphor::regular::CHART_LINE,
+            Page::Charts => egui_phosphor::regular::CHART_BAR,
             Page::Logs => egui_phosphor::regular::TERMINAL_WINDOW,
             Page::Settings => egui_phosphor::regular::GEAR_SIX,
         }
@@ -86,6 +87,7 @@ pub enum Direction {
 pub enum LogFilter {
     #[default]
     All,
+    Debug,
     Info,
     Warn,
     Error,
@@ -162,6 +164,7 @@ pub struct View {
     pub import_text: String,
     pub subscription_name: String,
     pub subscription_url: String,
+    pub subscription_edit: Option<String>,
     pub confirm: Option<Confirm>,
     pub settings_draft: Option<Settings>,
     pub settings_dirty: bool,
@@ -200,6 +203,7 @@ impl View {
             import_text: String::new(),
             subscription_name: String::new(),
             subscription_url: String::new(),
+            subscription_edit: None,
             confirm: None,
             settings_draft: None,
             settings_dirty: false,
@@ -491,19 +495,28 @@ fn small_ghost(ui: &mut Ui, p: &Palette, icon: &str, tooltip: &str) -> egui::Res
     response.on_hover_text(tooltip)
 }
 
-fn pill(ui: &mut Ui, _p: &Palette, text: &str, color: Color32, fill: Color32) {
-    Frame::new()
-        .fill(fill)
-        .corner_radius(5)
-        .inner_margin(Margin::symmetric(7, 2))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(text)
-                    .size(9.5)
-                    .color(color)
-                    .family(FontFamily::Name("Medium".into())),
-            );
-        });
+/// Compact action pill: 21 px tall, 7 px horizontal padding, like `.act` in the
+/// web concept. Painted manually so the surrounding column layout cannot
+/// stretch it to the full row height.
+fn pill(ui: &mut Ui, text: &str, color: Color32, fill: Color32, stroke: Stroke) {
+    let font = FontId::new(9.5, FontFamily::Name("MonoMedium".into()));
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let size = Vec2::new(galley.size().x + 14.0, 21.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let radius = CornerRadius::same(5);
+    ui.painter().rect_filled(rect, radius, fill);
+    if stroke.width > 0.0 {
+        ui.painter()
+            .rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
+    }
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        color,
+    );
 }
 
 fn status_color(p: &Palette, status: ConnStatus) -> Color32 {
@@ -608,16 +621,43 @@ fn seg(ui: &mut Ui, p: &Palette, items: &[(u64, &str)], selected: u64) -> Option
     chosen
 }
 
+fn dashed_round_rect(painter: &egui::Painter, rect: Rect, radius: f32, stroke: Stroke) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
+    let mut points = Vec::with_capacity(40);
+    let arcs = [
+        (rect.left() + r, rect.top() + r, PI, PI + FRAC_PI_2),
+        (rect.right() - r, rect.top() + r, PI + FRAC_PI_2, 2.0 * PI),
+        (rect.right() - r, rect.bottom() - r, 0.0, FRAC_PI_2),
+        (rect.left() + r, rect.bottom() - r, FRAC_PI_2, PI),
+    ];
+    for (cx, cy, start, end) in arcs {
+        for step in 0..=8 {
+            let angle = start + (end - start) * step as f32 / 8.0;
+            points.push(egui::pos2(cx + r * angle.cos(), cy + r * angle.sin()));
+        }
+    }
+    if let Some(first) = points.first().copied() {
+        points.push(first);
+    }
+    painter.extend(egui::Shape::dashed_line(&points, stroke, 6.0, 4.0));
+}
+
 fn progress_bar(ui: &mut Ui, p: &Palette, fraction: f32, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 5.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(3), p.panel_2);
+    let radius = CornerRadius::same(3);
+    ui.painter().rect_filled(rect, radius, p.panel_2);
     let width = rect.width() * fraction.clamp(0.0, 1.0);
     if width > 0.5 {
         let filled = Rect::from_min_size(rect.min, Vec2::new(width, rect.height()));
-        ui.painter()
-            .rect_filled(filled, CornerRadius::same(3), color);
+        ui.painter().rect_filled(filled, radius, color);
     }
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, p.line),
+        egui::StrokeKind::Inside,
+    );
 }
 
 fn icon_box(ui: &mut Ui, _p: &Palette, icon: &str, fg: Color32, bg: Color32, size: f32) {
@@ -756,6 +796,18 @@ fn bytes_f(value: f64) -> String {
     bytes(value.max(0.0) as u64)
 }
 
+/// Integer traffic sizes for compact subscription cards ("224 ГБ").
+fn bytes_compact(value: u64) -> String {
+    let mut size = value as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < 4 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    let units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+    format!("{size:.0} {}", units[unit])
+}
+
 fn rate(value: f32) -> (String, &'static str) {
     if value >= 1024.0 * 1024.0 {
         (format!("{:.1}", value / (1024.0 * 1024.0)), "МБ/с")
@@ -804,22 +856,6 @@ fn date_ms(ms: i64) -> String {
         .unwrap_or_default()
 }
 
-fn ago(seconds: i64) -> String {
-    if seconds <= 0 {
-        return "никогда".into();
-    }
-    let delta = now_ms() / 1000 - seconds;
-    if delta < 60 {
-        "только что".into()
-    } else if delta < 3600 {
-        format!("{} мин назад", delta / 60)
-    } else if delta < 86400 {
-        format!("{} ч назад", delta / 3600)
-    } else {
-        format!("{} дн назад", delta / 86400)
-    }
-}
-
 fn uptime(ms: i64) -> String {
     let seconds = (ms.max(0) / 1000) as u64;
     format!(
@@ -844,29 +880,132 @@ fn plural(n: usize, one: &'static str, few: &'static str, many: &'static str) ->
     }
 }
 
-fn host_of(url: &str) -> String {
-    url.trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .to_string()
-}
-
 fn protocol_name(protocol: Protocol) -> &'static str {
     protocol.label()
 }
 
-fn protocol_color(p: &Palette, protocol: Protocol) -> Color32 {
-    match protocol {
-        Protocol::Vless => p.accent_2,
+const ALL_PROTOCOLS: [Protocol; 7] = [
+    Protocol::Vless,
+    Protocol::Vmess,
+    Protocol::Trojan,
+    Protocol::Shadowsocks,
+    Protocol::Hysteria2,
+    Protocol::Tuic,
+    Protocol::Masque,
+];
+
+/// One accent per protocol, used for every protocol badge in the app.
+fn protocol_color(protocol: Protocol, p: &Palette) -> Color32 {
+    let color = match protocol {
+        Protocol::Vless => p.violet,
         Protocol::Vmess => p.cyan,
-        Protocol::Trojan => p.red,
-        Protocol::Shadowsocks => p.amber,
-        Protocol::Hysteria2 => p.violet,
-        Protocol::Tuic => p.green,
-        Protocol::Masque => p.cyan,
+        Protocol::Trojan => p.amber,
+        Protocol::Shadowsocks => p.green,
+        Protocol::Hysteria2 => p.red,
+        Protocol::Tuic => Color32::from_rgb(251, 146, 60),
+        Protocol::Masque => Color32::from_rgb(236, 120, 200),
+    };
+    if p.dark {
+        color
+    } else {
+        color.gamma_multiply(0.72)
     }
+}
+
+fn tinted(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn protocol_badge(ui: &mut Ui, p: &Palette, protocol: Protocol) {
+    let color = protocol_color(protocol, p);
+    let fill = tinted(color, if p.dark { 38 } else { 30 });
+    let stroke = Stroke::new(1.0, tinted(color, if p.dark { 90 } else { 70 }));
+    pill(ui, protocol_name(protocol), color, fill, stroke);
+}
+
+fn mini_chip(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) {
+    let font = FontId::new(8.5, FontFamily::Name("MonoMedium".into()));
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, fg);
+    let size = Vec2::new(galley.size().x + 10.0, 17.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let radius = CornerRadius::same(4);
+    ui.painter().rect_filled(rect, radius, bg);
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        fg,
+    );
+}
+
+fn mini_protocol_chip(ui: &mut Ui, p: &Palette, protocol: Protocol) {
+    let color = protocol_color(protocol, p);
+    mini_chip(
+        ui,
+        protocol_name(protocol),
+        color,
+        tinted(color, if p.dark { 34 } else { 26 }),
+    );
+}
+
+fn mini_feature_chip(ui: &mut Ui, p: &Palette, text: &str) {
+    mini_chip(ui, text, p.muted, p.panel_3);
+}
+
+/// Protocols a core build can actually run.
+fn core_protocols(kind: CoreKind, features: CoreFeatures) -> Vec<Protocol> {
+    ALL_PROTOCOLS
+        .iter()
+        .copied()
+        .filter(|protocol| match kind {
+            CoreKind::Xray => matches!(
+                protocol,
+                Protocol::Vless
+                    | Protocol::Vmess
+                    | Protocol::Trojan
+                    | Protocol::Shadowsocks
+                    | Protocol::Masque
+            ),
+            CoreKind::Singbox | CoreKind::Protogrid => {
+                *protocol != Protocol::Masque || features.masque
+            }
+        })
+        .collect()
+}
+
+/// Features reported by probes against the concrete core binary.
+fn core_feature_list(features: CoreFeatures) -> Vec<&'static str> {
+    let mut list = Vec::new();
+    if features.tun {
+        list.push("TUN");
+    }
+    if features.xhttp {
+        list.push("XHTTP");
+    }
+    if features.kcp {
+        list.push("mKCP");
+    }
+    if features.xdrive {
+        list.push("XDRIVE");
+    }
+    if features.mldsa65 {
+        list.push("ML-DSA");
+    }
+    if features.vless_encryption {
+        list.push("VLESS-ENC");
+    }
+    if features.fakedns {
+        list.push("FakeDNS");
+    }
+    if features.clash_api {
+        list.push("Clash");
+    }
+    if features.noise {
+        list.push("noise");
+    }
+    list
 }
 
 fn transport_short(transport: Transport) -> &'static str {
@@ -920,7 +1059,196 @@ fn transport_label(transport: Transport) -> &'static str {
     }
 }
 
+fn country_code(name: &str) -> Option<&'static str> {
+    const PLACES: &[(&str, &str)] = &[
+        ("нью-йорк", "US"),
+        ("нью йорк", "US"),
+        ("new york", "US"),
+        ("лос-анджелес", "US"),
+        ("los angeles", "US"),
+        ("сан-франциско", "US"),
+        ("san francisco", "US"),
+        ("сан-паулу", "BR"),
+        ("sao paulo", "BR"),
+        ("são paulo", "BR"),
+        ("буэнос-айрес", "AR"),
+        ("buenos aires", "AR"),
+        ("тель-авив", "IL"),
+        ("tel aviv", "IL"),
+        ("эр-рияд", "SA"),
+        ("riyadh", "SA"),
+        ("амстердам", "NL"),
+        ("amsterdam", "NL"),
+        ("франкфурт", "DE"),
+        ("frankfurt", "DE"),
+        ("хельсинки", "FI"),
+        ("helsinki", "FI"),
+        ("токио", "JP"),
+        ("tokyo", "JP"),
+        ("сингапур", "SG"),
+        ("singapore", "SG"),
+        ("лондон", "GB"),
+        ("london", "GB"),
+        ("париж", "FR"),
+        ("paris", "FR"),
+        ("берлин", "DE"),
+        ("berlin", "DE"),
+        ("варшава", "PL"),
+        ("warsaw", "PL"),
+        ("стамбул", "TR"),
+        ("istanbul", "TR"),
+        ("дубай", "AE"),
+        ("dubai", "AE"),
+        ("сеул", "KR"),
+        ("seoul", "KR"),
+        ("гонконг", "HK"),
+        ("hong kong", "HK"),
+        ("тайвань", "TW"),
+        ("taiwan", "TW"),
+        ("рига", "LV"),
+        ("riga", "LV"),
+        ("вильнюс", "LT"),
+        ("vilnius", "LT"),
+        ("таллин", "EE"),
+        ("tallinn", "EE"),
+        ("киев", "UA"),
+        ("kyiv", "UA"),
+        ("kiev", "UA"),
+        ("москва", "RU"),
+        ("moscow", "RU"),
+        ("петербург", "RU"),
+        ("saint petersburg", "RU"),
+        ("алматы", "KZ"),
+        ("almaty", "KZ"),
+        ("ереван", "AM"),
+        ("yerevan", "AM"),
+        ("тбилиси", "GE"),
+        ("tbilisi", "GE"),
+        ("баку", "AZ"),
+        ("baku", "AZ"),
+        ("сидней", "AU"),
+        ("sydney", "AU"),
+        ("мельбурн", "AU"),
+        ("melbourne", "AU"),
+        ("торонто", "CA"),
+        ("toronto", "CA"),
+        ("монреаль", "CA"),
+        ("montreal", "CA"),
+        ("чикаго", "US"),
+        ("chicago", "US"),
+        ("майами", "US"),
+        ("miami", "US"),
+        ("даллас", "US"),
+        ("dallas", "US"),
+        ("сиэтл", "US"),
+        ("seattle", "US"),
+        ("ашберн", "US"),
+        ("ashburn", "US"),
+        ("финикс", "US"),
+        ("phoenix", "US"),
+        ("атланта", "US"),
+        ("atlanta", "US"),
+        ("денвер", "US"),
+        ("denver", "US"),
+        ("вашингтон", "US"),
+        ("washington", "US"),
+        ("хьюстон", "US"),
+        ("houston", "US"),
+        ("нью-джерси", "US"),
+        ("new jersey", "US"),
+        ("цюрих", "CH"),
+        ("zurich", "CH"),
+        ("вена", "AT"),
+        ("vienna", "AT"),
+        ("прага", "CZ"),
+        ("prague", "CZ"),
+        ("будапешт", "HU"),
+        ("budapest", "HU"),
+        ("бухарест", "RO"),
+        ("bucharest", "RO"),
+        ("софия", "BG"),
+        ("sofia", "BG"),
+        ("афины", "GR"),
+        ("athens", "GR"),
+        ("мадрид", "ES"),
+        ("madrid", "ES"),
+        ("лиссабон", "PT"),
+        ("lisbon", "PT"),
+        ("милан", "IT"),
+        ("milan", "IT"),
+        ("рим", "IT"),
+        ("rome", "IT"),
+        ("осло", "NO"),
+        ("oslo", "NO"),
+        ("стокгольм", "SE"),
+        ("stockholm", "SE"),
+        ("копенгаген", "DK"),
+        ("copenhagen", "DK"),
+        ("минск", "BY"),
+        ("minsk", "BY"),
+        ("кишинёв", "MD"),
+        ("кишинев", "MD"),
+        ("chisinau", "MD"),
+        ("ташкент", "UZ"),
+        ("tashkent", "UZ"),
+        ("бишкек", "KG"),
+        ("bishkek", "KG"),
+        ("мумбаи", "IN"),
+        ("mumbai", "IN"),
+        ("дели", "IN"),
+        ("delhi", "IN"),
+        ("бангалор", "IN"),
+        ("bangalore", "IN"),
+        ("джакарта", "ID"),
+        ("jakarta", "ID"),
+        ("бангкок", "TH"),
+        ("bangkok", "TH"),
+        ("ханой", "VN"),
+        ("hanoi", "VN"),
+        ("манила", "PH"),
+        ("manila", "PH"),
+        ("каир", "EG"),
+        ("cairo", "EG"),
+        ("йоханнесбург", "ZA"),
+        ("johannesburg", "ZA"),
+        ("россия", "RU"),
+        ("russia", "RU"),
+        ("германия", "DE"),
+        ("germany", "DE"),
+        ("нидерланды", "NL"),
+        ("netherlands", "NL"),
+        ("финляндия", "FI"),
+        ("finland", "FI"),
+        ("япония", "JP"),
+        ("japan", "JP"),
+        ("сша", "US"),
+        ("usa", "US"),
+        ("united states", "US"),
+        ("великобритания", "GB"),
+        ("united kingdom", "GB"),
+        ("england", "GB"),
+        ("франция", "FR"),
+        ("france", "FR"),
+        ("швейцария", "CH"),
+        ("switzerland", "CH"),
+        ("швеция", "SE"),
+        ("sweden", "SE"),
+        ("польша", "PL"),
+        ("poland", "PL"),
+        ("турция", "TR"),
+        ("turkey", "TR"),
+    ];
+    let name = name.to_lowercase();
+    PLACES
+        .iter()
+        .find(|(needle, _)| name.starts_with(needle))
+        .map(|(_, code)| *code)
+}
+
 fn server_badge(server: &Server) -> String {
+    if let Some(code) = country_code(&server.name) {
+        return code.to_string();
+    }
     if let Some(word) = server.name.split_whitespace().next() {
         let letters: String = word.chars().filter(|c| c.is_alphabetic()).take(2).collect();
         if !letters.is_empty() {
@@ -961,15 +1289,20 @@ fn latency_color(p: &Palette, latency: u32) -> Color32 {
 
 fn server_compatible(server: &Server, core: CoreKind, capabilities: CoreCapabilities) -> bool {
     match core {
-        CoreKind::Singbox => {
-            (server.transport != Transport::Xhttp || capabilities.xhttp)
+        CoreKind::Singbox | CoreKind::Protogrid => {
+            (server.protocol != Protocol::Masque || capabilities.masque)
+                && (server.transport != Transport::Xhttp || capabilities.xhttp)
                 && (server.transport != Transport::Kcp || capabilities.kcp)
                 && (server.transport != Transport::XDrive || capabilities.xdrive)
         }
         CoreKind::Xray => {
             matches!(
                 server.protocol,
-                Protocol::Vless | Protocol::Vmess | Protocol::Trojan | Protocol::Shadowsocks
+                Protocol::Vless
+                    | Protocol::Vmess
+                    | Protocol::Trojan
+                    | Protocol::Shadowsocks
+                    | Protocol::Masque
             ) && server.transport != Transport::Http
         }
     }
@@ -1020,12 +1353,12 @@ fn rule_hint(kind: RuleKind) -> &'static str {
 }
 
 fn action_badge(ui: &mut Ui, p: &Palette, action: RuleAction) {
-    let (text, fg, bg) = match action {
-        RuleAction::Proxy => ("PROXY", p.accent_2, p.accent_soft),
-        RuleAction::Direct => ("DIRECT", p.muted, p.panel_2),
-        RuleAction::Block => ("BLOCK", p.red, p.red_soft),
+    let (text, fg, bg, stroke) = match action {
+        RuleAction::Proxy => ("PROXY", p.accent_2, p.accent_soft, Stroke::NONE),
+        RuleAction::Direct => ("DIRECT", p.muted, p.panel_2, Stroke::new(1.0, p.line)),
+        RuleAction::Block => ("BLOCK", p.red, p.red_soft, Stroke::NONE),
     };
-    pill(ui, p, text, fg, bg);
+    pill(ui, text, fg, bg, stroke);
 }
 
 fn level_color(p: &Palette, level: &str) -> Color32 {
@@ -1073,13 +1406,17 @@ fn nav_item(
     if selected {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(8), p.accent_soft);
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                egui::pos2(rect.left(), rect.top() + 8.0),
-                Vec2::new(2.0, 22.0),
-            ),
-            CornerRadius::same(2),
-            p.accent,
+        // Full-height 2 px accent border on the left edge, following the
+        // rounded corners (the reference uses `border-left` on the pill).
+        // The clip is as wide as the corner radius so the arc at the top and
+        // bottom stays visible instead of being cut into a short straight bar.
+        let border_clip =
+            Rect::from_min_max(rect.min, egui::pos2(rect.left() + 8.0, rect.bottom()));
+        ui.painter().with_clip_rect(border_clip).rect_stroke(
+            rect,
+            CornerRadius::same(8),
+            Stroke::new(2.0, p.accent),
+            egui::StrokeKind::Inside,
         );
     } else if hovered {
         ui.painter()
@@ -1145,7 +1482,7 @@ fn sidebar(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, colla
         logo(ui, p, 30.0);
         if !collapsed {
             ui.add_space(2.0);
-            ui.label(theme::semibold("ProtoGrid", 17.5));
+            ui.label(theme::bold("ProtoGrid", 19.0));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let icon = if view.dark {
@@ -2042,7 +2379,9 @@ fn info_card(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
                 .unwrap_or_else(|| "Добавьте подключение".into());
             let settings = &snapshot.config.settings;
             let ports = match settings.core {
-                CoreKind::Singbox => format!("mixed:{}", settings.mixed_port),
+                CoreKind::Singbox | CoreKind::Protogrid => {
+                    format!("mixed:{}", settings.mixed_port)
+                }
                 CoreKind::Xray => format!(
                     "socks:{} · http:{}",
                     settings.socks_port, settings.http_port
@@ -2120,30 +2459,41 @@ fn info_cell(ui: &mut Ui, p: &Palette, label: &str, value: &str, hint: &str) {
 /* -------------------------------------------------------------------------- */
 
 fn search_box(ui: &mut Ui, p: &Palette, value: &mut String, hint: &str, width: f32) -> bool {
-    let mut changed = false;
-    Frame::new()
-        .fill(p.panel_2)
-        .stroke(Stroke::new(1.0, p.line))
-        .corner_radius(8)
-        .inner_margin(Margin::symmetric(9, 4))
-        .show(ui, |ui| {
-            ui.set_width(width);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS)
-                        .size(14.0)
-                        .color(p.faint),
-                );
-                let response = ui.add(
-                    TextEdit::singleline(value)
-                        .hint_text(hint)
-                        .frame(egui::Frame::NONE)
-                        .desired_width(ui.available_width()),
-                );
-                changed = response.changed();
-            });
-        });
-    changed
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+    let radius = CornerRadius::same(8);
+    ui.painter().rect(
+        rect,
+        radius,
+        p.panel_2,
+        Stroke::new(1.0, p.line),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 17.5, rect.center().y),
+        Align2::CENTER_CENTER,
+        egui_phosphor::regular::MAGNIFYING_GLASS,
+        FontId::new(15.0, FontFamily::Proportional),
+        p.faint,
+    );
+    let edit_rect = Rect::from_min_max(
+        egui::pos2(rect.left() + 32.0, rect.top() + 3.0),
+        egui::pos2(rect.right() - 10.0, rect.bottom() - 3.0),
+    );
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(edit_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let edit = child.add(
+        TextEdit::singleline(value)
+            .hint_text(hint)
+            .frame(egui::Frame::NONE)
+            .desired_width(edit_rect.width()),
+    );
+    if response.clicked() {
+        edit.request_focus();
+    }
+    edit.changed()
 }
 
 fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
@@ -2188,7 +2538,7 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
         {
             engine.ping_all();
         }
-        search_box(ui, p, &mut view.search, "Поиск сервера…", 240.0);
+        search_box(ui, p, &mut view.search, "Поиск сервера…", 250.0);
     });
 
     Frame::new()
@@ -2204,7 +2554,15 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
-                        if ptab(ui, p, "Все", view.group.is_none()).clicked() {
+                        if ptab(
+                            ui,
+                            p,
+                            "Все",
+                            snapshot.config.servers.len(),
+                            view.group.is_none(),
+                        )
+                        .clicked()
+                        {
                             view.group = None;
                         }
                         for sub in &snapshot.config.subscriptions {
@@ -2219,7 +2577,8 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                             if ptab(
                                 ui,
                                 p,
-                                &format!("{}  {count}", sub.name),
+                                &sub.name,
+                                count,
                                 view.group.as_deref() == Some(sub.id.as_str()),
                             )
                             .clicked()
@@ -2354,6 +2713,9 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                 .max_height(ui.available_height() - 8.0)
                 .show(ui, |ui| {
                     ui.set_min_width(available);
+                    // Rows and separators must be flush; the default 7 px item
+                    // spacing left gaps above/below the active row fill.
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     table_header(ui, p, view, &widths);
                     for (index, server) in visible.iter().enumerate() {
                         server_row(
@@ -2382,9 +2744,13 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
     );
 }
 
-fn ptab(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Response {
-    let font = FontId::proportional(12.0);
-    let width = measure(ui, text, font.clone()) + 20.0;
+fn ptab(ui: &mut Ui, p: &Palette, label: &str, count: usize, selected: bool) -> egui::Response {
+    let label_font = FontId::proportional(12.0);
+    let count_font = FontId::monospace(10.0);
+    let count_text = count.to_string();
+    let label_width = measure(ui, label, label_font.clone());
+    let count_width = measure(ui, &count_text, count_font.clone());
+    let width = 10.0 + label_width + 6.0 + count_width + 10.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click());
     if selected {
         ui.painter()
@@ -2393,18 +2759,27 @@ fn ptab(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Response 
         ui.painter()
             .rect_filled(rect, CornerRadius::same(7), p.panel_2);
     }
+    let color = if selected {
+        p.accent_2
+    } else if response.hovered() {
+        p.text
+    } else {
+        p.faint
+    };
+    let y = rect.center().y;
     ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        text,
-        font,
-        if selected {
-            p.accent_2
-        } else if response.hovered() {
-            p.text
-        } else {
-            p.faint
-        },
+        egui::pos2(rect.left() + 10.0, y),
+        Align2::LEFT_CENTER,
+        label,
+        label_font,
+        color,
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 10.0 + label_width + 6.0, y),
+        Align2::LEFT_CENTER,
+        count_text,
+        count_font,
+        color.gamma_multiply(0.65),
     );
     response
 }
@@ -2417,7 +2792,6 @@ struct TableWidths {
     latency: f32,
     speed: f32,
     status: f32,
-    actions: f32,
 }
 
 impl TableWidths {
@@ -2427,10 +2801,10 @@ impl TableWidths {
         let group = 120.0;
         let latency = 96.0;
         let speed = 90.0;
-        let status = 108.0;
-        let actions = 88.0;
-        let server =
-            (available - index - protocol - group - latency - speed - status - actions).max(200.0);
+        // Status owns the right edge (like the reference); row actions sit to
+        // its left inside the same column.
+        let status = 196.0;
+        let server = (available - index - protocol - group - latency - speed - status).max(200.0);
         Self {
             index,
             server,
@@ -2439,7 +2813,6 @@ impl TableWidths {
             latency,
             speed,
             status,
-            actions,
         }
     }
 }
@@ -2533,7 +2906,6 @@ fn table_header(ui: &mut Ui, p: &Palette, view: &mut View, widths: &TableWidths)
     }
     cell(&mut child, widths.speed, "Скорость", false);
     cell(&mut child, widths.status, "Статус", true);
-    cell(&mut child, widths.actions, "", false);
     let (line, _) = ui.allocate_exact_size(Vec2::new(rect.width(), 1.0), Sense::hover());
     ui.painter().rect_filled(line, 0, p.line);
 }
@@ -2584,7 +2956,7 @@ fn server_row(
         |ui| {
             ui.set_min_width(widths.index);
             ui.label(
-                RichText::new(format!("{:02}", index + 1))
+                RichText::new(format!("{}", index + 1))
                     .size(11.0)
                     .color(p.faint)
                     .family(FontFamily::Monospace),
@@ -2613,24 +2985,32 @@ fn server_row(
                 FontId::monospace(10.0),
                 p.muted,
             );
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.add(
-                    egui::Label::new(theme::semibold(server.display_name(), 13.0))
+            let name_font = FontId::new(13.0, FontFamily::Name("Semibold".into()));
+            let address_font = FontId::new(10.5, FontFamily::Monospace);
+            let name_height = ui.ctx().fonts_mut(|fonts| fonts.row_height(&name_font));
+            let address_height = ui.ctx().fonts_mut(|fonts| fonts.row_height(&address_font));
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), name_height + 1.0 + address_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add(
+                        egui::Label::new(theme::semibold(server.display_name(), 13.0))
+                            .truncate()
+                            .selectable(false),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(server_target(server))
+                                .size(10.5)
+                                .color(p.faint)
+                                .family(FontFamily::Monospace),
+                        )
                         .truncate()
                         .selectable(false),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(server_target(server))
-                            .size(10.5)
-                            .color(p.faint)
-                            .family(FontFamily::Monospace),
-                    )
-                    .truncate()
-                    .selectable(false),
-                );
-            });
+                    );
+                },
+            );
         },
     );
 
@@ -2639,33 +3019,26 @@ fn server_row(
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.set_min_width(widths.protocol);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 3.0;
-                let color = protocol_color(p, server.protocol);
-                Frame::new()
-                    .fill(p.panel_2)
-                    .stroke(Stroke::new(1.0, p.line))
-                    .corner_radius(5)
-                    .inner_margin(Margin::symmetric(7, 1))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(protocol_name(server.protocol))
-                                .size(9.5)
-                                .color(color)
-                                .family(FontFamily::Monospace),
-                        );
-                    });
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {}",
-                        transport_short(server.transport),
-                        security_short(server.security)
-                    ))
-                    .size(10.0)
-                    .color(p.faint)
-                    .family(FontFamily::Monospace),
-                );
-            });
+            let sub_font = FontId::new(10.0, FontFamily::Monospace);
+            let sub_height = ui.ctx().fonts_mut(|fonts| fonts.row_height(&sub_font));
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 21.0 + 3.0 + sub_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    protocol_badge(ui, p, server.protocol);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            security_short(server.security),
+                            transport_short(server.transport)
+                        ))
+                        .size(10.0)
+                        .color(p.faint)
+                        .family(FontFamily::Monospace),
+                    );
+                },
+            );
         },
     );
 
@@ -2752,14 +3125,14 @@ fn server_row(
         |ui| {
             ui.set_min_width(widths.status);
             if active && snapshot.is_connected() {
-                badge(ui, p, "Активен", p.green, p.green_soft);
+                badge(ui, p, "Активен", p.green, p.green_soft, true);
             } else if active {
-                badge(ui, p, "Выбран", p.accent_2, p.accent_soft);
+                badge(ui, p, "Выбран", p.faint, p.panel_2, true);
             } else {
                 if ui
                     .add(
-                        egui::Button::new(RichText::new("Подключить").size(11.0).color(p.muted))
-                            .fill(p.panel_2)
+                        egui::Button::new(RichText::new("Подключить").size(11.5).color(p.muted))
+                            .fill(p.panel)
                             .stroke(Stroke::new(1.0, p.line))
                             .corner_radius(7)
                             .min_size(Vec2::new(0.0, 28.0)),
@@ -2769,15 +3142,9 @@ fn server_row(
                     engine.set_active_server(&server.id);
                 }
             }
-        },
-    );
-
-    child.allocate_ui_with_layout(
-        Vec2::new(widths.actions, 57.0),
-        Layout::right_to_left(Align::Center),
-        |ui| {
-            ui.set_min_width(widths.actions);
-            ui.spacing_mut().item_spacing.x = 2.0;
+            // Row actions stay available, placed just left of the status.
+            ui.add_space(10.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
             if small_ghost(ui, p, egui_phosphor::regular::TRASH, "Удалить").clicked() {
                 view.confirm = Some(Confirm {
                     title: "Удалить сервер?".into(),
@@ -2801,24 +3168,25 @@ fn server_row(
     );
 }
 
-fn badge(ui: &mut Ui, _p: &Palette, text: &str, fg: Color32, bg: Color32) {
-    Frame::new()
-        .fill(bg)
-        .corner_radius(6)
-        .inner_margin(Margin::symmetric(8, 3))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 5.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(5.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 2.5, fg);
-                ui.label(
-                    RichText::new(text)
-                        .size(10.5)
-                        .color(fg)
-                        .family(FontFamily::Name("Medium".into())),
-                );
-            });
-        });
+fn badge(ui: &mut Ui, _p: &Palette, text: &str, fg: Color32, bg: Color32, dot: bool) {
+    // Fixed 23 px pill (`.badge` in the web concept). Painted manually so the
+    // surrounding row layout cannot stretch it vertically.
+    let font = FontId::new(10.5, FontFamily::Name("Medium".into()));
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, fg);
+    let dot_space = if dot { 10.0 } else { 0.0 };
+    let size = Vec2::new(galley.size().x + dot_space + 16.0, 23.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let radius = CornerRadius::same(6);
+    ui.painter().rect_filled(rect, radius, bg);
+    let mut x = rect.left() + 8.0;
+    let center_y = rect.center().y;
+    if dot {
+        ui.painter()
+            .circle_filled(egui::pos2(x + 2.5, center_y), 2.5, fg);
+        x += dot_space;
+    }
+    ui.painter()
+        .galley(egui::pos2(x, center_y - galley.size().y * 0.5), galley, fg);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2848,6 +3216,7 @@ fn subscriptions_page(
             )
             .clicked()
             {
+                view.subscription_edit = None;
                 view.subscription_name.clear();
                 view.subscription_url.clear();
                 view.modal = Some(ModalState::Subscription);
@@ -2876,6 +3245,9 @@ fn subscriptions_page(
                     )
                     .clicked()
                 {
+                    view.subscription_edit = None;
+                    view.subscription_name.clear();
+                    view.subscription_url.clear();
                     view.modal = Some(ModalState::Subscription);
                 }
             },
@@ -2891,6 +3263,7 @@ fn subscriptions_page(
         });
         ui.add_space(14.0);
     }
+    add_subscription_tile(ui, p, view);
     let _ = engine;
 }
 
@@ -2908,26 +3281,68 @@ fn subscription_card(
         .iter()
         .filter(|server| server.subscription_id.as_deref() == Some(sub.id.as_str()))
         .count();
+    let info = sub.userinfo.as_ref();
+    let used = info.map(|info| info.used()).unwrap_or(0);
+    let total = info.map(|info| info.total).unwrap_or(0);
+    let percent = if total > 0 {
+        (used.saturating_mul(100) / total).min(100)
+    } else {
+        0
+    };
+    let now = now_ms() / 1000;
+    let expired = info
+        .map(|info| info.expire > 0 && info.expire < now)
+        .unwrap_or(false);
+    let expiring = info
+        .map(|info| info.expire > 0 && info.expire >= now && info.expire - now < 7 * 86400)
+        .unwrap_or(false);
+    let (status_text, status_fg, status_bg) = if sub.last_error.is_some() {
+        ("Ошибка", p.red, p.red_soft)
+    } else if expired {
+        ("Истекла", p.red, p.red_soft)
+    } else if expiring || (total > 0 && percent >= 90) {
+        ("Истекает", p.amber, p.amber_soft)
+    } else {
+        ("Активна", p.green, p.green_soft)
+    };
+    let traffic = if used > 0 {
+        bytes_compact(used)
+    } else {
+        "—".into()
+    };
+    let expires = info
+        .map(|info| date(info.expire))
+        .unwrap_or_else(|| "—".into());
+
     Frame::new()
         .fill(p.panel)
         .stroke(Stroke::new(1.0, p.line))
         .corner_radius(14)
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 1],
+            blur: 2,
+            spread: 0,
+            color: Color32::from_black_alpha(60),
+        })
         .inner_margin(Margin::same(17))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                Frame::new()
-                    .fill(p.accent_soft)
-                    .corner_radius(10)
-                    .inner_margin(Margin::same(9))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(egui_phosphor::regular::STACK)
-                                .size(17.0)
-                                .color(p.accent_2),
-                        );
-                    });
+            ui.set_min_height(190.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(icon_rect, CornerRadius::same(10), p.accent_soft);
+                ui.painter().text(
+                    icon_rect.center(),
+                    Align2::CENTER_CENTER,
+                    egui_phosphor::regular::STACK,
+                    FontId::new(17.0, FontFamily::Proportional),
+                    p.accent_2,
+                );
                 ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
                     ui.add(
                         egui::Label::new(theme::semibold(&sub.name, 13.5))
                             .truncate()
@@ -2935,7 +3350,7 @@ fn subscription_card(
                     );
                     ui.add(
                         egui::Label::new(
-                            RichText::new(host_of(&sub.url))
+                            RichText::new(&sub.url)
                                 .size(10.5)
                                 .color(p.faint)
                                 .family(FontFamily::Monospace),
@@ -2944,109 +3359,69 @@ fn subscription_card(
                         .selectable(false),
                     );
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if small_ghost(ui, p, egui_phosphor::regular::TRASH, "Удалить").clicked()
-                    {
-                        view.confirm = Some(Confirm {
-                            title: "Удалить подписку?".into(),
-                            message: format!("«{}» и её серверы будут удалены.", sub.name),
-                            label: "Удалить".into(),
-                            danger: true,
-                            action: ConfirmAction::DeleteSubscription(sub.id.clone()),
-                        });
-                        view.modal = Some(ModalState::Confirm);
-                    }
-                    let busy = snapshot.busy(&format!("sub-{}", sub.id));
-                    if small_ghost(
-                        ui,
-                        p,
-                        if busy {
-                            egui_phosphor::regular::CIRCLE_NOTCH
-                        } else {
-                            egui_phosphor::regular::ARROWS_CLOCKWISE
-                        },
-                        "Обновить",
-                    )
-                    .clicked()
-                    {
-                        engine.refresh_subscription(sub.id.clone());
-                    }
-                    ui.add_space(2.0);
-                    badge(
-                        ui,
-                        p,
-                        if sub.auto_update {
-                            "авто"
-                        } else {
-                            "вручную"
-                        },
-                        if sub.auto_update { p.green } else { p.faint },
-                        if sub.auto_update {
-                            p.green_soft
-                        } else {
-                            p.panel_2
-                        },
-                    );
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    badge(ui, p, status_text, status_fg, status_bg, true);
                 });
             });
-            ui.add_space(8.0);
-            if let Some(error) = &sub.last_error {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{}  {error}", egui_phosphor::regular::WARNING))
-                            .size(10.0)
-                            .color(p.red),
-                    )
-                    .truncate(),
-                );
-            } else {
-                ui.add_space(19.0);
-            }
-            ui.add_space(5.0);
-            let info = sub.userinfo.as_ref();
-            let used = info.map(|info| info.used()).unwrap_or(0);
-            let total = info.map(|info| info.total).unwrap_or(0);
-            let percent = if total > 0 {
-                (used.saturating_mul(100) / total).min(100)
-            } else {
-                0
-            };
-            let traffic = if used > 0 { bytes(used) } else { "—".into() };
-            let expires = info
-                .map(|info| date(info.expire))
-                .unwrap_or_else(|| "—".into());
+            ui.add_space(13.0);
             let boxes = [
                 ("Серверы", servers.to_string()),
                 ("Трафик", traffic),
-                ("Срок", expires),
+                ("До", expires),
             ];
             card_grid(ui, 3, 7.0, |ui, index| {
                 let (label, value) = &boxes[index];
                 mini_box(ui, p, label, value);
             });
-            ui.add_space(12.0);
+            ui.add_space(13.0);
+
+            let percent_text = if total > 0 {
+                format!("{percent}%")
+            } else {
+                String::new()
+            };
+            let percent_font = FontId::new(10.5, FontFamily::Monospace);
+            let percent_width = if total > 0 {
+                measure(ui, &percent_text, percent_font.clone())
+            } else {
+                0.0
+            };
+            let left_width = (ui.available_width() - percent_width - 10.0).max(20.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(if total > 0 {
-                        format!("{} из {}", bytes(used), bytes(total))
-                    } else {
-                        "Провайдер не передаёт статистику".into()
-                    })
-                    .size(10.5)
-                    .color(p.faint),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if total > 0 {
-                        ui.label(
-                            RichText::new(format!("{percent}%"))
-                                .size(10.5)
-                                .color(p.accent_2)
-                                .family(FontFamily::Monospace),
+                ui.allocate_ui_with_layout(
+                    Vec2::new(left_width, 0.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_max_width(left_width);
+                        let (text, color) = if let Some(error) = &sub.last_error {
+                            (
+                                format!("{}  {error}", egui_phosphor::regular::WARNING),
+                                p.red,
+                            )
+                        } else if total > 0 {
+                            (format!("Лимит {}", bytes_compact(total)), p.faint)
+                        } else {
+                            ("Провайдер не передаёт статистику".into(), p.faint)
+                        };
+                        let response = ui.add(
+                            egui::Label::new(RichText::new(text).size(10.5).color(color))
+                                .truncate()
+                                .selectable(false),
                         );
-                    }
-                });
+                        if let Some(error) = &sub.last_error {
+                            response.on_hover_text(error);
+                        }
+                    },
+                );
+                if total > 0 {
+                    ui.label(
+                        RichText::new(percent_text)
+                            .font(percent_font)
+                            .color(p.muted),
+                    );
+                }
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             let fraction = if total > 0 {
                 used as f32 / total as f32
             } else {
@@ -3064,38 +3439,115 @@ fn subscription_card(
                     p.accent
                 },
             );
-            ui.add_space(12.0);
+            ui.add_space(13.0);
             let (line, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0, p.line);
-            ui.add_space(9.0);
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
+                ui.label(RichText::new("Автообновление").size(11.0).color(p.muted));
                 let mut auto = sub.auto_update;
                 if switch(ui, p, &mut auto) {
                     engine.set_subscription_auto_update(&sub.id, auto);
                 }
-                ui.label(RichText::new("Автообновление").size(11.0).color(p.muted));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Серверы →").size(11.0).color(p.faint))
-                                .frame(false),
-                        )
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    if small_ghost(ui, p, egui_phosphor::regular::TRASH, "Удалить").clicked()
+                    {
+                        view.confirm = Some(Confirm {
+                            title: "Удалить подписку?".into(),
+                            message: format!("«{}» и её серверы будут удалены.", sub.name),
+                            label: "Удалить".into(),
+                            danger: true,
+                            action: ConfirmAction::DeleteSubscription(sub.id.clone()),
+                        });
+                        view.modal = Some(ModalState::Confirm);
+                    }
+                    if small_ghost(ui, p, egui_phosphor::regular::PENCIL_SIMPLE, "Изменить")
                         .clicked()
                     {
-                        view.search = sub.name.clone();
-                        view.group = Some(sub.id.clone());
-                        view.page = Page::Servers;
+                        view.subscription_edit = Some(sub.id.clone());
+                        view.subscription_name = sub.name.clone();
+                        view.subscription_url = sub.url.clone();
+                        view.modal = Some(ModalState::Subscription);
                     }
-                    ui.label(
-                        RichText::new(ago(sub.last_updated.unwrap_or(0)))
-                            .size(9.5)
-                            .color(p.faint),
-                    );
+                    let busy = snapshot.busy(&format!("sub-{}", sub.id));
+                    if small_ghost(
+                        ui,
+                        p,
+                        if busy {
+                            egui_phosphor::regular::CIRCLE_NOTCH
+                        } else {
+                            egui_phosphor::regular::ARROWS_CLOCKWISE
+                        },
+                        "Обновить",
+                    )
+                    .clicked()
+                    {
+                        engine.refresh_subscription(sub.id.clone());
+                    }
                 });
             });
         });
+}
+
+fn add_subscription_tile(ui: &mut Ui, p: &Palette, view: &mut View) {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 74.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(14), p.accent_soft);
+    }
+    dashed_round_rect(
+        ui.painter(),
+        rect,
+        14.0,
+        Stroke::new(
+            1.0,
+            if hovered {
+                p.accent_line
+            } else {
+                p.line_strong
+            },
+        ),
+    );
+    let fg = if hovered { p.accent_2 } else { p.faint };
+    ui.painter().text(
+        egui::pos2(rect.left() + 30.0, rect.center().y),
+        Align2::CENTER_CENTER,
+        egui_phosphor::regular::PLUS,
+        FontId::new(20.0, FontFamily::Proportional),
+        fg,
+    );
+    let label_font = FontId::new(13.0, FontFamily::Name("Medium".into()));
+    let hint_font = FontId::new(11.5, FontFamily::Proportional);
+    let label = ui
+        .painter()
+        .layout_no_wrap("Добавить подписку".to_owned(), label_font, fg);
+    let hint =
+        ui.painter()
+            .layout_no_wrap("URL или vless:// ссылка".to_owned(), hint_font, p.faint);
+    let x = rect.left() + 50.0;
+    ui.painter().galley(
+        egui::pos2(x, rect.center().y - label.size().y * 0.5),
+        label.clone(),
+        fg,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            x + label.size().x + 12.0,
+            rect.center().y - hint.size().y * 0.5,
+        ),
+        hint.clone(),
+        p.faint,
+    );
+    if response.clicked() {
+        view.subscription_edit = None;
+        view.subscription_name.clear();
+        view.subscription_url.clear();
+        view.modal = Some(ModalState::Subscription);
+    }
 }
 
 fn mini_box(ui: &mut Ui, p: &Palette, label: &str, value: &str) {
@@ -3103,12 +3555,13 @@ fn mini_box(ui: &mut Ui, p: &Palette, label: &str, value: &str) {
         .fill(p.panel_2)
         .stroke(Stroke::new(1.0, p.line))
         .corner_radius(8)
-        .inner_margin(Margin::symmetric(9, 6))
+        .inner_margin(Margin::symmetric(9, 7))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(
                 RichText::new(label.to_uppercase())
-                    .size(8.5)
+                    .size(9.0)
                     .color(p.faint)
                     .family(FontFamily::Name("Medium".into())),
             );
@@ -3211,6 +3664,7 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                 ),
                                 p.accent_2,
                                 p.accent_soft,
+                                false,
                             );
                         });
                     });
@@ -3270,6 +3724,58 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
         });
 }
 
+/// Vertical fade from `color` at the top to transparent at `stop` of the height,
+/// clipped to a rounded rectangle. Mirrors the CSS gradient of the active preset
+/// card in the web concept (`linear-gradient(180deg, accent-soft, transparent 80%)`).
+fn paint_vertical_fade(
+    painter: &egui::Painter,
+    rect: Rect,
+    color: Color32,
+    stop: f32,
+    radius: f32,
+) {
+    let height = rect.height();
+    if height <= 0.0 || color.a() == 0 {
+        return;
+    }
+    let radius = radius.min(rect.width() * 0.5).min(height * 0.5);
+    let stop = stop.clamp(0.01, 1.0);
+    // `Color32` stores premultiplied channels; take the straight sRGB values so
+    // each strip recomputes the same tint with a lower alpha.
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
+    let alpha = alpha as f32;
+    for row in 0..height.ceil() as usize {
+        let y0 = rect.top() + row as f32;
+        let y1 = (y0 + 1.0).min(rect.bottom());
+        let mid = (y0 + y1) * 0.5;
+        let t = ((mid - rect.top()) / height).min(stop) / stop;
+        let a = (alpha * (1.0 - t)).round() as u8;
+        if a == 0 {
+            continue;
+        }
+        let inset = if mid < rect.top() + radius {
+            let dy = rect.top() + radius - mid;
+            radius - (radius * radius - dy * dy).max(0.0).sqrt()
+        } else if mid > rect.bottom() - radius {
+            let dy = mid - (rect.bottom() - radius);
+            radius - (radius * radius - dy * dy).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        if rect.width() <= inset * 2.0 {
+            continue;
+        }
+        painter.rect_filled(
+            Rect::from_min_max(
+                egui::pos2(rect.left() + inset, y0),
+                egui::pos2(rect.right() - inset, y1),
+            ),
+            0,
+            Color32::from_rgba_unmultiplied(red, green, blue, a),
+        );
+    }
+}
+
 fn preset_card(
     ui: &mut Ui,
     p: &Palette,
@@ -3292,13 +3798,24 @@ fn preset_card(
     };
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 82.0), Sense::click());
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(12),
-        if active { p.accent_soft } else { p.panel },
-        Stroke::new(1.0, if active { p.accent } else { p.line }),
-        egui::StrokeKind::Inside,
-    );
+    let radius = CornerRadius::same(12);
+    if active {
+        paint_vertical_fade(ui.painter(), rect, p.accent_soft, 0.8, 12.0);
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, p.accent),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        ui.painter().rect(
+            rect,
+            radius,
+            p.panel,
+            Stroke::new(1.0, p.line),
+            egui::StrokeKind::Inside,
+        );
+    }
     let inner = rect.shrink(15.0);
     let mut child = ui.new_child(
         UiBuilder::new()
@@ -3751,6 +4268,21 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             if top_button(
                 ui,
                 p,
+                egui_phosphor::regular::FLOPPY_DISK,
+                "Сохранить",
+                BtnKind::Ghost,
+                true,
+            )
+            .clicked()
+            {
+                match engine.save_logs() {
+                    Ok(path) => view.toast(format!("Логи сохранены: {path}"), ToastKind::Success),
+                    Err(error) => view.toast(error, ToastKind::Error),
+                }
+            }
+            if top_button(
+                ui,
+                p,
                 egui_phosphor::regular::COPY,
                 "Копировать",
                 BtnKind::Ghost,
@@ -3816,6 +4348,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
         .filter(|entry| {
             let level_ok = match view.log_level {
                 LogFilter::All => true,
+                LogFilter::Debug => entry.level == "debug" || entry.level == "trace",
                 LogFilter::Info => entry.level == "info",
                 LogFilter::Warn => entry.level == "warn" || entry.level == "warning",
                 LogFilter::Error => entry.level == "error",
@@ -3847,6 +4380,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                         ui.spacing_mut().item_spacing.x = 3.0;
                         for (filter, label) in [
                             (LogFilter::All, "Все"),
+                            (LogFilter::Debug, "Отладка"),
                             (LogFilter::Info, "Инфо"),
                             (LogFilter::Warn, "Внимание"),
                             (LogFilter::Error, "Ошибки"),
@@ -3919,6 +4453,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                                     "фильтр: {}",
                                     match view.log_level {
                                         LogFilter::All => "все",
+                                        LogFilter::Debug => "отладка",
                                         LogFilter::Info => "инфо",
                                         LogFilter::Warn => "внимание",
                                         LogFilter::Error => "ошибки",
@@ -4154,11 +4689,34 @@ fn settings_card(
 }
 
 fn set_row(ui: &mut Ui, p: &Palette, title: &str, text: &str, control: impl FnOnce(&mut Ui)) {
-    set_row_impl(ui, p, title, text, false, control);
+    set_row_impl(ui, p, title, text, false, true, control);
 }
 
 fn set_row_last(ui: &mut Ui, p: &Palette, title: &str, text: &str, control: impl FnOnce(&mut Ui)) {
-    set_row_impl(ui, p, title, text, true, control);
+    set_row_impl(ui, p, title, text, true, true, control);
+}
+
+/// A row whose control is greyed out when the selected core does not support it.
+fn set_row_if(
+    ui: &mut Ui,
+    p: &Palette,
+    title: &str,
+    text: &str,
+    enabled: bool,
+    control: impl FnOnce(&mut Ui),
+) {
+    set_row_impl(ui, p, title, text, false, enabled, control);
+}
+
+fn set_row_last_if(
+    ui: &mut Ui,
+    p: &Palette,
+    title: &str,
+    text: &str,
+    enabled: bool,
+    control: impl FnOnce(&mut Ui),
+) {
+    set_row_impl(ui, p, title, text, true, enabled, control);
 }
 
 fn set_row_impl(
@@ -4167,6 +4725,7 @@ fn set_row_impl(
     title: &str,
     text: &str,
     last: bool,
+    enabled: bool,
     control: impl FnOnce(&mut Ui),
 ) {
     Frame::new()
@@ -4177,9 +4736,16 @@ fn set_row_impl(
                 ui.vertical(|ui| {
                     ui.set_max_width((ui.available_width() - 190.0).max(120.0));
                     ui.label(theme::medium(title, 12.5));
+                    let text = if enabled {
+                        text.to_string()
+                    } else {
+                        format!("{text} · недоступно для выбранного ядра")
+                    };
                     ui.label(RichText::new(text).size(10.5).color(p.faint));
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), control);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_enabled_ui(enabled, |ui| control(ui));
+                });
             });
         });
     if !last {
@@ -4204,6 +4770,14 @@ fn settings_connection(
     engine: &Engine,
     draft: &mut Settings,
 ) {
+    let core = draft.core;
+    let features = snapshot
+        .core(core)
+        .map(|info| info.features)
+        .unwrap_or_default();
+    if !features.tun {
+        draft.tun_enabled = false;
+    }
     settings_card(
         ui,
         p,
@@ -4234,15 +4808,14 @@ fn settings_connection(
                         ui.add_space(8.0);
                     });
             }
-            set_row(
+            set_row_if(
                 ui,
                 p,
                 "TUN-режим",
                 "Перехватывать весь трафик; нужны права администратора",
+                features.tun,
                 |ui| {
-                    ui.add_enabled_ui(draft.core == CoreKind::Singbox, |ui| {
-                        switch(ui, p, &mut draft.tun_enabled);
-                    });
+                    switch(ui, p, &mut draft.tun_enabled);
                 },
             );
             set_row(
@@ -4266,32 +4839,42 @@ fn settings_connection(
                     }
                 },
             );
-            set_row(
+            set_row_if(
                 ui,
                 p,
                 "Порт mixed",
                 "sing-box: HTTP и SOCKS одновременно",
+                core.is_singbox_like(),
                 |ui| {
                     port_input(ui, &mut draft.mixed_port);
                 },
             );
-            set_row(ui, p, "Порт SOCKS", "Xray-core", |ui| {
-                port_input(ui, &mut draft.socks_port);
-            });
-            set_row(
+            set_row_if(
+                ui,
+                p,
+                "Порт SOCKS",
+                "Xray-core",
+                !core.is_singbox_like(),
+                |ui| {
+                    port_input(ui, &mut draft.socks_port);
+                },
+            );
+            set_row_if(
                 ui,
                 p,
                 "Порт HTTP",
                 "Xray-core и системный прокси",
+                !core.is_singbox_like(),
                 |ui| {
                     port_input(ui, &mut draft.http_port);
                 },
             );
-            set_row_last(
+            set_row_last_if(
                 ui,
                 p,
                 "Clash API",
                 "Проверка задержки и телеметрия sing-box",
+                features.clash_api,
                 |ui| {
                     port_input(ui, &mut draft.clash_api_port);
                 },
@@ -4417,6 +5000,13 @@ fn settings_dns(
     snapshot: &Snapshot,
     draft: &mut Settings,
 ) {
+    let features = snapshot
+        .core(draft.core)
+        .map(|info| info.features)
+        .unwrap_or_default();
+    if !features.fakedns {
+        draft.fake_dns = false;
+    }
     settings_card(
         ui,
         p,
@@ -4432,11 +5022,12 @@ fn settings_dns(
                     plain_input(ui, &mut draft.dns_remote, 240.0);
                 },
             );
-            set_row(
+            set_row_if(
                 ui,
                 p,
                 "FakeDNS",
                 "sing-box: отдавать приложениям фейковые IP",
+                features.fakedns,
                 |ui| {
                     switch(ui, p, &mut draft.fake_dns);
                 },
@@ -4488,72 +5079,79 @@ fn settings_core(
     engine: &Engine,
     draft: &mut Settings,
 ) {
-    settings_card(ui, p, "Ядро", "sing-box или Xray-core", |ui| {
-        Frame::new()
-            .inner_margin(Margin::symmetric(18, 10))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.spacing_mut().item_spacing.x = 8.0;
-                card_grid(ui, 2, 8.0, |ui, index| {
-                    if index == 0 {
-                        core_option(ui, p, snapshot, CoreKind::Singbox, draft);
-                    } else {
-                        core_option(ui, p, snapshot, CoreKind::Xray, draft);
-                    }
+    settings_card(
+        ui,
+        p,
+        "Ядро",
+        "ProtoGrid, sing-box или Xray-core — каждое со своим бинарником",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 10))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    card_grid(ui, 3, 8.0, |ui, index| {
+                        let kind = match index {
+                            0 => CoreKind::Protogrid,
+                            1 => CoreKind::Singbox,
+                            _ => CoreKind::Xray,
+                        };
+                        core_option(ui, p, snapshot, kind, draft);
+                    });
                 });
-            });
-        let (line, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-        ui.painter().rect_filled(line, 0, p.line);
-        set_row(
-            ui,
-            p,
-            "Путь к sing-box",
-            "Пусто — автоматический поиск",
-            |ui| {
-                plain_input(ui, &mut draft.singbox_path, 220.0);
-            },
-        );
-        set_row(
-            ui,
-            p,
-            "Путь к Xray",
-            "Пусто — автоматический поиск",
-            |ui| {
-                plain_input(ui, &mut draft.xray_path, 220.0);
-            },
-        );
-        Frame::new()
-            .inner_margin(Margin::symmetric(18, 12))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if action_button(
-                        ui,
-                        p,
-                        egui_phosphor::regular::ARROWS_CLOCKWISE,
-                        "Проверить ядра",
-                        BtnKind::Ghost,
-                    )
-                    .clicked()
-                    {
-                        engine.refresh_cores();
-                    }
-                    if action_button(
-                        ui,
-                        p,
-                        egui_phosphor::regular::DOWNLOAD_SIMPLE,
-                        "Скачать обновление",
-                        BtnKind::Outline,
-                    )
-                    .clicked()
-                    {
-                        engine.install_core(draft.core);
-                    }
+            let (line, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().rect_filled(line, 0, p.line);
+            set_row(
+                ui,
+                p,
+                "Путь к sing-box",
+                "Пусто — автоматический поиск",
+                |ui| {
+                    plain_input(ui, &mut draft.singbox_path, 220.0);
+                },
+            );
+            set_row(
+                ui,
+                p,
+                "Путь к Xray",
+                "Пусто — автоматический поиск",
+                |ui| {
+                    plain_input(ui, &mut draft.xray_path, 220.0);
+                },
+            );
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if action_button(
+                            ui,
+                            p,
+                            egui_phosphor::regular::ARROWS_CLOCKWISE,
+                            "Проверить ядра",
+                            BtnKind::Ghost,
+                        )
+                        .clicked()
+                        {
+                            engine.refresh_cores();
+                        }
+                        let (icon, label) = if draft.core == CoreKind::Protogrid {
+                            (egui_phosphor::regular::PACKAGE, "Восстановить из комплекта")
+                        } else {
+                            (
+                                egui_phosphor::regular::DOWNLOAD_SIMPLE,
+                                "Скачать обновление",
+                            )
+                        };
+                        if action_button(ui, p, icon, label, BtnKind::Outline).clicked() {
+                            engine.install_core(draft.core);
+                        }
+                    });
                 });
-            });
-        let _ = view;
-    });
+            let _ = view;
+        },
+    );
 }
 
 fn core_option(
@@ -4565,61 +5163,74 @@ fn core_option(
 ) {
     let selected = draft.core == kind;
     let info = snapshot.core(kind);
-    Frame::new()
+    let features = info.map(|info| info.features).unwrap_or_default();
+    let card = Frame::new()
         .fill(if selected { p.accent_soft } else { p.panel_2 })
         .stroke(Stroke::new(1.0, if selected { p.accent } else { p.line }))
         .corner_radius(10)
         .inner_margin(Margin::same(11))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            let response = ui
-                .horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(theme::medium(
-                            if kind == CoreKind::Singbox {
-                                "sing-box"
-                            } else {
-                                "Xray-core"
-                            },
-                            12.0,
-                        ));
-                        ui.label(
-                            RichText::new(
-                                info.and_then(|info| info.version.clone())
-                                    .map(|version| format!("v{version}"))
-                                    .unwrap_or_else(|| "не найден".into()),
-                            )
-                            .size(9.5)
-                            .color(p.faint),
-                        );
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let (radio, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                        ui.painter().circle_stroke(
-                            radio.center(),
-                            7.0,
-                            Stroke::new(1.5, if selected { p.accent } else { p.line_strong }),
-                        );
-                        if selected {
-                            ui.painter().circle_filled(radio.center(), 4.0, p.accent);
-                        }
-                    });
-                })
-                .response;
-            if ui
-                .interact(
-                    response.rect,
-                    ui.id().with(("core", kind.name())),
-                    Sense::click(),
-                )
-                .clicked()
-            {
-                draft.core = kind;
-                if kind == CoreKind::Xray {
-                    draft.tun_enabled = false;
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(theme::medium(
+                        match kind {
+                            CoreKind::Protogrid => "ProtoGrid",
+                            CoreKind::Singbox => "sing-box",
+                            CoreKind::Xray => "Xray-core",
+                        },
+                        12.0,
+                    ));
+                    ui.label(
+                        RichText::new(
+                            info.and_then(|info| info.version.clone())
+                                .map(|version| format!("v{version}"))
+                                .unwrap_or_else(|| "не найден".into()),
+                        )
+                        .size(9.5)
+                        .color(p.faint),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let (radio, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    ui.painter().circle_stroke(
+                        radio.center(),
+                        7.0,
+                        Stroke::new(1.5, if selected { p.accent } else { p.line_strong }),
+                    );
+                    if selected {
+                        ui.painter().circle_filled(radio.center(), 4.0, p.accent);
+                    }
+                });
+            });
+            ui.add_space(9.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                for protocol in core_protocols(kind, features) {
+                    mini_protocol_chip(ui, p, protocol);
                 }
-            }
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                for feature in core_feature_list(features) {
+                    mini_feature_chip(ui, p, feature);
+                }
+            });
         });
+    let response = ui
+        .interact(
+            card.response.rect,
+            ui.id().with(("core", kind.name())),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        draft.core = kind;
+        if !kind.is_singbox_like() {
+            draft.tun_enabled = false;
+        }
+    }
 }
 
 fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
@@ -4627,7 +5238,7 @@ fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine
         ui,
         p,
         "О приложении",
-        "ProtoGrid · нативный клиент sing-box и Xray-core",
+        "ProtoGrid · нативный клиент ProtoGrid, sing-box и Xray-core",
         |ui| {
             Frame::new()
                 .inner_margin(Margin::symmetric(18, 14))
@@ -4933,10 +5544,15 @@ fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
 }
 
 fn subscription_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
+    let editing = view.subscription_edit.is_some();
     modal_title(
         ui,
         p,
-        "Новая подписка",
+        if editing {
+            "Изменить подписку"
+        } else {
+            "Новая подписка"
+        },
         "ProtoGrid скачает серверы и данные о трафике.",
     );
     field(
@@ -4967,15 +5583,31 @@ fn subscription_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
                 .add(
-                    egui::Button::new(RichText::new("Загрузить").size(11.5).color(Color32::WHITE))
-                        .fill(p.accent)
-                        .corner_radius(8)
-                        .min_size(Vec2::new(0.0, 32.0)),
+                    egui::Button::new(
+                        RichText::new(if editing {
+                            "Сохранить"
+                        } else {
+                            "Загрузить"
+                        })
+                        .size(11.5)
+                        .color(Color32::WHITE),
+                    )
+                    .fill(p.accent)
+                    .corner_radius(8)
+                    .min_size(Vec2::new(0.0, 32.0)),
                 )
                 .clicked()
             {
                 if view.subscription_url.trim().is_empty() {
                     view.toast("Укажите ссылку на подписку", ToastKind::Warn);
+                } else if let Some(id) = view.subscription_edit.clone() {
+                    engine.update_subscription(
+                        id,
+                        view.subscription_name.clone(),
+                        view.subscription_url.clone(),
+                    );
+                    view.subscription_edit = None;
+                    view.modal = None;
                 } else {
                     engine.add_subscription(
                         view.subscription_name.clone(),
@@ -4993,6 +5625,7 @@ fn subscription_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine
                 )
                 .clicked()
             {
+                view.subscription_edit = None;
                 view.modal = None;
             }
         });
@@ -5089,6 +5722,11 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
         return;
     };
     let is_new = snapshot.server(&server.id).is_none();
+    let core = snapshot.config.settings.core;
+    let features = snapshot
+        .core(core)
+        .map(|info| info.features)
+        .unwrap_or_default();
     modal_title(
         ui,
         p,
@@ -5109,8 +5747,13 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             Protocol::Tuic,
             Protocol::Masque,
         ] {
+            let supported =
+                protocol.supports(core) && (protocol != Protocol::Masque || features.masque);
             if ui
-                .selectable_label(server.protocol == protocol, protocol_name(protocol))
+                .add_enabled_ui(supported, |ui| {
+                    ui.selectable_label(server.protocol == protocol, protocol_name(protocol))
+                })
+                .inner
                 .clicked()
             {
                 server.protocol = protocol;
@@ -5223,17 +5866,19 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                 .hint_text("xtls-rprx-vision")
                 .desired_width(f32::INFINITY),
         );
-        ui.label(
-            RichText::new("VLESS Encryption (Xray 26, необязательно)")
-                .size(10.0)
-                .color(p.muted),
-        );
-        ui.add(
-            TextEdit::multiline(&mut server.encryption)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY)
-                .hint_text("mlkem768x25519plus..."),
-        );
+        ui.add_enabled_ui(features.vless_encryption, |ui| {
+            ui.label(
+                RichText::new("VLESS Encryption (Xray 26, необязательно)")
+                    .size(10.0)
+                    .color(p.muted),
+            );
+            ui.add(
+                TextEdit::multiline(&mut server.encryption)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("mlkem768x25519plus..."),
+            );
+        });
     }
     if server.protocol == Protocol::Vmess {
         ui.columns(2, |columns| {
@@ -5373,17 +6018,19 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     TextEdit::singleline(&mut server.reality_spider_x).desired_width(f32::INFINITY),
                 );
             });
-            ui.label(
-                RichText::new("ML-DSA-65 Verify (Xray 26, необязательно)")
-                    .size(10.0)
-                    .color(p.muted),
-            );
-            ui.add(
-                TextEdit::multiline(&mut server.reality_mldsa65_verify)
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("mldsa65Verify"),
-            );
+            ui.add_enabled_ui(features.mldsa65, |ui| {
+                ui.label(
+                    RichText::new("ML-DSA-65 Verify (Xray 26, необязательно)")
+                        .size(10.0)
+                        .color(p.muted),
+                );
+                ui.add(
+                    TextEdit::multiline(&mut server.reality_mldsa65_verify)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("mldsa65Verify"),
+                );
+            });
         }
     }
     if matches!(
@@ -5407,7 +6054,16 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                         (Transport::Kcp, "mKCP"),
                         (Transport::XDrive, "XDRIVE"),
                     ] {
-                        ui.selectable_value(&mut server.transport, transport, label);
+                        let supported = match transport {
+                            Transport::Http => core != CoreKind::Xray,
+                            Transport::Xhttp => features.xhttp,
+                            Transport::Kcp => features.kcp,
+                            Transport::XDrive => features.xdrive,
+                            _ => true,
+                        };
+                        ui.add_enabled_ui(supported, |ui| {
+                            ui.selectable_value(&mut server.transport, transport, label);
+                        });
                     }
                 });
             if server.transport == Transport::Grpc {
@@ -5588,56 +6244,65 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                 );
             });
         }
-        ui.checkbox(&mut server.noise_enabled, "UDP noise (Xray finalmask)");
-        if server.noise_enabled {
-            ui.columns(2, |columns| {
+        ui.add_enabled_ui(features.noise, |ui| {
+            ui.checkbox(&mut server.noise_enabled, "UDP noise (finalmask)");
+            if server.noise_enabled {
+                ui.columns(2, |columns| {
+                    field(
+                        &mut columns[0],
+                        p,
+                        "Noise type",
+                        TextEdit::singleline(&mut server.noise_type)
+                            .hint_text("str / hex / base64")
+                            .desired_width(f32::INFINITY),
+                    );
+                    field(
+                        &mut columns[1],
+                        p,
+                        "Rand",
+                        TextEdit::singleline(&mut server.noise_rand)
+                            .hint_text("1-3")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
                 field(
-                    &mut columns[0],
+                    ui,
                     p,
-                    "Noise type",
-                    TextEdit::singleline(&mut server.noise_type)
-                        .hint_text("str / hex / base64")
-                        .desired_width(f32::INFINITY),
+                    "Noise packet",
+                    TextEdit::singleline(&mut server.noise_packet).desired_width(f32::INFINITY),
                 );
-                field(
-                    &mut columns[1],
-                    p,
-                    "Rand",
-                    TextEdit::singleline(&mut server.noise_rand)
-                        .hint_text("1-3")
-                        .desired_width(f32::INFINITY),
-                );
-            });
-            field(
-                ui,
-                p,
-                "Noise packet",
-                TextEdit::singleline(&mut server.noise_packet).desired_width(f32::INFINITY),
+            }
+            ui.label(
+                RichText::new("Finalmask TCP (JSON-массив масок, например filter/header-custom)")
+                    .size(10.0)
+                    .color(p.muted),
+            );
+            ui.add(
+                TextEdit::multiline(&mut server.finalmask_tcp)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(
+                        r#"[{"type":"filter","settings":{"blockedSourceIPs":["192.0.2.0/24"]}}]"#,
+                    ),
+            );
+            ui.label(
+                RichText::new("Finalmask UDP (JSON-массив масок)")
+                    .size(10.0)
+                    .color(p.muted),
+            );
+            ui.add(
+                TextEdit::multiline(&mut server.finalmask_udp)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+        if !features.noise {
+            ui.label(
+                RichText::new("UDP noise и finalmask доступны только в Xray-core")
+                    .size(10.0)
+                    .color(p.faint),
             );
         }
-        ui.label(
-            RichText::new("Finalmask TCP (JSON-массив масок, например filter/header-custom)")
-                .size(10.0)
-                .color(p.muted),
-        );
-        ui.add(
-            TextEdit::multiline(&mut server.finalmask_tcp)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY)
-                .hint_text(
-                    r#"[{"type":"filter","settings":{"blockedSourceIPs":["192.0.2.0/24"]}}]"#,
-                ),
-        );
-        ui.label(
-            RichText::new("Finalmask UDP (JSON-массив масок)")
-                .size(10.0)
-                .color(p.muted),
-        );
-        ui.add(
-            TextEdit::multiline(&mut server.finalmask_udp)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
         if server.protocol == Protocol::Shadowsocks {
             field(
                 ui,
