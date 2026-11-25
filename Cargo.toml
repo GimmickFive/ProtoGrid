@@ -13,3 +13,14 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+# Fast iteration profile: near-release runtime, but without whole-program LTO.
+# Use `cargo build --profile dev-fast -p protogrid-desktop`.
+[profile.dev-fast]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 256
+incremental = true
+debug = false
+strip = true

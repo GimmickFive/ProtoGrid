@@ -9,6 +9,13 @@ mod ui;
 
 fn main() -> eframe::Result<()> {
     autostart::remove_legacy();
+    if std::env::args().any(|arg| arg == "--init") {
+        if let Err(error) = engine::init_profile() {
+            eprintln!("ProtoGrid --init: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ProtoGrid")

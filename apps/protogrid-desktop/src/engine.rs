@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,7 +18,7 @@ use tokio::sync::Semaphore;
 use crate::autostart;
 use crate::installer::{self, CoreInfo};
 
-pub const MAX_LOG_LINES: usize = 800;
+pub const MAX_LOG_LINES: usize = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnStatus {
@@ -90,8 +91,11 @@ pub struct Inner {
     pub proxy_set: bool,
     pub data_dir: PathBuf,
     pub config_path: PathBuf,
+    pub log_dir: PathBuf,
+    log_file: Option<(String, std::fs::File)>,
     pub core_singbox: Option<CoreInfo>,
     pub core_xray: Option<CoreInfo>,
+    pub core_protogrid: Option<CoreInfo>,
     pub autostart: bool,
     pub proxy_supported: bool,
     pub toasts: Vec<ToastEvent>,
@@ -137,6 +141,7 @@ impl Inner {
             busy: self.busy.clone(),
             core_singbox: self.core_singbox.clone(),
             core_xray: self.core_xray.clone(),
+            core_protogrid: self.core_protogrid.clone(),
             autostart: self.autostart,
             proxy_supported: self.proxy_supported,
             pid: self.pid,
@@ -160,6 +165,7 @@ pub struct Snapshot {
     pub busy: HashSet<String>,
     pub core_singbox: Option<CoreInfo>,
     pub core_xray: Option<CoreInfo>,
+    pub core_protogrid: Option<CoreInfo>,
     pub autostart: bool,
     pub proxy_supported: bool,
     pub pid: Option<u32>,
@@ -174,6 +180,7 @@ impl Snapshot {
         match kind {
             CoreKind::Singbox => self.core_singbox.as_ref(),
             CoreKind::Xray => self.core_xray.as_ref(),
+            CoreKind::Protogrid => self.core_protogrid.as_ref(),
         }
     }
 
@@ -197,6 +204,15 @@ impl Snapshot {
             xhttp: self.supports_xhttp(kind),
             kcp: self.supports_kcp(kind),
             xdrive: self.supports_xdrive(kind),
+            mldsa65: self
+                .core(kind)
+                .is_some_and(installer::CoreInfo::supports_mldsa65),
+            masque: self
+                .core(kind)
+                .is_some_and(installer::CoreInfo::supports_masque),
+            noise: self
+                .core(kind)
+                .is_some_and(installer::CoreInfo::supports_noise),
         }
     }
 
@@ -231,6 +247,74 @@ pub struct Engine {
     ctx: egui::Context,
 }
 
+/// Keeps the last `keep` daily log files.
+fn cleanup_logs(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("protogrid-") && name.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort();
+    let remove = files.len() - keep;
+    for path in files.into_iter().take(remove) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Portable builds keep their profile next to the executable when a
+/// `portable.txt` marker is present.
+pub fn is_portable() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join("portable.txt").is_file())
+        .unwrap_or(false)
+}
+
+pub fn profile_data_dir(data_root: &Path) -> PathBuf {
+    if is_portable() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                return dir.join("data");
+            }
+        }
+    }
+    data_root.join("app.protogrid.client")
+}
+
+/// Creates the profile, the default config and extracts the bundled core.
+/// Used by the installer (`ProtoGrid.exe --init`) before the first launch.
+pub fn init_profile() -> Result<PathBuf, String> {
+    let data_root = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    let data_dir = profile_data_dir(&data_root);
+    for sub in ["runtime", "cores", "rulesets", "logs"] {
+        std::fs::create_dir_all(data_dir.join(sub))
+            .map_err(|error| format!("не удалось создать {}: {error}", data_dir.display()))?;
+    }
+    let config_path = data_dir.join("config.json");
+    if !config_path.exists() {
+        let mut config = AppConfig::default();
+        config.normalize();
+        let text = serde_json::to_string_pretty(&config)
+            .map_err(|error| format!("не удалось создать конфиг: {error}"))?;
+        std::fs::write(&config_path, text)
+            .map_err(|error| format!("не удалось записать {}: {error}", config_path.display()))?;
+    }
+    installer::ensure_bundled_core(&data_dir);
+    Ok(data_dir)
+}
+
 /// Copies the profile from the pre-rename data directory (`app.rast.client`)
 /// the first time ProtoGrid starts, so subscriptions and cores are kept.
 fn migrate_legacy_profile(data_root: &Path, data_dir: &Path) {
@@ -263,11 +347,16 @@ fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
 impl Engine {
     pub fn new(ctx: egui::Context) -> Self {
         let data_root = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        let data_dir = data_root.join("app.protogrid.client");
-        migrate_legacy_profile(&data_root, &data_dir);
+        let data_dir = profile_data_dir(&data_root);
+        if !is_portable() {
+            migrate_legacy_profile(&data_root, &data_dir);
+        }
         let _ = std::fs::create_dir_all(data_dir.join("runtime"));
         let _ = std::fs::create_dir_all(data_dir.join("cores"));
         let _ = std::fs::create_dir_all(data_dir.join("rulesets"));
+        let _ = std::fs::create_dir_all(data_dir.join("logs"));
+        let log_dir = data_dir.join("logs");
+        cleanup_logs(&log_dir, 14);
         let config_path = data_dir.join("config.json");
 
         let mut config = if config_path.exists() {
@@ -297,8 +386,11 @@ impl Engine {
             proxy_set: false,
             data_dir,
             config_path,
+            log_dir,
+            log_file: None,
             core_singbox: None,
             core_xray: None,
+            core_protogrid: None,
             autostart: autostart::is_enabled(),
             proxy_supported: sysproxy::is_supported(),
             toasts: Vec::new(),
@@ -441,6 +533,12 @@ impl Engine {
                                     guard.config.settings.xray_path = path.clone();
                                 }
                                 guard.core_xray = Some(info.clone());
+                            }
+                            CoreKind::Protogrid => {
+                                if let Some(path) = &info.path {
+                                    guard.config.settings.protogrid_path = path.clone();
+                                }
+                                guard.core_protogrid = Some(info.clone());
                             }
                         }
                         let _ = guard.persist();
@@ -781,6 +879,28 @@ impl Engine {
         });
     }
 
+    pub fn update_subscription(&self, id: String, name: String, url: String) {
+        {
+            let mut guard = self.lock();
+            if let Some(sub) = guard
+                .config
+                .subscriptions
+                .iter_mut()
+                .find(|sub| sub.id == id)
+            {
+                if !name.trim().is_empty() {
+                    sub.name = name.trim().to_string();
+                }
+                sub.url = url.trim().to_string();
+                sub.last_error = None;
+            }
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        self.refresh_subscription(id);
+    }
+
     pub fn refresh_subscription(&self, id: String) {
         let key = format!("sub-{id}");
         if self.lock().busy.contains(&key) {
@@ -850,6 +970,34 @@ impl Engine {
             "Подписка удалена",
             ToastKind::Success,
         );
+    }
+
+    /// Write the in-memory journal to a separate file in the logs folder.
+    pub fn save_logs(&self) -> Result<String, String> {
+        let guard = self.lock();
+        let text = guard
+            .logs
+            .iter()
+            .map(|entry| {
+                let stamp = chrono::DateTime::from_timestamp_millis(entry.ts)
+                    .map(|dt| dt.with_timezone(&chrono::Local))
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default();
+                format!(
+                    "{} [{}] {}: {}",
+                    stamp,
+                    entry.level.to_uppercase(),
+                    entry.source,
+                    entry.line
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let name = chrono::Local::now().format("export-%Y%m%d-%H%M%S.log");
+        let path = guard.log_dir.join(name.to_string());
+        std::fs::write(&path, text)
+            .map_err(|error| format!("не удалось сохранить логи: {error}"))?;
+        Ok(path.to_string_lossy().to_string())
     }
 
     pub fn apply_routing_preset(&self, preset: &str) {
@@ -1235,6 +1383,37 @@ fn level_from_line(line: &str) -> String {
     }
 }
 
+fn write_log_file(guard: &mut Inner, ts: i64, level: &str, source: &str, line: &str) {
+    let stamp =
+        chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.with_timezone(&chrono::Local));
+    let (date, time) = match stamp {
+        Some(dt) => (
+            dt.format("%Y-%m-%d").to_string(),
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        ),
+        None => ("unknown".into(), String::new()),
+    };
+    let rotate = guard
+        .log_file
+        .as_ref()
+        .map(|(current, _)| current != &date)
+        .unwrap_or(true);
+    if rotate {
+        let path = guard.log_dir.join(format!("protogrid-{date}.log"));
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            guard.log_file = Some((date, file));
+        }
+    }
+    if let Some((_, file)) = guard.log_file.as_mut() {
+        let _ = writeln!(file, "{time} [{}] {source}: {line}", level.to_uppercase());
+        let _ = file.flush();
+    }
+}
+
 pub fn push_log(
     inner: &Arc<Mutex<Inner>>,
     ctx: &egui::Context,
@@ -1248,12 +1427,15 @@ pub fn push_log(
     }
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        let ts = now_ms();
+        let level = level
+            .map(str::to_string)
+            .unwrap_or_else(|| level_from_line(&line));
+        write_log_file(&mut guard, ts, &level, source, &line);
         guard.logs.push_back(LogEntry {
-            ts: now_ms(),
+            ts,
             source: source.to_string(),
-            level: level
-                .map(str::to_string)
-                .unwrap_or_else(|| level_from_line(&line)),
+            level,
             line,
         });
         while guard.logs.len() > MAX_LOG_LINES {
@@ -1296,21 +1478,23 @@ async fn detect_both(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         (guard.config.settings.clone(), guard.data_dir.clone())
     };
-    let (singbox, xray) = tokio::join!(
+    let (singbox, xray, protogrid) = tokio::join!(
         installer::detect(CoreKind::Singbox, &settings, &data_dir),
-        installer::detect(CoreKind::Xray, &settings, &data_dir)
+        installer::detect(CoreKind::Xray, &settings, &data_dir),
+        installer::detect(CoreKind::Protogrid, &settings, &data_dir)
     );
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.core_singbox = Some(singbox);
         guard.core_xray = Some(xray);
+        guard.core_protogrid = Some(protogrid);
         guard.touch();
     }
     ctx.request_repaint();
 }
 
 fn log_core_versions(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
-    let (singbox, xray) = {
+    let (singbox, xray, protogrid) = {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let singbox = guard
             .core_singbox
@@ -1334,14 +1518,25 @@ fn log_core_versions(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
                 }
             })
             .unwrap_or_default();
-        (singbox, xray)
+        let protogrid = guard
+            .core_protogrid
+            .as_ref()
+            .map(|info| {
+                if info.found {
+                    format!("ProtoGrid {}", info.version.clone().unwrap_or_default())
+                } else {
+                    "ProtoGrid не найден".into()
+                }
+            })
+            .unwrap_or_default();
+        (singbox, xray, protogrid)
     };
     push_log(
         inner,
         ctx,
         "app",
         Some("info"),
-        format!("Ядра: {singbox} · {xray}"),
+        format!("Ядра: {singbox} · {xray} · {protogrid}"),
     );
 }
 
@@ -1836,6 +2031,7 @@ fn write_runtime_config(
     let file = runtime_dir.join(match core {
         CoreKind::Singbox => "singbox.json",
         CoreKind::Xray => "xray.json",
+        CoreKind::Protogrid => "protogrid.json",
     });
     let text = serde_json::to_string_pretty(value)
         .map_err(|error| format!("не удалось сериализовать конфиг: {error}"))?;
@@ -1855,7 +2051,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         Some(id) => id,
         None => return Err(set_error(inner, ctx, "Сначала выберите сервер".into())),
     };
-    if settings.tun_enabled && settings.core == CoreKind::Xray {
+    if settings.tun_enabled && !settings.core.is_singbox_like() {
         return Err(set_error(
             inner,
             ctx,
@@ -1867,6 +2063,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         match settings.core {
             CoreKind::Singbox => guard.core_singbox.clone(),
             CoreKind::Xray => guard.core_xray.clone(),
+            CoreKind::Protogrid => guard.core_protogrid.clone(),
         }
     };
     let info = match cached {
@@ -1897,7 +2094,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         .ok_or_else(|| "нет пути к ядру".to_string())?;
 
     let ruleset_dir = data_dir.join("rulesets");
-    if settings.core == CoreKind::Singbox {
+    if settings.core.is_singbox_like() {
         let sources = ruleset::sources(&config.rules);
         if !sources.is_empty() {
             let prepared =
@@ -1924,7 +2121,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
     }
 
     let value = match settings.core {
-        CoreKind::Singbox => singbox::build_config_with_capabilities(
+        CoreKind::Singbox | CoreKind::Protogrid => singbox::build_config_with_capabilities(
             &config.servers,
             &active_id,
             &settings,
@@ -1935,6 +2132,9 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
                 xhttp: info.supports_xhttp(),
                 kcp: info.supports_kcp(),
                 xdrive: info.supports_xdrive(),
+                mldsa65: info.supports_mldsa65(),
+                masque: info.supports_masque(),
+                noise: info.supports_noise(),
             },
         ),
         CoreKind::Xray => xray::build_config(&config.servers, &active_id, &settings, &config.rules),
@@ -2102,7 +2302,7 @@ async fn ping_one(
         latency = ping::http_proxy_test(settings.effective_http_port(), &settings.test_url, 7000)
             .await
             .ok();
-    } else if connected && settings.core == CoreKind::Singbox {
+    } else if connected && settings.core.is_singbox_like() {
         latency = ping::clash_delay(settings.clash_api_port, &id, &settings.test_url, 5000)
             .await
             .ok();
