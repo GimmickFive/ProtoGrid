@@ -1370,6 +1370,119 @@ fn strip_ansi(input: &str) -> String {
     output
 }
 
+/// Removes the timestamp and level that the core adds to every line, because
+/// the journal already prints its own time/level/source columns.
+fn strip_core_prefix(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    let mut consumed_tz = false;
+    if let Some(len) = take_timezone(rest) {
+        rest = &rest[len..];
+        consumed_tz = true;
+    }
+    match take_datetime(rest) {
+        Some(len) => rest = &rest[len..],
+        None if consumed_tz => return line,
+        None => return line,
+    }
+    if let Some(len) = take_level(rest) {
+        rest = &rest[len..];
+    }
+    rest.trim_start()
+}
+
+fn take_timezone(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
+        return None;
+    }
+    let mut digits = 0;
+    while digits + 1 < bytes.len() && bytes[digits + 1].is_ascii_digit() {
+        digits += 1;
+    }
+    if digits != 4 && !(digits == 2 && bytes.get(3) == Some(&b':')) {
+        return None;
+    }
+    let mut end = 1 + digits;
+    if bytes.get(end) == Some(&b':') {
+        end += 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+    if bytes.get(end) == Some(&b' ') {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn take_datetime(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    let digit = |index: usize| bytes.get(index).is_some_and(u8::is_ascii_digit);
+    let separator = bytes[4] == b'-' || bytes[4] == b'/';
+    if !(digit(0)
+        && digit(1)
+        && digit(2)
+        && digit(3)
+        && separator
+        && digit(5)
+        && digit(6)
+        && (bytes[7] == b'-' || bytes[7] == b'/')
+        && digit(8)
+        && digit(9)
+        && bytes[10] == b' '
+        && digit(11)
+        && digit(12)
+        && bytes[13] == b':'
+        && digit(14)
+        && digit(15)
+        && bytes[16] == b':'
+        && digit(17)
+        && digit(18))
+    {
+        return None;
+    }
+    let mut end = 19;
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+    if bytes.get(end) == Some(&b' ') {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn take_level(s: &str) -> Option<usize> {
+    const LEVELS: [&str; 7] = [
+        "TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL",
+    ];
+    let bytes = s.as_bytes();
+    if bytes.first() == Some(&b'[') {
+        let end = s.find(']')?;
+        let token = &s[1..end];
+        if LEVELS.iter().any(|level| token.eq_ignore_ascii_case(level)) {
+            let mut next = end + 1;
+            if bytes.get(next) == Some(&b' ') {
+                next += 1;
+            }
+            return Some(next);
+        }
+        return None;
+    }
+    let end = s.find(' ')?;
+    let token = &s[..end];
+    if LEVELS.iter().any(|level| token.eq_ignore_ascii_case(level)) {
+        Some(end + 1)
+    } else {
+        None
+    }
+}
+
 fn level_from_line(line: &str) -> String {
     let upper = line.to_ascii_uppercase();
     if upper.contains("FATAL") || upper.contains("ERROR") || upper.contains("PANIC") {
@@ -1421,16 +1534,24 @@ pub fn push_log(
     level: Option<&str>,
     line: impl Into<String>,
 ) {
-    let line = strip_ansi(&line.into());
+    let raw = strip_ansi(&line.into());
+    if raw.trim().is_empty() {
+        return;
+    }
+    let level = level
+        .map(str::to_string)
+        .unwrap_or_else(|| level_from_line(&raw));
+    let line = if source == "core" {
+        strip_core_prefix(&raw).to_string()
+    } else {
+        raw
+    };
     if line.trim().is_empty() {
         return;
     }
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let ts = now_ms();
-        let level = level
-            .map(str::to_string)
-            .unwrap_or_else(|| level_from_line(&line));
         write_log_file(&mut guard, ts, &level, source, &line);
         guard.logs.push_back(LogEntry {
             ts,
@@ -2311,4 +2432,35 @@ async fn ping_one(
         latency = ping::tcp_ping(&server, 4000).await.ok();
     }
     (id, latency)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_singbox_prefix() {
+        assert_eq!(
+            strip_core_prefix("+0300 2026-11-26 02:49:22 INFO inbound/mixed: started"),
+            "inbound/mixed: started"
+        );
+        assert_eq!(
+            strip_core_prefix("2026-11-26 02:49:22 WARN something"),
+            "something"
+        );
+    }
+
+    #[test]
+    fn strips_xray_prefix() {
+        assert_eq!(
+            strip_core_prefix("2026/11/25 21:53:24.109739 [Info] infra/conf: reading"),
+            "infra/conf: reading"
+        );
+    }
+
+    #[test]
+    fn keeps_plain_core_lines() {
+        assert_eq!(strip_core_prefix("FATAL boom"), "FATAL boom");
+        assert_eq!(strip_core_prefix("hello"), "hello");
+    }
 }
