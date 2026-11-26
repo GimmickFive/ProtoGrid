@@ -8,7 +8,7 @@
 
 ## [Unreleased]
 
-## [0.1.1] — 2026-11-26
+## [0.1.2] — 2026-11-26
 
 Первая публичная бета. Windows-сборка, Linux проверен на реальном подключении.
 
@@ -32,11 +32,13 @@
 - Ядро ProtoGrid (форк sing-box) подхватывается рядом с приложением; стоковые
   sing-box и Xray-core скачиваются из настроек.
 - Релизный профиль: `opt-level = "s"`, LTO, `codegen-units = 1`, `strip`.
+- Установщик и портативный архив включают тексты лицензий: MIT, GPLv3 для ядра
+  форка sing-box и GPLv2 для `wintun.dll`, плюс `THIRD_PARTY_NOTICES`.
 
 ### Исправлено
 
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.1.1...dev
-[0.1.1]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.1
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.1.2...dev
+[0.1.2]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.2

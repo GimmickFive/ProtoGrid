@@ -3,7 +3,7 @@ Unicode true
 !include "x64.nsh"
 
 !define APP_NAME "ProtoGrid"
-!define APP_VERSION "0.1.1"
+!define APP_VERSION "0.1.2"
 !define APP_EXE "ProtoGrid.exe"
 !define CORE_EXE "protogrid-core.exe"
 !define APP_PUBLISHER "ProtoGrid"
@@ -17,7 +17,7 @@ InstallDirRegKey HKCU "Software\ProtoGrid" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.1.1.0"
+VIProductVersion "0.1.2.0"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "FileDescription" "${APP_NAME} setup"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"
@@ -49,6 +49,11 @@ Section "ProtoGrid" SEC_APP
     File /oname=${CORE_EXE} "..\dist\fork\sing-box-protogrid-windows-amd64.exe"
     File /oname=wintun.dll "..\dist\fork\wintun.dll"
     File /oname=LICENSE.txt "..\LICENSE"
+    File /oname=THIRD_PARTY_NOTICES.txt "..\THIRD_PARTY_NOTICES.md"
+    SetOutPath "$INSTDIR\licenses"
+    File "..\installer\licenses\GPL-3.0.txt"
+    File "..\installer\licenses\wintun-GPL-2.0.txt"
+    SetOutPath "$INSTDIR"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
     ; Create the profile with the default config before the first launch.
@@ -81,6 +86,10 @@ Section "Uninstall"
     Delete "$INSTDIR\${CORE_EXE}"
     Delete "$INSTDIR\wintun.dll"
     Delete "$INSTDIR\LICENSE.txt"
+    Delete "$INSTDIR\THIRD_PARTY_NOTICES.txt"
+    Delete "$INSTDIR\licenses\GPL-3.0.txt"
+    Delete "$INSTDIR\licenses\wintun-GPL-2.0.txt"
+    RMDir "$INSTDIR\licenses"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
 

@@ -36,6 +36,9 @@ cp -f "$EXE" "$STAGE/ProtoGrid.exe"
 cp -f "$CORE" "$STAGE/protogrid-core.exe"
 cp -f "$WINTUN" "$STAGE/wintun.dll"
 cp -f LICENSE "$STAGE/LICENSE.txt"
+cp -f THIRD_PARTY_NOTICES.md "$STAGE/THIRD_PARTY_NOTICES.txt"
+mkdir -p "$STAGE/licenses"
+cp -f installer/licenses/*.txt "$STAGE/licenses/"
 # Presence of this marker switches the profile to <exe dir>\data.
 : > "$STAGE/portable.txt"
 python3 - "$STAGE" "$ZIP" <<'PY'
@@ -49,6 +52,9 @@ files = [
     "protogrid-core.exe",
     "wintun.dll",
     "LICENSE.txt",
+    "THIRD_PARTY_NOTICES.txt",
+    "licenses/GPL-3.0.txt",
+    "licenses/wintun-GPL-2.0.txt",
     "portable.txt",
 ]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -60,11 +66,15 @@ print(out)
 PY
 
 # Keep an existing data/ directory: it holds the portable profile and logs.
-mkdir -p "$PORTABLE"
-for name in ProtoGrid.exe protogrid-core.exe wintun.dll LICENSE.txt portable.txt; do
+mkdir -p "$PORTABLE/licenses"
+for name in ProtoGrid.exe protogrid-core.exe wintun.dll LICENSE.txt THIRD_PARTY_NOTICES.txt portable.txt; do
     if ! cp -f "$STAGE/$name" "$PORTABLE/$name" 2>/dev/null; then
         echo "note: $PORTABLE/$name is in use; archive is up to date" >&2
     fi
+done
+for name in GPL-3.0.txt wintun-GPL-2.0.txt; do
+    cp -f "$STAGE/licenses/$name" "$PORTABLE/licenses/$name" 2>/dev/null || \
+        echo "note: $PORTABLE/licenses/$name is in use; archive is up to date" >&2
 done
 rm -rf "$STAGE"
 
