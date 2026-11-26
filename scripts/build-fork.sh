@@ -11,8 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FORK="$ROOT/forks/sing-box"
 OUT="${1:-$ROOT/dist/fork}"
-VERSION="1.14.4-protogrid.2"
-TAGS="with_quic,with_utls,with_clash_api,with_gvisor"
+VERSION="1.14.4-protogrid.3"
+TAGS="with_quic,with_utls,with_clash_api,with_gvisor,with_openvpn"
 
 if [ ! -d "$FORK" ]; then
   echo "fork not found: $FORK" >&2

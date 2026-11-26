@@ -5,6 +5,7 @@ Unicode true
 !define APP_NAME "ProtoGrid"
 !define APP_VERSION "0.1.1"
 !define APP_EXE "ProtoGrid.exe"
+!define CORE_EXE "protogrid-core.exe"
 !define APP_PUBLISHER "ProtoGrid"
 !define APP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ProtoGrid"
 !define INSTALL_DIR "$LOCALAPPDATA\Programs\ProtoGrid"
@@ -43,11 +44,14 @@ Section "ProtoGrid" SEC_APP
     SectionIn RO
     SetOutPath "$INSTDIR"
     File /oname=${APP_EXE} "..\target\x86_64-pc-windows-gnu\release\protogrid.exe"
+    ; The core and wintun.dll are installed next to the launcher instead of
+    ; being embedded into it, so the launcher stays small.
+    File /oname=${CORE_EXE} "..\dist\fork\sing-box-protogrid-windows-amd64.exe"
+    File /oname=wintun.dll "..\dist\fork\wintun.dll"
     File /oname=LICENSE.txt "..\LICENSE"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-    ; Create the profile with the default config and extract the embedded core
-    ; (and wintun.dll) before the first launch.
+    ; Create the profile with the default config before the first launch.
     ExecWait '"$INSTDIR\${APP_EXE}" --init' $0
     DetailPrint "--init exit code: $0"
     IntCmp $0 0 init_ok
@@ -74,6 +78,8 @@ SectionEnd
 
 Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
+    Delete "$INSTDIR\${CORE_EXE}"
+    Delete "$INSTDIR\wintun.dll"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"

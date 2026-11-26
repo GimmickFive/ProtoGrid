@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # Build the Windows release, the per-user installer and a portable zip.
-# The ProtoGrid fork is embedded into the executable by build.rs, so the
-# resulting artifacts are self-contained (no separate core folder is required).
+# The ProtoGrid fork and wintun.dll are shipped next to the launcher, not
+# embedded into it, so the launcher stays small in both packages.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 EXE="target/x86_64-pc-windows-gnu/release/protogrid.exe"
+CORE="dist/fork/sing-box-protogrid-windows-amd64.exe"
+WINTUN="dist/fork/wintun.dll"
 OUT="dist/ProtoGrid-${VERSION}-windows-x64"
+
+for file in "$EXE" "$CORE" "$WINTUN"; do
+    if [[ ! -f "$file" ]]; then
+        echo "missing $file — build the fork first (scripts/build-fork.sh)" >&2
+        exit 1
+    fi
+done
 
 echo "==> release build"
 cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
@@ -16,25 +25,48 @@ echo "==> installer (NSIS)"
 makensis installer/protogrid.nsi
 
 echo "==> portable package"
-# Keep an existing data/ directory: it holds the portable profile and logs.
-mkdir -p "${OUT}-portable"
-cp -f "$EXE" "${OUT}-portable/ProtoGrid.exe"
-cp -f LICENSE "${OUT}-portable/LICENSE.txt"
+# Stage the archive first: the local portable folder may be in use by a
+# running ProtoGrid.exe, and that must not break packaging.
+PORTABLE="${OUT}-portable"
+STAGE="dist/.portable-stage-${VERSION}"
+ZIP="${OUT}-portable.zip"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp -f "$EXE" "$STAGE/ProtoGrid.exe"
+cp -f "$CORE" "$STAGE/protogrid-core.exe"
+cp -f "$WINTUN" "$STAGE/wintun.dll"
+cp -f LICENSE "$STAGE/LICENSE.txt"
 # Presence of this marker switches the profile to <exe dir>\data.
-: > "${OUT}-portable/portable.txt"
-python3 - "${OUT}-portable" <<'PY'
+: > "$STAGE/portable.txt"
+python3 - "$STAGE" "$ZIP" <<'PY'
 import pathlib, sys, zipfile
 src = pathlib.Path(sys.argv[1])
-out = src.parent / (src.name + ".zip")
+out = pathlib.Path(sys.argv[2])
+prefix = pathlib.Path(out.stem)
 # Only the launcher files go into the archive; data/ is user-specific.
-files = ["ProtoGrid.exe", "LICENSE.txt", "portable.txt"]
+files = [
+    "ProtoGrid.exe",
+    "protogrid-core.exe",
+    "wintun.dll",
+    "LICENSE.txt",
+    "portable.txt",
+]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for name in files:
         path = src / name
         if path.is_file():
-            z.write(path, pathlib.Path(src.name) / name)
+            z.write(path, prefix / name)
 print(out)
 PY
+
+# Keep an existing data/ directory: it holds the portable profile and logs.
+mkdir -p "$PORTABLE"
+for name in ProtoGrid.exe protogrid-core.exe wintun.dll LICENSE.txt portable.txt; do
+    if ! cp -f "$STAGE/$name" "$PORTABLE/$name" 2>/dev/null; then
+        echo "note: $PORTABLE/$name is in use; archive is up to date" >&2
+    fi
+done
+rm -rf "$STAGE"
 
 echo "==> done"
 ls -lh dist/ProtoGrid-${VERSION}-windows-x64-setup.exe "${OUT}-portable.zip"
