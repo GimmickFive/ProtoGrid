@@ -12,7 +12,7 @@ use protogrid_core::model::{
 };
 
 use crate::engine::{
-    now_ms, ConnStatus, Engine, LogEntry, Snapshot, ToastEvent, ToastKind, TrafficStats,
+    now_ms, ConnStatus, Engine, LogEntry, LogRoute, Snapshot, ToastEvent, ToastKind, TrafficStats,
 };
 use crate::installer::CoreFeatures;
 use crate::theme::{self, Palette};
@@ -5005,6 +5005,18 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                 || entry.source.to_lowercase().contains(&query)
         })
         .collect();
+    let direct = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Direct))
+        .count();
+    let proxied = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Proxy))
+        .count();
+    let tun = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Tun))
+        .count();
 
     Frame::new()
         .fill(p.panel)
@@ -5075,20 +5087,30 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             let (line, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0, p.line);
+            let mut summary = format!(
+                "{} {}",
+                filtered.len(),
+                plural(filtered.len(), "запись", "записи", "записей")
+            );
+            if proxied > 0 {
+                summary.push_str(&format!(" · прокси {proxied}"));
+            }
+            if direct > 0 {
+                summary.push_str(&format!(" · напрямую {direct}"));
+            }
+            if tun > 0 {
+                summary.push_str(&format!(" · tun {tun}"));
+            }
             Frame::new()
                 .inner_margin(Margin::symmetric(16, 8))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!(
-                                "{} {}",
-                                filtered.len(),
-                                plural(filtered.len(), "запись", "записи", "записей")
-                            ))
-                            .size(10.0)
-                            .color(p.faint)
-                            .family(FontFamily::Monospace),
+                            RichText::new(&summary)
+                                .size(10.0)
+                                .color(p.faint)
+                                .family(FontFamily::Monospace),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
@@ -5136,6 +5158,15 @@ fn log_chip(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Respo
 fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+    let tint = match entry.route {
+        Some(LogRoute::Direct) => Some(p.amber_soft),
+        Some(LogRoute::Block) => Some(p.red_soft),
+        Some(LogRoute::Tun) => Some(p.cyan_soft),
+        _ => None,
+    };
+    if let Some(color) = tint {
+        ui.painter().rect_filled(rect, 0, color);
+    }
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 0, Color32::from_rgba_unmultiplied(127, 127, 127, 12));
@@ -5182,6 +5213,21 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry) {
             );
         },
     );
+    child.allocate_ui_with_layout(
+        Vec2::new(54.0, 20.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(54.0);
+            if let Some((tag, color)) = log_route_badge(p, entry.route) {
+                ui.label(
+                    RichText::new(tag)
+                        .size(9.0)
+                        .color(color)
+                        .family(FontFamily::Name("Medium".into())),
+                );
+            }
+        },
+    );
     child.add(
         egui::Label::new(
             RichText::new(&entry.line)
@@ -5198,6 +5244,15 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry) {
         .truncate()
         .selectable(false),
     );
+}
+
+fn log_route_badge(p: &Palette, route: Option<LogRoute>) -> Option<(&'static str, Color32)> {
+    match route? {
+        LogRoute::Direct => Some(("DIRECT", p.amber)),
+        LogRoute::Proxy => Some(("PROXY", p.green)),
+        LogRoute::Block => Some(("BLOCK", p.red)),
+        LogRoute::Tun => Some(("TUN", p.cyan)),
+    }
 }
 
 /* -------------------------------------------------------------------------- */

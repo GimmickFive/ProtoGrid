@@ -12,6 +12,11 @@ use crate::model::{
 use crate::ruleset::{self, sanitize_code};
 use crate::util::{split_list, version_at_least};
 
+/// TUN adapter name used on Windows. Other sing-box clients default to
+/// `singbox_tun`, so a distinct name lets both run without fighting over the
+/// adapter.
+pub const TUN_INTERFACE_NAME: &str = "protogrid_tun";
+
 /// Build a complete sing-box configuration (targets sing-box 1.12+).
 ///
 /// All valid servers are included as outbounds, so the Clash API can measure
@@ -274,6 +279,12 @@ fn build_inbounds(settings: &Settings, modern_tun: bool) -> Vec<Value> {
             "auto_route": true,
             "strict_route": true,
         });
+        if cfg!(target_os = "windows") {
+            // Other sing-box based clients default to "singbox_tun" too, so keep
+            // our own name: two TUN adapters with one name fail to start with
+            // "Cannot create a file when that file already exists".
+            tun["interface_name"] = json!(TUN_INTERFACE_NAME);
+        }
         if !modern_tun {
             tun["stack"] = json!("mixed");
         }

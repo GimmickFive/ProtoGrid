@@ -2940,6 +2940,7 @@ dependencies = [
  "tokio",
  "tray-icon",
  "uuid",
+ "windows-sys 0.59.0",
  "winreg",
  "winresource",
  "zip",

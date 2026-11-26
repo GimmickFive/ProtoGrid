@@ -60,6 +60,36 @@ pub struct LogEntry {
     pub source: String,
     pub level: String,
     pub line: String,
+    pub route: Option<LogRoute>,
+}
+
+/// How a core log line routed its connection. Used by the journal to tell
+/// proxied traffic from direct bypasses at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRoute {
+    Direct,
+    Proxy,
+    Block,
+    Tun,
+}
+
+fn detect_log_route(line: &str) -> Option<LogRoute> {
+    if let Some((_, rest)) = line.split_once("outbound/") {
+        let proto = rest
+            .split(|c: char| c == '[' || c == ' ' || c == ':')
+            .next()
+            .unwrap_or_default();
+        return match proto {
+            "direct" => Some(LogRoute::Direct),
+            "block" => Some(LogRoute::Block),
+            "" => None,
+            _ => Some(LogRoute::Proxy),
+        };
+    }
+    if line.contains("inbound/tun[") {
+        return Some(LogRoute::Tun);
+    }
+    None
 }
 
 /// Live traffic counters sampled once per second while a core is running.
@@ -1807,6 +1837,11 @@ pub fn push_log(
     if line.trim().is_empty() {
         return;
     }
+    let route = if source == "core" {
+        detect_log_route(&line)
+    } else {
+        None
+    };
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let ts = now_ms();
@@ -1816,6 +1851,7 @@ pub fn push_log(
             source: source.to_string(),
             level,
             line,
+            route,
         });
         while guard.logs.len() > MAX_LOG_LINES {
             guard.logs.pop_front();
@@ -2196,21 +2232,107 @@ fn set_error(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, message: String) ->
     message
 }
 
+#[cfg(target_os = "windows")]
+async fn wait_for_tun_adapter_gone(name: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if !tun_adapter_exists(name) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn tun_adapter_exists(name: &str) -> bool {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_ALL_INTERFACES, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    let mut size = 16 * 1024u32;
+    loop {
+        let mut buffer = vec![0u8; size as usize];
+        let result = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                std::ptr::null(),
+                buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut size,
+            )
+        };
+        if result == 0 {
+            let mut current = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            while !current.is_null() {
+                let adapter = unsafe { &*current };
+                if wide_name_eq(adapter.FriendlyName, name) {
+                    return true;
+                }
+                current = adapter.Next;
+            }
+            return false;
+        }
+        if result != ERROR_BUFFER_OVERFLOW {
+            return false;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wide_name_eq(ptr: *const u16, expected: &str) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *ptr.add(len) != 0 {
+            len += 1;
+            if len > 128 {
+                return false;
+            }
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+            .eq_ignore_ascii_case(expected)
+    }
+}
+
 async fn stop_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, silent: bool) {
-    let (child, proxy_set, was_active) = {
+    let (child, proxy_set, was_active, tun_on) = {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.run_id = guard.run_id.wrapping_add(1);
         let child = guard.child.take();
         let proxy_set = guard.proxy_set;
         let was_active = matches!(guard.status, ConnStatus::Connected | ConnStatus::Connecting);
+        let tun_on = guard.config.settings.tun_active();
         guard.proxy_set = false;
         guard.touch();
-        (child, proxy_set, was_active)
+        (child, proxy_set, was_active, tun_on)
     };
     if let Some(mut child) = child {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
     }
+    #[cfg(target_os = "windows")]
+    if tun_on && !wait_for_tun_adapter_gone(singbox::TUN_INTERFACE_NAME).await {
+        push_log(
+            inner,
+            ctx,
+            "app",
+            Some("warn"),
+            format!(
+                "TUN-адаптер {} не освободился за 8 секунд: следующий запуск может \
+                 завершиться ошибкой. Перезагрузите компьютер, если это повторяется.",
+                singbox::TUN_INTERFACE_NAME
+            ),
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = tun_on;
     if proxy_set {
         let _ = sysproxy::disable();
     }
@@ -2444,6 +2566,23 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
     });
 }
 
+fn unexpected_exit_message(code: &str, logs: &VecDeque<LogEntry>) -> String {
+    let tun_conflict = logs.iter().rev().take(16).any(|entry| {
+        entry.source == "core"
+            && (entry.line.contains("configure tun interface")
+                || entry.line.contains("create adapter"))
+    });
+    if tun_conflict {
+        format!(
+            "Ядро неожиданно завершилось (код {code}): TUN-адаптер уже занят другим VPN-клиентом \
+             или остался от прошлого запуска. Закройте другие VPN (v2rayN, sing-box) или \
+             перезагрузите компьютер."
+        )
+    } else {
+        format!("Ядро неожиданно завершилось (код {code}). Проверьте логи.")
+    }
+}
+
 fn spawn_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
     tokio::spawn(async move {
         loop {
@@ -2471,8 +2610,7 @@ fn spawn_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
                         guard.connected_at = None;
                         guard.active_core = None;
                         guard.status = ConnStatus::Error;
-                        let message =
-                            format!("Ядро неожиданно завершилось (код {code}). Проверьте логи.");
+                        let message = unexpected_exit_message(&code, &guard.logs);
                         guard.error = Some(message.clone());
                         guard.warning = None;
                         let proxy = guard.proxy_set;
@@ -2832,5 +2970,48 @@ mod tests {
     fn keeps_plain_core_lines() {
         assert_eq!(strip_core_prefix("FATAL boom"), "FATAL boom");
         assert_eq!(strip_core_prefix("hello"), "hello");
+    }
+
+    #[test]
+    fn explains_tun_adapter_conflict() {
+        let mut logs = VecDeque::new();
+        logs.push_back(LogEntry {
+            ts: 0,
+            source: "core".into(),
+            level: "error".into(),
+            line: "FATAL start inbound/tun[tun-in]: configure tun interface: create adapter: \
+                   Cannot create a file when that file already exists"
+                .into(),
+            route: None,
+        });
+        assert!(unexpected_exit_message("1", &logs).contains("TUN-адаптер"));
+        assert_eq!(
+            unexpected_exit_message("2", &VecDeque::new()),
+            "Ядро неожиданно завершилось (код 2). Проверьте логи."
+        );
+    }
+
+    #[test]
+    fn detects_log_routes() {
+        assert_eq!(
+            detect_log_route("[1 0ms] outbound/vless[abc]: outbound connection to x:443"),
+            Some(LogRoute::Proxy)
+        );
+        assert_eq!(
+            detect_log_route("[2 1ms] outbound/direct[direct]: outbound connection to x:443"),
+            Some(LogRoute::Direct)
+        );
+        assert_eq!(
+            detect_log_route("[3 0ms] outbound/block[block]: outbound connection to x:443"),
+            Some(LogRoute::Block)
+        );
+        assert_eq!(
+            detect_log_route("inbound/tun[tun-in]: inbound connection to x:443"),
+            Some(LogRoute::Tun)
+        );
+        assert_eq!(
+            detect_log_route("inbound/mixed[mixed-in]: inbound connection to x:443"),
+            None
+        );
     }
 }
