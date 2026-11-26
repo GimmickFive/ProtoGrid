@@ -3,7 +3,7 @@
 Сгенерировано из `Cargo.lock` скриптом `scripts/third-party.py`.
 Не редактировать вручную.
 
-Всего пакетов: 502.
+Всего пакетов: 513.
 
 | Пакет | Версия | Лицензия |
 |---|---|---|
@@ -47,6 +47,7 @@
 | `calloop-wayland-source` | 0.3.0 | MIT |
 | `calloop-wayland-source` | 0.4.1 | MIT |
 | `cc` | 1.11.3 | MIT OR Apache-2.0 |
+| `cesu8` | 1.1.0 | Apache-2.0/MIT |
 | `cfg-expr` | 0.15.8 | MIT OR Apache-2.0 |
 | `cfg-if` | 1.0.5 | MIT OR Apache-2.0 |
 | `cfg_aliases` | 0.2.2 | MIT |
@@ -182,6 +183,7 @@
 | `ipnet` | 2.12.2 | MIT OR Apache-2.0 |
 | `itertools` | 0.15.0 | MIT OR Apache-2.0 |
 | `itoa` | 1.0.19 | MIT OR Apache-2.0 |
+| `jni` | 0.21.1 | MIT/Apache-2.0 |
 | `jni` | 0.22.4 | MIT OR Apache-2.0 |
 | `jni-macros` | 0.22.4 | MIT OR Apache-2.0 |
 | `jni-sys` | 0.3.1 | MIT OR Apache-2.0 |
@@ -450,26 +452,35 @@
 | `windows-numerics` | 0.3.1 | MIT OR Apache-2.0 |
 | `windows-result` | 0.4.1 | MIT OR Apache-2.0 |
 | `windows-strings` | 0.5.1 | MIT OR Apache-2.0 |
+| `windows-sys` | 0.45.0 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.48.0 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.52.0 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.59.0 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.61.2 | MIT OR Apache-2.0 |
+| `windows-targets` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows-targets` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows-targets` | 0.52.6 | MIT OR Apache-2.0 |
 | `windows-threading` | 0.2.1 | MIT OR Apache-2.0 |
+| `windows_aarch64_gnullvm` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_aarch64_gnullvm` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_aarch64_gnullvm` | 0.52.6 | MIT OR Apache-2.0 |
+| `windows_aarch64_msvc` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_aarch64_msvc` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_aarch64_msvc` | 0.52.6 | MIT OR Apache-2.0 |
+| `windows_i686_gnu` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_i686_gnu` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_i686_gnu` | 0.52.6 | MIT OR Apache-2.0 |
 | `windows_i686_gnullvm` | 0.52.6 | MIT OR Apache-2.0 |
+| `windows_i686_msvc` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_i686_msvc` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_i686_msvc` | 0.52.6 | MIT OR Apache-2.0 |
+| `windows_x86_64_gnu` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_x86_64_gnu` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_x86_64_gnu` | 0.52.6 | MIT OR Apache-2.0 |
+| `windows_x86_64_gnullvm` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_x86_64_gnullvm` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_x86_64_gnullvm` | 0.52.6 | MIT OR Apache-2.0 |
+| `windows_x86_64_msvc` | 0.42.2 | MIT OR Apache-2.0 |
 | `windows_x86_64_msvc` | 0.48.5 | MIT OR Apache-2.0 |
 | `windows_x86_64_msvc` | 0.52.6 | MIT OR Apache-2.0 |
 | `winit` | 0.30.13 | Apache-2.0 |

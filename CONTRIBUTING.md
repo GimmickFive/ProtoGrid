@@ -44,7 +44,7 @@ cargo check -p protogrid-desktop
 
 Быстрый вариант — `.opencode/skills/git/scripts/precommit.sh`.
 
-Форк sing-box проверяется отдельно: CI применяет `docs/patches/*.patch` к
+ProtoGrid-core (форк sing-box) проверяется отдельно: CI применяет `docs/patches/*.patch` к
 `SagerNet/sing-box` v1.14.4 и запускает `go test` и `go build`. Если меняешь
 форк — обновляй и патчи, и зависящий от них Rust-код одним PR.
 

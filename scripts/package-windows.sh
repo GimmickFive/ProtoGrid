@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Windows release, the per-user installer and a portable zip.
-# The ProtoGrid fork and wintun.dll are shipped next to the launcher, not
+# ProtoGrid-core and wintun.dll are shipped next to the launcher, not
 # embedded into it, so the launcher stays small in both packages.
 set -euo pipefail
 cd "$(dirname "$0")/.."

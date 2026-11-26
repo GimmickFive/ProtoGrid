@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/protogrid-core", "apps/protogrid-desktop"]
+members = [
+    "crates/protogrid-core",
+    "crates/protogrid-mobile",
+    "apps/protogrid-desktop",
+]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,18 @@
+[package]
+name = "protogrid-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "JNI bridge between the ProtoGrid Android client and protogrid-core"
+
+[lib]
+name = "protogrid_mobile"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+protogrid-core = { path = "../protogrid-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
