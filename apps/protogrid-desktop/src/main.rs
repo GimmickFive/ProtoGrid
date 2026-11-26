@@ -3,6 +3,7 @@
 mod app;
 mod autostart;
 mod engine;
+mod flags;
 mod installer;
 mod theme;
 mod ui;

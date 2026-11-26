@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protogrid_core::link::{display_error_list, parse_links};
 use protogrid_core::model::{
-    routing_preset, AppConfig, CoreCapabilities, CoreKind, RoutingRule, RuleAction, Server,
-    Settings, Subscription,
+    routing_preset, AppConfig, CoreCapabilities, CoreKind, CustomProfile, RoutingPreset,
+    RoutingRule, RuleAction, RuleKind, Server, Settings, Subscription,
 };
-use protogrid_core::{ping, ruleset, singbox, subscription, sysproxy, xray};
+use protogrid_core::{geo, ping, ruleset, singbox, subscription, sysproxy, xray};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::Command;
@@ -82,6 +82,9 @@ pub struct Inner {
     pub logs: VecDeque<LogEntry>,
     pub pings: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
+    /// Server ids with a country lookup in flight, so add + refresh + bootstrap
+    /// never query the same address twice.
+    pub country_lookups: HashSet<String>,
     pub busy: HashSet<String>,
     pub child: Option<tokio::process::Child>,
     pub pid: Option<u32>,
@@ -213,6 +216,9 @@ impl Snapshot {
             noise: self
                 .core(kind)
                 .is_some_and(installer::CoreInfo::supports_noise),
+            openvpn: self
+                .core(kind)
+                .is_some_and(installer::CoreInfo::supports_openvpn),
         }
     }
 
@@ -293,8 +299,55 @@ pub fn profile_data_dir(data_root: &Path) -> PathBuf {
     data_root.join("app.protogrid.client")
 }
 
-/// Creates the profile, the default config and extracts the bundled core.
-/// Used by the installer (`ProtoGrid.exe --init`) before the first launch.
+/// Whether this process can create a TUN interface: an elevated process on
+/// Windows, root or `CAP_NET_ADMIN` on Linux. Cached for the process lifetime.
+pub fn is_elevated() -> bool {
+    static ELEVATED: OnceLock<bool> = OnceLock::new();
+    *ELEVATED.get_or_init(detect_elevation)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_elevation() -> bool {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn IsUserAnAdmin() -> i32;
+    }
+    // SAFETY: plain Win32 query with no arguments and no aliasing.
+    unsafe { IsUserAnAdmin() != 0 }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_elevation() -> bool {
+    // Bit 12 of the effective capability set is CAP_NET_ADMIN, which is what
+    // TUN needs; plain root has all capabilities set.
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return false;
+    };
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        .map(|mask| mask & (1 << 12) != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn detect_elevation() -> bool {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid has no preconditions.
+    unsafe { geteuid() == 0 }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn detect_elevation() -> bool {
+    false
+}
+
+/// Creates the profile and the default config. Used by the installer
+/// (`ProtoGrid.exe --init`) before the first launch. The core stays next to
+/// the launcher and is not copied into the profile.
 pub fn init_profile() -> Result<PathBuf, String> {
     let data_root = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     let data_dir = profile_data_dir(&data_root);
@@ -311,7 +364,6 @@ pub fn init_profile() -> Result<PathBuf, String> {
         std::fs::write(&config_path, text)
             .map_err(|error| format!("не удалось записать {}: {error}", config_path.display()))?;
     }
-    installer::ensure_bundled_core(&data_dir);
     Ok(data_dir)
 }
 
@@ -367,6 +419,11 @@ impl Engine {
         } else {
             AppConfig::default()
         };
+        // TUN cannot start without the matching privileges: reflect it in the
+        // settings instead of failing later on connect.
+        if config.settings.tun_enabled && !is_elevated() {
+            config.settings.tun_enabled = false;
+        }
         config.normalize();
 
         let inner = Arc::new(Mutex::new(Inner {
@@ -377,6 +434,7 @@ impl Engine {
             logs: VecDeque::new(),
             pings: HashMap::new(),
             loading_pings: HashSet::new(),
+            country_lookups: HashSet::new(),
             busy: HashSet::new(),
             child: None,
             pid: None,
@@ -491,6 +549,18 @@ impl Engine {
                 }
             }
             refresh_stale_subscriptions(&inner, &ctx).await;
+            // Fill in flags for servers saved before country detection existed.
+            let pending: Vec<String> = {
+                let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard
+                    .config
+                    .servers
+                    .iter()
+                    .filter(|server| server.country.trim().is_empty())
+                    .map(|server| server.id.clone())
+                    .collect()
+            };
+            resolve_countries(inner.clone(), ctx.clone(), pending);
         });
     }
 
@@ -617,6 +687,8 @@ impl Engine {
             let old = guard.config.settings.clone();
             let connected = matches!(guard.status, ConnStatus::Connected | ConnStatus::Connecting);
             guard.config.settings = settings.clone();
+            guard.config.enforce_tun_process_rules();
+            guard.config.sync_custom_profile();
             match guard.persist() {
                 Ok(()) => {}
                 Err(error) => {
@@ -694,6 +766,17 @@ impl Engine {
         if server.name.trim().is_empty() {
             server.name = server.target();
         }
+        {
+            let guard = self.lock();
+            if let Some(existing) = guard.config.servers.iter().find(|s| s.id == server.id) {
+                // A different endpoint may be in another country.
+                if existing.address != server.address || existing.port != server.port {
+                    server.country.clear();
+                }
+            }
+        }
+        let needs_country = server.country.trim().is_empty();
+        let country_id = server.id.clone();
         let (was_active, was_connected) = {
             let mut guard = self.lock();
             let was_active = guard.config.active_server_id.as_deref() == Some(server.id.as_str());
@@ -720,12 +803,28 @@ impl Engine {
         if was_active && was_connected {
             self.connect();
         }
+        if needs_country {
+            self.lookup_countries(vec![country_id]);
+        }
         push_toast(
             &self.inner,
             &self.ctx,
             "Сервер сохранён",
             ToastKind::Success,
         );
+    }
+
+    /// Starts background country detection for the given servers.
+    fn lookup_countries(&self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let inner = self.inner.clone();
+        let ctx = self.ctx.clone();
+        // Enter our runtime: this is called from the UI thread.
+        self.spawn(async move {
+            resolve_countries(inner, ctx, ids);
+        });
     }
 
     pub fn delete_server(&self, id: &str) {
@@ -794,6 +893,12 @@ impl Engine {
             return Err(message);
         }
         let added = outcome.servers.len();
+        let country_ids: Vec<String> = outcome
+            .servers
+            .iter()
+            .filter(|server| server.country.trim().is_empty())
+            .map(|server| server.id.clone())
+            .collect();
         let was_connected = self.lock().status == ConnStatus::Connected;
         {
             let mut guard = self.lock();
@@ -806,6 +911,7 @@ impl Engine {
             guard.touch();
         }
         self.ctx.request_repaint();
+        self.lookup_countries(country_ids);
         if was_connected {
             self.connect();
         }
@@ -824,6 +930,12 @@ impl Engine {
                 Ok(fetched) => {
                     let id = uuid::Uuid::new_v4().to_string();
                     let count = fetched.servers.len();
+                    let country_ids: Vec<String> = fetched
+                        .servers
+                        .iter()
+                        .filter(|server| server.country.trim().is_empty())
+                        .map(|server| server.id.clone())
+                        .collect();
                     {
                         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                         guard.config.subscriptions.push(Subscription {
@@ -869,6 +981,7 @@ impl Engine {
                         format!("Подписка добавлена: {count} серверов"),
                         ToastKind::Success,
                     );
+                    resolve_countries(inner.clone(), ctx.clone(), country_ids);
                 }
                 Err(error) => {
                     push_log(&inner, &ctx, "app", Some("warn"), error.clone());
@@ -1013,8 +1126,17 @@ impl Engine {
         let was_connected = self.lock().status == ConnStatus::Connected;
         {
             let mut guard = self.lock();
+            // Keep the user's own ruleset so it can be restored later.
+            if guard.config.settings.routing_preset == Some(RoutingPreset::Custom) {
+                guard.config.custom_profile = Some(CustomProfile {
+                    rules: guard.config.rules.clone(),
+                    final_action: guard.config.settings.final_action,
+                });
+            }
             guard.config.rules = rules;
             guard.config.settings.final_action = final_action;
+            guard.config.settings.routing_preset = RoutingPreset::from_id(preset);
+            guard.config.enforce_tun_process_rules();
             let _ = guard.persist();
             guard.touch();
         }
@@ -1030,9 +1152,68 @@ impl Engine {
         );
     }
 
+    /// Switches back to the rules that were active before a built-in preset.
+    pub fn restore_custom_profile(&self) {
+        let was_connected = self.lock().status == ConnStatus::Connected;
+        {
+            let mut guard = self.lock();
+            let Some(profile) = guard.config.custom_profile.clone() else {
+                return;
+            };
+            guard.config.rules = profile.rules;
+            guard.config.settings.final_action = profile.final_action;
+            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
+            guard.config.enforce_tun_process_rules();
+            guard.config.sync_custom_profile();
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        if was_connected {
+            self.connect();
+        }
+        push_toast(
+            &self.inner,
+            &self.ctx,
+            "Возвращены свои правила маршрутизации",
+            ToastKind::Success,
+        );
+    }
+
+    /// Copies the active built-in preset into an editable profile. The rules
+    /// stay as they are; later edits are saved to the copy, never to the preset.
+    pub fn fork_routing_profile(&self) {
+        {
+            let mut guard = self.lock();
+            if guard.config.settings.routing_preset == Some(RoutingPreset::Custom) {
+                return;
+            }
+            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
+            guard.config.enforce_tun_process_rules();
+            guard.config.sync_custom_profile();
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        push_toast(
+            &self.inner,
+            &self.ctx,
+            "Создан свой профиль — правила теперь можно менять",
+            ToastKind::Success,
+        );
+    }
+
     pub fn save_rule(&self, mut rule: RoutingRule) {
         rule.value = rule.value.trim().to_string();
-        if rule.value.is_empty() {
+        let tun_active = self.lock().config.settings.tun_active();
+        if rule.kind == RuleKind::ProcessName && !tun_active {
+            // The rule is still saved so it can be filled in and enabled once
+            // TUN is on, but it must not pretend to work without TUN.
+            rule.enabled = false;
+            if rule.name.trim().is_empty() {
+                rule.name = format!("{} (нужен TUN)", rule.kind.label());
+            }
+        } else if rule.value.is_empty() {
             push_toast(
                 &self.inner,
                 &self.ctx,
@@ -1055,6 +1236,8 @@ impl Engine {
             } else {
                 guard.config.rules.push(rule);
             }
+            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
+            guard.config.sync_custom_profile();
             let _ = guard.persist();
             guard.touch();
         }
@@ -1075,6 +1258,8 @@ impl Engine {
         {
             let mut guard = self.lock();
             guard.config.rules.retain(|rule| rule.id != id);
+            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
+            guard.config.sync_custom_profile();
             let _ = guard.persist();
             guard.touch();
         }
@@ -1104,6 +1289,8 @@ impl Engine {
             };
             if target != index {
                 guard.config.rules.swap(index, target);
+                guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
+                guard.config.sync_custom_profile();
                 let _ = guard.persist();
                 guard.touch();
             }
@@ -1117,6 +1304,8 @@ impl Engine {
     pub fn set_final_action(&self, action: RuleAction) {
         let mut settings = self.lock().config.settings.clone();
         settings.final_action = action;
+        // Picking a fallback by hand means the preset no longer describes the setup.
+        settings.routing_preset = Some(RoutingPreset::Custom);
         self.save_settings(settings);
     }
 
@@ -1606,6 +1795,15 @@ async fn detect_both(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
     );
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        // The shipped core always has a concrete default path. Keep it in the
+        // settings so the UI shows where the active binary lives, even in the
+        // portable build where nothing was configured manually.
+        if let Some(path) = protogrid.path.as_ref().filter(|_| protogrid.found).cloned() {
+            if guard.config.settings.protogrid_path != path {
+                guard.config.settings.protogrid_path = path;
+                let _ = guard.persist();
+            }
+        }
         guard.core_singbox = Some(singbox);
         guard.core_xray = Some(xray);
         guard.core_protogrid = Some(protogrid);
@@ -1727,6 +1925,7 @@ async fn refresh_subscription_inner(
         .config
         .active_server_id
         .clone();
+    let mut country_ids = Vec::new();
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let index = guard
@@ -1750,11 +1949,26 @@ async fn refresh_subscription_inner(
             .iter()
             .map(|server| (server_key(server), server.id.clone()))
             .collect();
+        let old_country: HashMap<String, String> = old_servers
+            .iter()
+            .filter(|server| !server.country.trim().is_empty())
+            .map(|server| (server.id.clone(), server.country.clone()))
+            .collect();
         let mut new_servers = Vec::new();
         for mut server in fetched.servers {
             server.subscription_id = Some(id.to_string());
             if let Some(old_id) = old_by_key.remove(&server_key(&server)) {
                 server.id = old_id;
+                // The provider rarely ships a country; keep the one we already
+                // resolved instead of looking the same address up again.
+                if server.country.trim().is_empty() {
+                    if let Some(country) = old_country.get(&server.id) {
+                        server.country = country.clone();
+                    }
+                }
+            }
+            if server.country.trim().is_empty() {
+                country_ids.push(server.id.clone());
             }
             new_servers.push(server);
         }
@@ -1784,6 +1998,7 @@ async fn refresh_subscription_inner(
         guard.touch();
     }
     ctx.request_repaint();
+    resolve_countries(inner.clone(), ctx.clone(), country_ids);
     push_log(
         inner,
         ctx,
@@ -1805,6 +2020,83 @@ async fn refresh_subscription_inner(
         }
     }
     Ok(())
+}
+
+/// Resolves and persists missing country codes. Runs at most four lookups at a
+/// time and returns immediately, so callers never wait for the network.
+fn resolve_countries(inner: Arc<Mutex<Inner>>, ctx: egui::Context, ids: Vec<String>) {
+    let mut seen = HashSet::new();
+    let semaphore = Arc::new(Semaphore::new(4));
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        // Claim the server under the lock: the same id can arrive from the
+        // add flow, a subscription refresh and the startup backfill at once.
+        let claimed = {
+            let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .config
+                .server(&id)
+                .is_some_and(|server| server.country.trim().is_empty())
+                && guard.country_lookups.insert(id.clone())
+        };
+        if !claimed {
+            continue;
+        }
+        let task_inner = inner.clone();
+        let task_ctx = ctx.clone();
+        let semaphore = semaphore.clone();
+        let task_id = id.clone();
+        tokio::spawn(async move {
+            let permit = semaphore.acquire_owned().await.ok();
+            let changed = lookup_country(&task_inner, &task_id).await;
+            drop(permit);
+            {
+                let mut guard = task_inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.country_lookups.remove(&task_id);
+            }
+            if changed {
+                task_ctx.request_repaint();
+            }
+        });
+    }
+}
+
+async fn lookup_country(inner: &Arc<Mutex<Inner>>, id: &str) -> bool {
+    let address = {
+        let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(server) = guard.config.server(id) else {
+            return false;
+        };
+        if !server.country.trim().is_empty() {
+            return false;
+        }
+        server.address.clone()
+    };
+    if address.trim().is_empty() {
+        return false;
+    }
+    let Some(country) = geo::lookup_country(&address).await else {
+        return false;
+    };
+    let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(server) = guard
+        .config
+        .servers
+        .iter_mut()
+        .find(|server| server.id == id)
+    else {
+        return false;
+    };
+    // The user may have edited the endpoint while the lookup was in flight.
+    if server.address != address || !server.country.trim().is_empty() {
+        return false;
+    }
+    server.country = country;
+    let _ = guard.persist();
+    guard.touch();
+    true
 }
 
 fn server_key(server: &Server) -> String {
@@ -2179,6 +2471,14 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
             "TUN-режим поддерживается только ядром sing-box".into(),
         ));
     }
+    if settings.tun_enabled && !is_elevated() {
+        return Err(set_error(
+            inner,
+            ctx,
+            "TUN-режим требует прав администратора — запустите ProtoGrid от имени администратора"
+                .into(),
+        ));
+    }
     let cached = {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         match settings.core {
@@ -2256,6 +2556,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
                 mldsa65: info.supports_mldsa65(),
                 masque: info.supports_masque(),
                 noise: info.supports_noise(),
+                openvpn: info.supports_openvpn(),
             },
         ),
         CoreKind::Xray => xray::build_config(&config.servers, &active_id, &settings, &config.rules),

@@ -14,38 +14,6 @@ use tokio::process::Command;
 
 use crate::engine::{push_log, Inner};
 
-mod bundled {
-    include!(concat!(env!("OUT_DIR"), "/bundled_core.rs"));
-}
-
-/// Extract the embedded ProtoGrid core into the profile on first launch (or
-/// when the bundled build differs in size). Returns the path to the binary.
-pub(crate) fn ensure_bundled_core(data_dir: &Path) -> Option<PathBuf> {
-    let bytes = bundled::BUNDLED_CORE?;
-    let dir = data_dir.join("cores").join("protogrid");
-    let dest = dir.join(binary_name(CoreKind::Protogrid));
-    let up_to_date = std::fs::metadata(&dest)
-        .map(|meta| meta.len() as usize == bytes.len())
-        .unwrap_or(false);
-    if !up_to_date {
-        std::fs::create_dir_all(&dir).ok()?;
-        std::fs::write(&dest, bytes).ok()?;
-        set_mode(&dest, 0o755);
-    }
-    if cfg!(windows) {
-        if let Some(wintun) = bundled::BUNDLED_WINTUN {
-            let dll = dir.join("wintun.dll");
-            let same = std::fs::metadata(&dll)
-                .map(|meta| meta.len() as usize == wintun.len())
-                .unwrap_or(false);
-            if !same {
-                let _ = std::fs::write(&dll, wintun);
-            }
-        }
-    }
-    Some(dest)
-}
-
 /// Features of a concrete core binary, verified by running `check` on tiny
 /// probe configs. Nothing here is guessed from the core's name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,6 +28,7 @@ pub struct CoreFeatures {
     pub fakedns: bool,
     pub clash_api: bool,
     pub noise: bool,
+    pub openvpn: bool,
 }
 
 impl CoreFeatures {
@@ -79,6 +48,7 @@ impl CoreFeatures {
                 fakedns: false,
                 clash_api: false,
                 noise: true,
+                openvpn: false,
             },
             CoreKind::Singbox | CoreKind::Protogrid => Self {
                 xhttp: fork,
@@ -91,6 +61,7 @@ impl CoreFeatures {
                 fakedns: true,
                 clash_api: true,
                 noise: fork,
+                openvpn: version_at_least(version, "1.14.0"),
             },
         }
     }
@@ -133,6 +104,12 @@ impl CoreInfo {
     pub fn supports_noise(&self) -> bool {
         self.features.noise
     }
+
+    /// OpenVPN client endpoint: sing-box 1.14+ with `with_openvpn` (the
+    /// ProtoGrid fork always includes it).
+    pub fn supports_openvpn(&self) -> bool {
+        self.features.openvpn
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,9 +121,10 @@ enum Probe {
     Mldsa65,
     VlessEncryption,
     Noise,
+    OpenVpn,
 }
 
-const PROBES: [Probe; 7] = [
+const PROBES: [Probe; 8] = [
     Probe::Xhttp,
     Probe::Kcp,
     Probe::XDrive,
@@ -154,7 +132,40 @@ const PROBES: [Probe; 7] = [
     Probe::Mldsa65,
     Probe::VlessEncryption,
     Probe::Noise,
+    Probe::OpenVpn,
 ];
+
+/// Minimal TLS OpenVPN profile that passes `sing-box check`. The CA is a
+/// throwaway self-signed certificate used only to validate the probe config;
+/// nothing is ever connected to.
+const OPENVPN_PROBE_PROFILE: &str = r#"client
+dev tun
+proto udp
+remote example.com 1194
+remote-cert-tls server
+verify-x509-name example.com name
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIDGzCCAgOgAwIBAgIUfHZfjhg3fZaCE2ZIIyuUqi7jTR4wDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSUHJvdG9HcmlkIFByb2JlIENBMB4XDTI2MTEyNjAyNTEx
+N1oXDTM2MTEyMzAyNTExN1owHTEbMBkGA1UEAwwSUHJvdG9HcmlkIFByb2JlIENB
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzyBPZnKSQgXrpggPpHdP
+nsfRUaQbz7Lk1oXViZYEiGA+bLqR6a5qpk/QkIz7EfmwV40H6IX49fW/8sGnqFQI
+rYLyXPlLzsKb2R5QRECzuT4chNuUCCpNHKbOwKyMt5FCmwRCzAJWZTTdysAMaWdS
+ppB0mYcYRLnd9Xo4epAlcExePKIwIyZSWKe4Wi0rMGhLqDwYofj4AB/rzEs1r/R1
+EZTQaPxsXrdC2eSY7Ufwx2HW8f7zfle+OSqxM13CdO5u/3MkkVaAo0d1BeJwbtSd
+mCSyD5+AhsjBJP162WqAj6PK6dDHDb+bmEVYwDcxSI1+1hlt9D8w2RZTOttbhzPB
+jQIDAQABo1MwUTAdBgNVHQ4EFgQUAY3NO4C+yeURWBfkrR/XDAMCJAcwHwYDVR0j
+BBgwFoAUAY3NO4C+yeURWBfkrR/XDAMCJAcwDwYDVR0TAQH/BAUwAwEB/zANBgkq
+hkiG9w0BAQsFAAOCAQEAVmBbtSb82FjEtPixyWJfA9ERo5lM7IpOLnsH6f6dJP/P
+6lkO7FXdku4tbEWeAFF2N2nmT2+2F+eMjrBwbWZkWZH9z51V/P5haE0cT1HDnS2q
+myp039ugoFC9CJwUS2y5JiYtGWqj1msvMa5CWANAfZMcdYQJeyYnWV/DLQ9A9QF0
+PnXDlr/hnjjiflgoZxVHWghEJqYy1teVFFM8T4RXU6R502rGO/c0Inn3i8rWsOq4
+9TJ+WLFW6ew1sSWwcodG4OZ31LZqdjjjgf/yybbNKiUUzqRgINojJuOjw74snexG
+KAH2g66dmzml0toPPGfCRl0RVjdmfr08uQ1HN0MwPg==
+-----END CERTIFICATE-----
+</ca>
+"#;
 
 fn probe_server(protocol: Protocol) -> Server {
     let mut server = Server::new(protocol);
@@ -210,6 +221,12 @@ fn probe_config(kind: CoreKind, probe: Probe) -> Option<serde_json::Value> {
             server.noise_enabled = true;
             server.noise_packet = "abcd".into();
             capabilities.noise = true;
+        }
+        Probe::OpenVpn => {
+            server = probe_server(Protocol::OpenVpn);
+            server.openvpn_profile = OPENVPN_PROBE_PROFILE.into();
+            server.security = Security::Tls;
+            capabilities.openvpn = true;
         }
     }
     if kind == CoreKind::Xray {
@@ -303,6 +320,7 @@ async fn probe_features(kind: CoreKind, path: &Path, version: &str) -> CoreFeatu
             Probe::Mldsa65 => "mldsa65",
             Probe::VlessEncryption => "vless-encryption",
             Probe::Noise => "noise",
+            Probe::OpenVpn => "openvpn",
         };
         let file = dir.join(format!("{name}.json"));
         if std::fs::write(&file, bytes).is_err() {
@@ -321,6 +339,7 @@ async fn probe_features(kind: CoreKind, path: &Path, version: &str) -> CoreFeatu
                     supported && (kind == CoreKind::Xray || version.contains("-protogrid"));
             }
             Probe::Noise => features.noise = supported,
+            Probe::OpenVpn => features.openvpn = supported,
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -329,7 +348,7 @@ async fn probe_features(kind: CoreKind, path: &Path, version: &str) -> CoreFeatu
 
 fn binary_name(kind: CoreKind) -> &'static str {
     match kind {
-        CoreKind::Singbox | CoreKind::Protogrid => {
+        CoreKind::Singbox => {
             if cfg!(windows) {
                 "sing-box.exe"
             } else {
@@ -341,6 +360,15 @@ fn binary_name(kind: CoreKind) -> &'static str {
                 "xray.exe"
             } else {
                 "xray"
+            }
+        }
+        // The fork ships next to the launcher under its own name so it cannot
+        // be mistaken for a stock sing-box lookup.
+        CoreKind::Protogrid => {
+            if cfg!(windows) {
+                "protogrid-core.exe"
+            } else {
+                "protogrid-core"
             }
         }
     }
@@ -382,40 +410,73 @@ fn configure_path(kind: CoreKind, settings: &Settings) -> String {
     }
 }
 
+fn legacy_protogrid_name() -> &'static str {
+    if cfg!(windows) {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    }
+}
+
 fn candidate_paths(kind: CoreKind, settings: &Settings, data_dir: &Path) -> Vec<PathBuf> {
     let binary = binary_name(kind);
     let dir = dir_name(kind);
     let mut candidates = Vec::new();
-    let configured = if kind == CoreKind::Protogrid && bundled::BUNDLED_CORE.is_some() {
-        // The fork is embedded in the build; ignore a stale manual path.
-        String::new()
-    } else {
-        configure_path(kind, settings)
+    let configured = {
+        let raw = configure_path(kind, settings);
+        if raw.trim().is_empty() {
+            None
+        } else {
+            let mut path = expand_tilde(raw.trim());
+            if path.is_dir() {
+                path = path.join(binary);
+            }
+            if !path.is_absolute() {
+                path = data_dir.join(path);
+            }
+            Some(path)
+        }
     };
-    if !configured.trim().is_empty() {
-        let mut path = expand_tilde(configured.trim());
-        if path.is_dir() {
-            path = path.join(binary);
+
+    if kind == CoreKind::Protogrid {
+        let managed_binary = data_dir.join("cores").join(dir).join(binary);
+        let managed_legacy = data_dir
+            .join("cores")
+            .join(dir)
+            .join(legacy_protogrid_name());
+        if let Some(path) = configured {
+            // Older releases copied the fork into the profile and saved that
+            // path. Ignore it so the fresh core next to the launcher wins.
+            if path != managed_binary && path != managed_legacy {
+                candidates.push(path);
+            }
         }
-        if !path.is_absolute() {
-            path = data_dir.join(path);
+        // The fork ships next to the launcher rather than inside it.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                candidates.push(parent.join(binary));
+                candidates.push(parent.join("cores").join(dir).join(binary));
+                candidates.push(parent.join("cores").join(dir).join(legacy_protogrid_name()));
+            }
         }
+        candidates.push(managed_binary);
+        candidates.push(managed_legacy);
+        return candidates;
+    }
+
+    if let Some(path) = configured {
         candidates.push(path);
     }
     candidates.push(data_dir.join("cores").join(dir).join(binary));
-    if kind != CoreKind::Protogrid {
-        candidates.push(data_dir.join("cores").join(binary));
-        candidates.push(data_dir.join("bin").join(binary));
-        candidates.push(data_dir.join(binary));
-    }
+    candidates.push(data_dir.join("cores").join(binary));
+    candidates.push(data_dir.join("bin").join(binary));
+    candidates.push(data_dir.join(binary));
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("cores").join(dir).join(binary));
-            if kind != CoreKind::Protogrid {
-                candidates.push(parent.join("cores").join(binary));
-                candidates.push(parent.join("bin").join(binary));
-                candidates.push(parent.join(binary));
-            }
+            candidates.push(parent.join("cores").join(binary));
+            candidates.push(parent.join("bin").join(binary));
+            candidates.push(parent.join(binary));
         }
     }
     candidates
@@ -485,9 +546,6 @@ fn compatibility(kind: CoreKind, version: &str) -> Result<(), String> {
 }
 
 pub async fn detect(kind: CoreKind, settings: &Settings, data_dir: &Path) -> CoreInfo {
-    if kind == CoreKind::Protogrid {
-        let _ = ensure_bundled_core(data_dir);
-    }
     let mut run_failure: Option<(PathBuf, String)> = None;
     for path in candidate_paths(kind, settings, data_dir) {
         if !path.is_file() {
@@ -539,15 +597,24 @@ pub async fn detect(kind: CoreKind, settings: &Settings, data_dir: &Path) -> Cor
             features: CoreFeatures::default(),
         };
     }
+    let hint = if kind == CoreKind::Protogrid {
+        format!(
+            "{} не найден. Положите {} рядом с ProtoGrid.exe или укажите путь в настройках.",
+            kind.name(),
+            binary
+        )
+    } else {
+        format!(
+            "{} не найден. Скачайте его в настройках или укажите путь.",
+            kind.name()
+        )
+    };
     CoreInfo {
         found: false,
         path: None,
         version: None,
         compatible: false,
-        error: Some(format!(
-            "{} не найден. Скачайте его в настройках или укажите путь.",
-            kind.name()
-        )),
+        error: Some(hint),
         features: CoreFeatures::default(),
     }
 }
@@ -822,9 +889,8 @@ pub async fn install(
     Ok(info)
 }
 
-/// ProtoGrid core is shipped with the app. Install means: copy the bundled
-/// binary (next to the executable or already in the profile) into
-/// `cores/protogrid/` and validate it.
+/// ProtoGrid core is shipped next to the launcher. Install means: locate and
+/// validate that binary without copying it into the profile.
 async fn install_bundled(
     inner: &Arc<Mutex<Inner>>,
     ctx: &egui::Context,
@@ -833,63 +899,31 @@ async fn install_bundled(
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         (guard.data_dir.clone(), guard.config.settings.clone())
     };
-    let dest_dir = data_dir.join("cores").join("protogrid");
-    let dest = dest_dir.join(binary_name(CoreKind::Protogrid));
-    if ensure_bundled_core(&data_dir).is_some() {
+    push_log(
+        inner,
+        ctx,
+        "app",
+        Some("info"),
+        "Поиск ядра ProtoGrid рядом с приложением…",
+    );
+    let info = detect(CoreKind::Protogrid, &settings, &data_dir).await;
+    if !info.found {
+        return Err(format!(
+            "Ядро ProtoGrid не найдено. Положите {} рядом с ProtoGrid.exe.",
+            binary_name(CoreKind::Protogrid)
+        ));
+    }
+    if let Some(error) = info.error.clone() {
+        return Err(error);
+    }
+    if let Some(path) = &info.path {
         push_log(
             inner,
             ctx,
             "app",
             Some("info"),
-            "Ядро ProtoGrid извлечено из комплекта приложения",
+            format!("Ядро ProtoGrid готово: {path}"),
         );
-    } else {
-        let source = candidate_paths(CoreKind::Protogrid, &settings, &data_dir)
-            .into_iter()
-            .find(|path| path.is_file());
-        match source {
-            Some(path) if path == dest => {}
-            Some(path) => {
-                std::fs::create_dir_all(&dest_dir).map_err(|error| {
-                    format!("не удалось создать {}: {error}", dest_dir.display())
-                })?;
-                std::fs::copy(&path, &dest)
-                    .map_err(|error| format!("не удалось скопировать ядро: {error}"))?;
-                set_mode(&dest, 0o755);
-                push_log(
-                    inner,
-                    ctx,
-                    "app",
-                    Some("info"),
-                    format!("Ядро ProtoGrid скопировано из {}", path.display()),
-                );
-            }
-            None => {
-                return Err(
-                    "Ядро ProtoGrid не найдено. Положите sing-box форка в cores/protogrid/ рядом с приложением или укажите путь в настройках."
-                        .into(),
-                )
-            }
-        }
-    }
-    let version = run_version(&dest)
-        .await
-        .map_err(|error| format!("ядро ProtoGrid не запускается: {error}"))?;
-    let compatibility = compatibility(CoreKind::Protogrid, &version);
-    let features = probe_features(CoreKind::Protogrid, &dest, &version).await;
-    let info = CoreInfo {
-        found: true,
-        path: Some(dest.to_string_lossy().to_string()),
-        version: Some(version),
-        compatible: compatibility.is_ok(),
-        error: compatibility.err(),
-        features,
-    };
-    if !info.compatible {
-        return Err(info
-            .error
-            .clone()
-            .unwrap_or_else(|| "ядро ProtoGrid несовместимо".into()));
     }
     Ok(info)
 }
@@ -941,5 +975,22 @@ mod tests {
             features: CoreFeatures::heuristic(CoreKind::Xray, "26.10.21"),
         };
         assert!(xray.supports_noise());
+    }
+
+    #[test]
+    fn detects_openvpn_capable_core() {
+        assert!(core_with_version("1.14.0").supports_openvpn());
+        assert!(core_with_version("1.14.4").supports_openvpn());
+        assert!(core_with_version("1.14.4-protogrid.3").supports_openvpn());
+        assert!(!core_with_version("1.13.0").supports_openvpn());
+        let xray = CoreInfo {
+            found: true,
+            path: None,
+            version: Some("26.10.21".into()),
+            compatible: true,
+            error: None,
+            features: CoreFeatures::heuristic(CoreKind::Xray, "26.10.21"),
+        };
+        assert!(!xray.supports_openvpn());
     }
 }
