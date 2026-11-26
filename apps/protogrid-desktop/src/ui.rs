@@ -30,10 +30,11 @@ pub enum Page {
     Charts,
     Logs,
     Settings,
+    Info,
 }
 
 impl Page {
-    const ALL: [Page; 7] = [
+    const ALL: [Page; 8] = [
         Page::Overview,
         Page::Servers,
         Page::Subscriptions,
@@ -41,6 +42,7 @@ impl Page {
         Page::Charts,
         Page::Logs,
         Page::Settings,
+        Page::Info,
     ];
 
     fn label(self) -> &'static str {
@@ -52,6 +54,7 @@ impl Page {
             Page::Charts => "Графики",
             Page::Logs => "Журнал",
             Page::Settings => "Настройки",
+            Page::Info => "Информация",
         }
     }
 
@@ -64,6 +67,7 @@ impl Page {
             Page::Charts => egui_phosphor::regular::CHART_BAR,
             Page::Logs => egui_phosphor::regular::TERMINAL_WINDOW,
             Page::Settings => egui_phosphor::regular::GEAR_SIX,
+            Page::Info => egui_phosphor::regular::BOOK_OPEN,
         }
     }
 }
@@ -6075,6 +6079,1093 @@ fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine
 }
 
 /* -------------------------------------------------------------------------- */
+/* Information                                                                */
+/* -------------------------------------------------------------------------- */
+
+fn info_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, _engine: &Engine) {
+    page_head(
+        ui,
+        p,
+        "Информация",
+        "Простыми словами: как работает подключение, зачем три ядра и что выбрать",
+        |ui| {
+            if action_button(
+                ui,
+                p,
+                egui_phosphor::regular::GEAR_SIX,
+                "Настройки ядра",
+                BtnKind::Outline,
+            )
+            .clicked()
+            {
+                view.page = Page::Settings;
+                view.settings_draft = Some(settings_draft(snapshot));
+                view.settings_dirty = false;
+            }
+        },
+    );
+    info_route_card(ui, p);
+    ui.add_space(14.0);
+    info_cheatsheet(ui, p);
+    ui.add_space(14.0);
+    info_cores_section(ui, p, snapshot);
+    ui.add_space(14.0);
+    info_protocols_section(ui, p);
+    ui.add_space(14.0);
+    info_transport_section(ui, p);
+    ui.add_space(14.0);
+    info_tun_section(ui, p);
+    ui.add_space(14.0);
+    info_choice_section(ui, p, snapshot);
+    ui.add_space(20.0);
+}
+
+fn info_route_card(ui: &mut Ui, p: &Palette) {
+    Frame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(16)
+        .inner_margin(Margin::ZERO)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            Frame::new()
+                .inner_margin(Margin::symmetric(20, 18))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(theme::semibold("Как работает подключение", 14.0));
+                            ui.label(
+                                RichText::new(
+                                    "ProtoGrid — посредник между вашим устройством и сервером. \
+                                     Он забирает трафик, шифрует его и отправляет по туннелю.",
+                                )
+                                .size(11.5)
+                                .color(p.muted),
+                            );
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            pill(
+                                ui,
+                                "4 шага",
+                                p.accent_2,
+                                p.accent_soft,
+                                Stroke::new(1.0, p.accent_line),
+                            );
+                        });
+                    });
+                    ui.add_space(14.0);
+                    paint_route_diagram(ui, p);
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            "Снаружи виден только зашифрованный трафик до сервера. \
+                             Провайдер не знает, какие сайты вы открываете.",
+                        )
+                        .size(10.5)
+                        .color(p.faint),
+                    );
+                });
+        });
+}
+
+fn paint_route_diagram(ui: &mut Ui, p: &Palette) {
+    let width = ui.available_width().max(240.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 116.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let gap = (width * 0.032).clamp(8.0, 24.0);
+    let node_w = ((width - gap * 3.0) / 4.0).max(58.0);
+    let node_h = 94.0;
+    let top = rect.top() + 8.0;
+    let nodes = [
+        (
+            egui_phosphor::regular::DESKTOP,
+            "Вы",
+            "браузер и игры",
+            p.accent,
+        ),
+        (
+            egui_phosphor::regular::SHIELD_CHECK,
+            "ProtoGrid",
+            "ловит трафик",
+            p.cyan,
+        ),
+        (
+            egui_phosphor::regular::LOCK_KEY,
+            "Туннель",
+            "шифрует данные",
+            p.violet,
+        ),
+        (
+            egui_phosphor::regular::GLOBE,
+            "Сервер",
+            "выход в интернет",
+            p.green,
+        ),
+    ];
+    for (index, (icon, title, subtitle, color)) in nodes.iter().enumerate() {
+        let left = rect.left() + index as f32 * (node_w + gap);
+        let node = Rect::from_min_size(egui::pos2(left, top), Vec2::new(node_w, node_h));
+        painter.rect(
+            node,
+            CornerRadius::same(12),
+            p.panel_2,
+            Stroke::new(1.0, tinted(*color, if p.dark { 80 } else { 60 })),
+            egui::StrokeKind::Inside,
+        );
+        let center_x = node.center().x;
+        painter.circle_filled(
+            egui::pos2(center_x, top + 27.0),
+            15.0,
+            tinted(*color, if p.dark { 34 } else { 24 }),
+        );
+        painter.text(
+            egui::pos2(center_x, top + 27.0),
+            Align2::CENTER_CENTER,
+            *icon,
+            FontId::new(17.0, FontFamily::Proportional),
+            *color,
+        );
+        painter.text(
+            egui::pos2(center_x, top + 53.0),
+            Align2::CENTER_CENTER,
+            truncate(title, 14),
+            medium_font(11.5),
+            p.text,
+        );
+        painter.text(
+            egui::pos2(center_x, top + 71.0),
+            Align2::CENTER_CENTER,
+            truncate(subtitle, 17),
+            FontId::proportional(9.0),
+            p.faint,
+        );
+        if index + 1 < nodes.len() {
+            let y = top + node_h * 0.5;
+            let start = egui::pos2(node.right() + 3.0, y);
+            let end = egui::pos2(node.right() + gap - 3.0, y);
+            painter.line_segment([start, end], Stroke::new(1.5, p.line_strong));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    end,
+                    egui::pos2(end.x - 6.0, end.y - 4.0),
+                    egui::pos2(end.x - 6.0, end.y + 4.0),
+                ],
+                p.line_strong,
+                Stroke::NONE,
+            ));
+        }
+    }
+}
+
+fn info_cheatsheet(ui: &mut Ui, p: &Palette) {
+    let terms = [
+        (
+            egui_phosphor::regular::CUBE,
+            "Ядро",
+            "Движок, который строит туннель и говорит с сервером.",
+            p.accent,
+        ),
+        (
+            egui_phosphor::regular::PLUG,
+            "Протокол",
+            "Язык общения с сервером: VLESS, VMess, Trojan и другие.",
+            p.violet,
+        ),
+        (
+            egui_phosphor::regular::ROAD_HORIZON,
+            "Транспорт",
+            "Способ доставки: TCP, WebSocket, XHTTP, QUIC.",
+            p.cyan,
+        ),
+        (
+            egui_phosphor::regular::SHIELD,
+            "TUN",
+            "Перехват всего трафика системы. Нужны права администратора.",
+            p.amber,
+        ),
+    ];
+    card_grid(ui, 4, 12.0, |ui, index| {
+        let (icon, title, text, color) = terms[index];
+        info_term_tile(ui, p, icon, title, text, color);
+    });
+}
+
+fn info_term_tile(ui: &mut Ui, p: &Palette, icon: &str, title: &str, text: &str, color: Color32) {
+    Frame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(13))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(92.0);
+            icon_box(
+                ui,
+                p,
+                icon,
+                color,
+                tinted(color, if p.dark { 32 } else { 22 }),
+                30.0,
+            );
+            ui.add_space(8.0);
+            ui.label(theme::semibold(title, 11.5));
+            ui.label(RichText::new(text).size(10.0).color(p.muted));
+        });
+}
+
+fn info_cores_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
+    let selected = snapshot.config.settings.core;
+    settings_card(
+        ui,
+        p,
+        "Три ядра — три инструмента",
+        "Ядро — это программа-движок. Переключить его можно в «Настройках».",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "Все три ядра запускают прокси, но умеют разные протоколы и транспорты. \
+                             Поэтому один и тот же сервер может работать в одном ядре и не работать в другом.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    card_grid(ui, 3, 12.0, |ui, index| match index {
+                        0 => info_core_tile(
+                            ui,
+                            p,
+                            "ProtoGrid",
+                            "Форк sing-box · всё в одном",
+                            egui_phosphor::regular::ROCKET,
+                            p.accent,
+                            "Рекомендуется",
+                            p.green,
+                            &[
+                                "TUN и системный прокси",
+                                "XHTTP, mKCP, XDRIVE, MASQUE",
+                                "Hysteria2 и TUIC",
+                                "Reality 26 и Xray-серверы",
+                            ],
+                            "Выбирайте, если не знаете, что подойдёт.",
+                            selected == CoreKind::Protogrid,
+                        ),
+                        1 => info_core_tile(
+                            ui,
+                            p,
+                            "sing-box",
+                            "Стоковый · стабильная база",
+                            egui_phosphor::regular::CUBE,
+                            p.cyan,
+                            "Стабильный",
+                            p.cyan,
+                            &[
+                                "TUN и системный прокси",
+                                "Hysteria2 и TUIC",
+                                "Clash API и selector",
+                                "Без XHTTP, mKCP и VLESS Encryption",
+                            ],
+                            "Для чистого sing-box-стека.",
+                            selected == CoreKind::Singbox,
+                        ),
+                        _ => info_core_tile(
+                            ui,
+                            p,
+                            "Xray-core",
+                            "Эталон Xray-стека",
+                            egui_phosphor::regular::ATOM,
+                            p.amber,
+                            "Для Xray",
+                            p.amber,
+                            &[
+                                "XHTTP, mKCP, XDRIVE",
+                                "Reality 26 и VLESS Encryption",
+                                "VLESS, VMess, Trojan, SS",
+                                "Без TUN, Hysteria2 и TUIC",
+                            ],
+                            "Для Xray-серверов и тонкой настройки.",
+                            selected == CoreKind::Xray,
+                        ),
+                    });
+                    ui.add_space(12.0);
+                    info_why_cores(ui, p);
+                });
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn info_core_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    title: &str,
+    subtitle: &str,
+    icon: &str,
+    color: Color32,
+    tag: &str,
+    tag_color: Color32,
+    bullets: &[&str],
+    footer: &str,
+    selected: bool,
+) {
+    Frame::new()
+        .fill(if selected { p.accent_soft } else { p.panel_2 })
+        .stroke(Stroke::new(
+            1.0,
+            if selected { p.accent_line } else { p.line },
+        ))
+        .corner_radius(12)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(230.0);
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    color,
+                    tinted(color, if p.dark { 34 } else { 24 }),
+                    34.0,
+                );
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 12.5));
+                    ui.label(RichText::new(subtitle).size(9.5).color(p.faint));
+                });
+            });
+            ui.add_space(8.0);
+            if selected {
+                pill(
+                    ui,
+                    "Сейчас выбрано",
+                    p.accent_2,
+                    p.accent_soft,
+                    Stroke::new(1.0, p.accent_line),
+                );
+            } else {
+                pill(
+                    ui,
+                    tag,
+                    tag_color,
+                    tinted(tag_color, if p.dark { 28 } else { 18 }),
+                    Stroke::new(1.0, tinted(tag_color, if p.dark { 80 } else { 60 })),
+                );
+            }
+            ui.add_space(8.0);
+            for bullet in bullets {
+                let negative = bullet.starts_with("Без ") || bullet.starts_with("Нет ");
+                let (bullet_icon, bullet_color) = if negative {
+                    (egui_phosphor::regular::X_CIRCLE, p.red)
+                } else {
+                    (egui_phosphor::regular::CHECK_CIRCLE, p.green)
+                };
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(bullet_icon).size(11.0).color(bullet_color));
+                    ui.add(
+                        egui::Label::new(RichText::new(*bullet).size(10.0).color(p.muted)).wrap(),
+                    );
+                });
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(footer).size(9.5).color(p.faint));
+        });
+}
+
+fn info_why_cores(ui: &mut Ui, p: &Palette) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(10)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(theme::semibold("Почему ядра разные?", 11.5));
+            ui.label(
+                RichText::new(
+                    "sing-box и Xray — независимые проекты. Они по-разному развивают одни и те же \
+                     протоколы, поэтому их возможности не совпадают.",
+                )
+                .size(10.5)
+                .color(p.muted),
+            );
+            ui.add_space(8.0);
+            card_grid(ui, 2, 12.0, |ui, index| {
+                let (title, text, color) = if index == 0 {
+                    (
+                        "sing-box силён",
+                        "TUN, Hysteria2, TUIC, selector и Clash API.",
+                        p.cyan,
+                    )
+                } else {
+                    (
+                        "Xray силён",
+                        "XHTTP, mKCP, XDRIVE, VLESS Encryption и Reality 26.",
+                        p.amber,
+                    )
+                };
+                Frame::new()
+                    .fill(tinted(color, if p.dark { 20 } else { 12 }))
+                    .stroke(Stroke::new(
+                        1.0,
+                        tinted(color, if p.dark { 70 } else { 50 }),
+                    ))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(theme::medium(title, 10.5));
+                        ui.label(RichText::new(text).size(10.0).color(p.muted));
+                    });
+            });
+            ui.add_space(8.0);
+            Frame::new()
+                .fill(p.accent_soft)
+                .stroke(Stroke::new(1.0, p.accent_line))
+                .corner_radius(8)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "Форк ProtoGrid = sing-box + недостающие Xray-транспорты. \
+                             Одно ядро, которое понимает почти все серверы.",
+                        )
+                        .size(10.5)
+                        .color(p.accent_2),
+                    );
+                });
+        });
+}
+
+fn info_protocols_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "Протоколы простыми словами",
+        "Протокол — это язык, на котором клиент договаривается с сервером.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "Вам не нужно выбирать протокол вручную: ProtoGrid определяет его из ссылки \
+                             или подписки. Ниже — чтобы понимать, что происходит.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("КЛАССИЧЕСКИЕ TCP-ПРОТОКОЛЫ")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Vless,
+                                "TCP · TLS/Reality",
+                                "Лёгкий и быстрый",
+                                "Современный протокол без лишнего: UUID вместо пароля, поддержка Reality, \
+                                 Vision и UDP. Обычно самый быстрый выбор для TCP-серверов.",
+                                "Если сервер даёт vless:// — берите его.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Vmess,
+                                "TCP · TLS",
+                                "Старый, но живой",
+                                "Чуть тяжелее VLESS, зато поддерживается почти везде: UUID, alterId, AEAD. \
+                                 Хорошо подходит для старых подписок.",
+                                "Когда сервер даёт vmess://.",
+                            );
+                        }
+                    });
+                    ui.add_space(12.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Trojan,
+                                "TCP · TLS",
+                                "Маскировка под HTTPS",
+                                "Выглядит как обычный HTTPS-сайт. Пароль и TLS, простая настройка, \
+                                 неплохая маскировка от фильтрации.",
+                                "Когда сервер даёт trojan://.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Shadowsocks,
+                                "TCP · SIP002",
+                                "Простой и быстрый",
+                                "Пароль и метод шифрования, без TLS внутри. Поддерживает плагины \
+                                 obfs-local и v2ray-plugin.",
+                                "Для лёгких серверов и плагинов.",
+                            );
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("БЫСТРЫЕ QUIC-ПРОТОКОЛЫ")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Hysteria2,
+                                "QUIC",
+                                "Скорость на плохой сети",
+                                "Работает поверх QUIC, хорошо переживает потери пакетов и высокий пинг. \
+                                 Есть маскировка obfs Salamander.",
+                                "Только sing-box и ProtoGrid.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Tuic,
+                                "QUIC",
+                                "QUIC с настройками",
+                                "Ещё один QUIC-протокол: congestion control, UDP relay и несколько \
+                                 режимов передачи.",
+                                "Только sing-box и ProtoGrid.",
+                            );
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("ОСОБЫЕ ПОДКЛЮЧЕНИЯ")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Masque,
+                                "HTTP/3 · QUIC",
+                                "Маскировка под HTTP/3",
+                                "Трафик выглядит как обычный HTTP/3. Полезно там, где QUIC разрешён, \
+                                 а VPN-протоколы фильтруются.",
+                                "ProtoGrid и Xray при поддержке ядра.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::OpenVpn,
+                                "UDP/TCP · TLS",
+                                "Классический VPN",
+                                "Готовый профиль .ovpn: сертификаты, TLS, auth-user-pass. Не прокси- \
+                                 протокол, но удобен для корпоративных серверов.",
+                                "ProtoGrid и sing-box 1.14+.",
+                            );
+                        }
+                    });
+                });
+        },
+    );
+}
+
+fn info_protocol_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    protocol: Protocol,
+    transport: &str,
+    headline: &str,
+    text: &str,
+    who: &str,
+) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(142.0);
+            ui.horizontal(|ui| {
+                protocol_badge(ui, p, protocol);
+                ui.label(RichText::new(transport).size(9.0).color(p.faint));
+            });
+            ui.add_space(7.0);
+            ui.label(theme::semibold(headline, 11.5));
+            ui.label(RichText::new(text).size(10.0).color(p.muted));
+            ui.add_space(5.0);
+            ui.label(RichText::new(who).size(9.5).color(p.faint));
+        });
+}
+
+fn info_transport_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "Транспорт: как везём данные",
+        "Протокол отвечает «что», транспорт — «как». Шифрование оборачивает всё сверху.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    info_layer_stack(ui, p);
+                    ui.add_space(14.0);
+                    card_grid(ui, 3, 12.0, |ui, index| {
+                        let (icon, title, text, color) = match index {
+                            0 => (
+                                egui_phosphor::regular::PLUG,
+                                "TCP",
+                                "База. Быстро и просто, но без маскировки.",
+                                p.green,
+                            ),
+                            1 => (
+                                egui_phosphor::regular::BROWSER,
+                                "WebSocket",
+                                "Маскировка под обычный сайт, дружит с CDN.",
+                                p.cyan,
+                            ),
+                            _ => (
+                                egui_phosphor::regular::ARROWS_LEFT_RIGHT,
+                                "gRPC",
+                                "HTTP/2-транспорт, стабилен у некоторых провайдеров.",
+                                p.violet,
+                            ),
+                        };
+                        info_transport_tile(ui, p, icon, title, text, color);
+                    });
+                    ui.add_space(12.0);
+                    card_grid(ui, 3, 12.0, |ui, index| {
+                        let (icon, title, text, color) = match index {
+                            0 => (
+                                egui_phosphor::regular::GLOBE,
+                                "XHTTP",
+                                "Обычные HTTP-запросы, CDN и HTTP/3. Только ProtoGrid и Xray.",
+                                p.accent,
+                            ),
+                            1 => (
+                                egui_phosphor::regular::LIGHTNING,
+                                "mKCP",
+                                "UDP-транспорт для плохих сетей. Только ProtoGrid и Xray.",
+                                p.amber,
+                            ),
+                            _ => (
+                                egui_phosphor::regular::WAVES,
+                                "QUIC",
+                                "Для Hysteria2 и TUIC. Быстро восстанавливается после потерь.",
+                                p.red,
+                            ),
+                        };
+                        info_transport_tile(ui, p, icon, title, text, color);
+                    });
+                });
+        },
+    );
+}
+
+fn info_layer_stack(ui: &mut Ui, p: &Palette) {
+    let layers = [
+        (
+            egui_phosphor::regular::LIGHTBULB,
+            "Что вы делаете",
+            "сайты, игры, приложения",
+            p.green,
+        ),
+        (
+            egui_phosphor::regular::PLUG,
+            "Протокол",
+            "VLESS · VMess · Trojan · Shadowsocks",
+            p.violet,
+        ),
+        (
+            egui_phosphor::regular::ROAD_HORIZON,
+            "Транспорт",
+            "XHTTP · WebSocket · gRPC · TCP · mKCP",
+            p.cyan,
+        ),
+        (
+            egui_phosphor::regular::LOCK_KEY,
+            "Шифрование",
+            "TLS · Reality",
+            p.amber,
+        ),
+    ];
+    for (index, (icon, title, examples, color)) in layers.iter().enumerate() {
+        Frame::new()
+            .fill(tinted(*color, if p.dark { 20 } else { 12 }))
+            .stroke(Stroke::new(
+                1.0,
+                tinted(*color, if p.dark { 70 } else { 50 }),
+            ))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(14, 9))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    icon_box(
+                        ui,
+                        p,
+                        icon,
+                        *color,
+                        tinted(*color, if p.dark { 36 } else { 24 }),
+                        30.0,
+                    );
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(theme::medium(*title, 11.5));
+                        ui.label(RichText::new(*examples).size(10.0).color(p.muted));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{}/{}", index + 1, layers.len()))
+                                .size(9.0)
+                                .color(p.faint),
+                        );
+                    });
+                });
+            });
+        if index + 1 < layers.len() {
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(egui_phosphor::regular::ARROW_DOWN)
+                        .size(14.0)
+                        .color(p.faint),
+                );
+            });
+        }
+    }
+}
+
+fn info_transport_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    icon: &str,
+    title: &str,
+    text: &str,
+    color: Color32,
+) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(13))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(86.0);
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    color,
+                    tinted(color, if p.dark { 32 } else { 22 }),
+                    28.0,
+                );
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 11.0));
+                    ui.add(egui::Label::new(RichText::new(text).size(9.5).color(p.muted)).wrap());
+                });
+            });
+        });
+}
+
+fn info_tun_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "TUN или системный прокси?",
+        "Оба режима пускают трафик через прокси, но перехватывают его по-разному.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    card_grid(ui, 2, 14.0, |ui, index| {
+                        if index == 0 {
+                            info_mode_tile(
+                                ui,
+                                p,
+                                egui_phosphor::regular::GLOBE,
+                                "Системный прокси",
+                                "Без прав администратора",
+                                p.green,
+                                "Прокси прописывается в настройках ОС. Его используют браузер и \
+                                 программы, которые умеют системный прокси.",
+                                &[
+                                    "Просто и без администратора",
+                                    "Хорошо для браузера",
+                                    "Игры могут его игнорировать",
+                                ],
+                            );
+                        } else {
+                            info_mode_tile(
+                                ui,
+                                p,
+                                egui_phosphor::regular::SHIELD_CHECK,
+                                "TUN-режим",
+                                "Нужны права администратора",
+                                p.amber,
+                                "Создаёт виртуальный сетевой адаптер и забирает весь трафик системы — \
+                                 даже от программ, которые не знают о прокси.",
+                                &[
+                                    "Весь трафик, включая игры",
+                                    "Работает с любыми приложениями",
+                                    "Нужны права администратора",
+                                ],
+                            );
+                        }
+                    });
+                    ui.add_space(14.0);
+                    ui.label(
+                        RichText::new("ПРАВА ДЛЯ TUN")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 3, 12.0, |ui, index| {
+                        let (icon, title, text) = match index {
+                            0 => (
+                                egui_phosphor::regular::WINDOWS_LOGO,
+                                "Windows",
+                                "Запустите ProtoGrid от имени администратора. wintun.dll должна лежать \
+                                 рядом с ядром (в комплекте — рядом с ProtoGrid.exe).",
+                            ),
+                            1 => (
+                                egui_phosphor::regular::LINUX_LOGO,
+                                "Linux",
+                                "Запуск от root или с CAP_NET_ADMIN.",
+                            ),
+                            _ => (
+                                egui_phosphor::regular::APPLE_LOGO,
+                                "macOS",
+                                "Запуск с правами администратора.",
+                            ),
+                        };
+                        info_os_tile(ui, p, icon, title, text, p.amber);
+                    });
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            "Если прав нет — выключите TUN и пользуйтесь системным прокси или \
+                             локальными HTTP/SOCKS-портами: им администратор не нужен.",
+                        )
+                        .size(10.0)
+                        .color(p.faint),
+                    );
+                });
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn info_mode_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    icon: &str,
+    title: &str,
+    tag: &str,
+    tag_color: Color32,
+    text: &str,
+    bullets: &[&str],
+) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(190.0);
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    tag_color,
+                    tinted(tag_color, if p.dark { 34 } else { 24 }),
+                    34.0,
+                );
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 12.0));
+                    pill(
+                        ui,
+                        tag,
+                        tag_color,
+                        tinted(tag_color, if p.dark { 26 } else { 16 }),
+                        Stroke::new(1.0, tinted(tag_color, if p.dark { 70 } else { 50 })),
+                    );
+                });
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new(text).size(10.0).color(p.muted));
+            ui.add_space(6.0);
+            for (index, bullet) in bullets.iter().enumerate() {
+                let negative = index + 1 == bullets.len();
+                let (bullet_icon, bullet_color) = if negative {
+                    (egui_phosphor::regular::X_CIRCLE, p.red)
+                } else {
+                    (egui_phosphor::regular::CHECK_CIRCLE, p.green)
+                };
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(bullet_icon).size(11.0).color(bullet_color));
+                    ui.add(
+                        egui::Label::new(RichText::new(*bullet).size(9.5).color(p.muted)).wrap(),
+                    );
+                });
+            }
+        });
+}
+
+fn info_os_tile(ui: &mut Ui, p: &Palette, icon: &str, title: &str, text: &str, color: Color32) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(10)
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    color,
+                    tinted(color, if p.dark { 30 } else { 20 }),
+                    28.0,
+                );
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 10.5));
+                    ui.add(egui::Label::new(RichText::new(text).size(9.5).color(p.muted)).wrap());
+                });
+            });
+        });
+}
+
+fn info_choice_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
+    let selected = match snapshot.config.settings.core {
+        CoreKind::Protogrid => "ProtoGrid",
+        CoreKind::Singbox => "sing-box",
+        CoreKind::Xray => "Xray-core",
+    };
+    settings_card(
+        ui,
+        p,
+        "Что выбрать?",
+        "Короткая шпаргалка для типичных случаев.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    Frame::new()
+                        .fill(p.accent_soft)
+                        .stroke(Stroke::new(1.0, p.accent_line))
+                        .corner_radius(8)
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(egui_phosphor::regular::INFO)
+                                        .size(13.0)
+                                        .color(p.accent_2),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Сейчас в настройках выбрано ядро: {selected}"
+                                    ))
+                                    .size(10.5)
+                                    .color(p.accent_2),
+                                );
+                            });
+                        });
+                    ui.add_space(10.0);
+                    for (icon, condition, answer, color) in [
+                        (
+                            egui_phosphor::regular::QUESTION,
+                            "Не знаю, что выбрать",
+                            "ProtoGrid — он понимает почти всё.",
+                            p.accent,
+                        ),
+                        (
+                            egui_phosphor::regular::SHIELD_CHECK,
+                            "Нужен TUN для игр и всех программ",
+                            "ProtoGrid или sing-box.",
+                            p.amber,
+                        ),
+                        (
+                            egui_phosphor::regular::LIGHTNING,
+                            "Сервер Hysteria2 или TUIC",
+                            "ProtoGrid или sing-box.",
+                            p.red,
+                        ),
+                        (
+                            egui_phosphor::regular::PLUG,
+                            "Сервер Xray-only: XHTTP, mKCP, Reality 26",
+                            "ProtoGrid; Xray-core — если нужен именно Xray.",
+                            p.cyan,
+                        ),
+                        (
+                            egui_phosphor::regular::LEAF,
+                            "Нужен чистый sing-box без форка",
+                            "sing-box.",
+                            p.green,
+                        ),
+                    ] {
+                        Frame::new()
+                            .fill(p.panel_2)
+                            .stroke(Stroke::new(1.0, p.line))
+                            .corner_radius(9)
+                            .inner_margin(Margin::symmetric(11, 8))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new(icon).size(14.0).color(color));
+                                    ui.add_space(2.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(condition).size(10.5).color(p.text));
+                                        ui.label(
+                                            RichText::new(format!("→ {answer}"))
+                                                .size(10.5)
+                                                .color(color),
+                                        );
+                                    });
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+        },
+    );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Modals                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -6117,7 +7208,7 @@ pub fn modals(
                     Some(ModalState::Rule) => rule_modal(ui, p, view, snapshot, engine),
                     Some(ModalState::ProfileName) => profile_name_modal(ui, p, view, engine),
                     Some(ModalState::Confirm) => confirm_modal(ui, p, view, engine),
-                    Some(ModalState::Help) => help_modal(ui, p),
+                    Some(ModalState::Help) => help_modal(ui, p, view),
                     None => {}
                 });
         });
@@ -6144,7 +7235,7 @@ fn modal_title(ui: &mut Ui, p: &Palette, title: &str, text: &str) {
     ui.add_space(12.0);
 }
 
-fn help_modal(ui: &mut Ui, p: &Palette) {
+fn help_modal(ui: &mut Ui, p: &Palette, view: &mut View) {
     modal_title(
         ui,
         p,
@@ -6194,7 +7285,45 @@ fn help_modal(ui: &mut Ui, p: &Palette) {
             });
         ui.add_space(6.0);
     }
-    help_cores_card(ui, p);
+    Frame::new()
+        .fill(p.accent_soft)
+        .stroke(Stroke::new(1.0, p.accent_line))
+        .corner_radius(8)
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(egui_phosphor::regular::BOOK_OPEN)
+                        .size(22.0)
+                        .color(p.accent_2),
+                );
+                ui.vertical(|ui| {
+                    ui.label(theme::medium("Подробное руководство", 11.5));
+                    ui.label(
+                        RichText::new(
+                            "Ядра, протоколы, транспорты и TUN — отдельная страница с картинками.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if action_button(
+                        ui,
+                        p,
+                        egui_phosphor::regular::ARROW_RIGHT,
+                        "Открыть",
+                        BtnKind::Outline,
+                    )
+                    .clicked()
+                    {
+                        view.page = Page::Info;
+                        view.modal = None;
+                    }
+                });
+            });
+        });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -6211,77 +7340,6 @@ fn help_modal(ui: &mut Ui, p: &Palette) {
             }
         });
     });
-}
-
-/// Last help card: explains why ProtoGrid ships three cores, what each protocol
-/// and transport is for, and why TUN asks for administrator rights.
-fn help_cores_card(ui: &mut Ui, p: &Palette) {
-    Frame::new()
-        .fill(p.panel_2)
-        .stroke(Stroke::new(1.0, p.line))
-        .corner_radius(8)
-        .inner_margin(Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.label(theme::medium("Ядра, протоколы и TUN", 11.5));
-            ui.add_space(6.0);
-            for (heading, text) in [
-                (
-                    "Три ядра",
-                    "ProtoGrid — форк sing-box 1.14.4: TUN, Hysteria2, TUIC, selector и Clash API \
-                     плюс XHTTP, mKCP, VLESS Encryption, XDRIVE, MASQUE, UDP noise и OpenVPN \
-                     endpoint. Стоковый sing-box — стабильная база без XHTTP, mKCP и VLESS \
-                     Encryption (OpenVPN endpoint есть с 1.14). Xray-core — \
-                     эталон Xray-стека: VLESS/VMess/Trojan, Reality 26 и XHTTP, но без TUN, \
-                     Hysteria2, TUIC и OpenVPN. Для большинства серверов подходит ProtoGrid; Xray нужен \
-                     для редких Xray-only настроек.",
-                ),
-                (
-                    "Почему они разные",
-                    "Ядра — независимые реализации одного набора прокси-протоколов. sing-box \
-                     делает ставку на TUN, QUIC-протоколы и Clash API, а Xray — на новые \
-                     Xray-транспорты и Reality. Форк ProtoGrid добавляет в sing-box недостающее \
-                     из Xray, чтобы одним ядром подключаться и к sing-box-, и к Xray-серверам. \
-                     Поэтому один и тот же сервер может работать в одном ядре и не работать \
-                     в другом.",
-                ),
-                (
-                    "Протоколы",
-                    "VLESS — лёгкий stateless-протокол с UUID, TLS/Reality, Vision и XUDP. VMess — \
-                     старший формат с alterId и AEAD. Trojan — маскировка под обычный HTTPS. \
-                     Shadowsocks — простой SIP002/AEAD, плагины obfs-local и v2ray-plugin. \
-                     Hysteria2 — QUIC для быстрых и нестабильных сетей, obfs Salamander. TUIC — \
-                     QUIC с выбором congestion control и UDP relay.",
-                ),
-                (
-                    "Транспорты",
-                    "TCP, WebSocket, gRPC, HTTP Upgrade, XHTTP (включая HTTP/3) и mKCP; сверху TLS \
-                     или Reality. XHTTP маскирует трафик под обычные HTTP-запросы и работает через \
-                     CDN. mKCP превращает TCP в надёжный поток поверх UDP и помогает на сетях \
-                     с потерями. Reality выдаёт себя за чужой TLS-сайт и не требует своего \
-                     сертификата. Hysteria2 и TUIC работают только по QUIC.",
-                ),
-                (
-                    "TUN и права администратора",
-                    "TUN перехватывает весь трафик системы. Windows: запуск от администратора и \
-                     wintun.dll рядом с исполняемым файлом ядра (в комплекте — рядом с \
-                     ProtoGrid.exe; для стокового sing-box — папка cores/sing-box). Linux: root \
-                     или CAP_NET_ADMIN. macOS: права администратора. В ProtoGrid TUN доступен \
-                     только на ядрах sing-box и ProtoGrid; для Xray-серверов выберите sing-box. \
-                     Системному прокси и локальным HTTP/SOCKS-портам права администратора не нужны.",
-                ),
-                (
-                    "Ограничения",
-                    "Xray не умеет Hysteria2, TUIC и TUN; HTTP/2 (h2) удалён в Xray 26. Стоковый \
-                     sing-box не понимает XHTTP, mKCP, VLESS Encryption и XDRIVE — для них нужен \
-                     форк ProtoGrid.",
-                ),
-            ] {
-                ui.label(theme::semibold(heading, 10.5));
-                ui.label(RichText::new(text).size(10.5).color(p.muted));
-                ui.add_space(6.0);
-            }
-        });
 }
 
 fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
@@ -7712,7 +8770,8 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
                 3 => egui::Key::Num4,
                 4 => egui::Key::Num5,
                 5 => egui::Key::Num6,
-                _ => egui::Key::Num7,
+                6 => egui::Key::Num7,
+                _ => egui::Key::Num8,
             };
             if ui.ctx().input(|input| input.key_pressed(key)) {
                 view.page = *page;
@@ -7787,6 +8846,7 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
                         Page::Charts => charts_page(ui, &p, view, snapshot),
                         Page::Logs => logs_page(ui, &p, view, snapshot, engine),
                         Page::Settings => settings_page(ui, &p, view, snapshot, engine),
+                        Page::Info => info_page(ui, &p, view, snapshot, engine),
                     }
                 });
         });

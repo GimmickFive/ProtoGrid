@@ -8,6 +8,34 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-26
+
+Публичная бета: нативный desktop-клиент и первый Android MVP.
+
+### Добавлено
+
+- **Android MVP**: отдельный клиент `apps/protogrid-android` (Kotlin/Compose,
+  `VpnService`, libbox из форка sing-box) и JNI-мост `crates/protogrid-mobile`
+  к общему `protogrid-core`. Импорт share-ссылок, список серверов, подключение
+  и foreground-уведомление; сборка APK для `arm64-v8a` в GitHub Actions по
+  тегу `android-v*`.
+- **Страница «Информация»**: нативное руководство со схемами подключения,
+  сравнением ядер, описанием протоколов и транспортов, а также правилами
+  выдачи прав для TUN на Windows, Linux и macOS.
+- **Профили маршрутизации**: несколько собственных профилей вместо одного
+  скрытого слота. Профили создаются, переименовываются и удаляются, активный
+  хранится по id, а старый одиночный профиль автоматически переносится в список.
+
+### Изменено
+
+- Пресет «Обход РФ» переименован в «Жизнь в РФ»; старые конфиги мигрируют
+  автоматически.
+- Добавлен быстрый переход в «Информацию» по `Ctrl 8`.
+
+### Исправлено
+
+- Подписи карточек профилей маршрутизации больше не перехватывают клики.
+
 ## [0.1.3] — 2026-11-26
 
 ### Исправлено
@@ -51,6 +79,7 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.1.3...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.2.0...dev
+[0.2.0]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.2.0
 [0.1.3]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.3
 [0.1.2]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.2

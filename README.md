@@ -22,10 +22,10 @@
 - **Три ядра**: ProtoGrid (форк sing-box с XHTTP/MASQUE/XDRIVE), sing-box и Xray-core — у каждого свой бинарник и путь, автоопределение версии; стоковые ядра можно скачать с GitHub.
 - **OpenVPN**: через штатный endpoint sing-box 1.14+ (`with_openvpn`), только на sing-box-подобных ядрах; внешний бинарник `openvpn` не нужен.
 - **Подключение**: системный прокси (Windows / GNOME / KDE / macOS), TUN (sing-box), локальные HTTP/SOCKS-порты.
-- **Маршрутизация**: пресеты «Умный обход / Глобально / Напрямую», правила по доменам, IP/CIDR, GeoIP, GeoSite и процессам. Базы GeoIP/GeoSite кэшируются, поэтому после первого запуска подключение не зависит от доступности GitHub.
+- **Маршрутизация**: пресеты «Жизнь в РФ / Глобальный прокси / Прямой», несколько собственных профилей, правила по доменам, IP/CIDR, GeoIP, GeoSite и процессам. Базы GeoIP/GeoSite кэшируются, поэтому после первого запуска подключение не зависит от доступности GitHub.
 - **Пинг**: TCP, реальная задержка через Clash API sing-box, проверка текущего соединения через локальный прокси.
 - **Трей и автозапуск**: меню в трее, сворачивание окна, запуск при входе в систему.
-- **Интерфейс**: единый нативный лейаут — тёмный сайдбар, верхняя панель действий, обзор с карточками и живыми графиками, таблица серверов, подписки, маршрутизация, графики трафика, журнал и настройки. Тёмная и светлая темы, русский язык, поиск (`Ctrl K`), быстрые переходы (`Ctrl 1…7`), трей и автозапуск.
+- **Интерфейс**: единый нативный лейаут — тёмный сайдбар, верхняя панель действий, обзор с карточками и живыми графиками, таблица серверов, подписки, маршрутизация, графики трафика, журнал, настройки и раздел «Информация» с наглядным руководством по ядрам, протоколам и TUN. Тёмная и светлая темы, русский язык, поиск (`Ctrl K`), быстрые переходы (`Ctrl 1…8`), трей и автозапуск.
 
 ## Скриншоты
 
@@ -110,6 +110,28 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 Готовые Windows-пакеты собирает `scripts/package-windows.sh`: установщик NSIS и портативный zip. В обоих `protogrid-core.exe` и `wintun.dll` лежат рядом с `ProtoGrid.exe`, а не внутри него.
 
+### Android (APK)
+
+Android-клиент — отдельный MVP в `apps/protogrid-android`: Kotlin/Compose, `VpnService` и `libbox` из форка sing-box. Ссылки и конфиги разбирает общий `protogrid-core` через `crates/protogrid-mobile` (JNI). Собирается только `arm64-v8a`.
+
+```bash
+# libbox + Rust-мост
+export CGO_LDFLAGS_ALLOW='-l:.*'   # Go 1.27 и cronet-go
+cd forks/sing-box && make lib_install && \
+  go run ./cmd/internal/build_libbox -target android -platform android/arm64 && cd ../..
+cp forks/sing-box/libbox.aar apps/protogrid-android/app/libs/libbox.aar
+cargo ndk -t arm64-v8a -o apps/protogrid-android/app/src/main/jniLibs \
+  build -p protogrid-mobile --release
+
+cd apps/protogrid-android && ./gradlew :app:assembleRelease
+```
+
+APK прикрепляется к GitHub Release workflow `.github/workflows/android.yml` по тегу `android-v*`. Нужны JDK 17, Android SDK 35 и платформа 24 (libbox собирается с `-androidapi 24`), NDK 28.0.13004108, Go 1.27 и `cargo-ndk`; подпись и секреты описаны в [apps/protogrid-android/README.md](apps/protogrid-android/README.md).
+
+Ту же цепочку можно запустить одной командой: `ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh`. Для x86_64-эмулятора — `./scripts/build-android.sh x86_64`.
+
+Android-модуль линкует `libbox` (sing-box, GPLv3), поэтому распространяется под GPL-3.0; общий Rust-код остаётся MIT.
+
 ## Где лежат данные
 
 | ОС | Путь |
@@ -186,7 +208,7 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 ## Проверка
 
-- 87 юнит-тестов `protogrid-core`, `cargo clippy` без предупреждений.
+- 89 юнит-тестов `protogrid-core`; `cargo check` для desktop и mobile проходит.
 - Конфиги проверены на **sing-box 1.14.4** и **Xray 26.11.9**.
 - Реальное подключение через оба ядра проверено на Linux.
 - Код приложения проходит `cargo check` под Windows-таргет и собирается в нативный `.exe`.
@@ -213,8 +235,11 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 ## Лицензия
 
-Код приложения — MIT, см. [LICENSE](LICENSE). Сторонние компоненты и их
-лицензии — в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): шрифты Inter,
+Код desktop-приложения и общее ядро — MIT, см. [LICENSE](LICENSE).
+Android-клиент линкует `libbox` (sing-box, GPLv3) и распространяется под
+GPL-3.0, см. [apps/protogrid-android/LICENSE](apps/protogrid-android/LICENSE).
+Сторонние компоненты и их лицензии — в
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): шрифты Inter,
 JetBrains Mono и DejaVu — OFL, патчи форка sing-box — GPLv3.
 
 ## Участие и релизы
