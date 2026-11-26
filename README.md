@@ -2,6 +2,8 @@
 
 **ProtoGrid** — нативный кроссплатформенный клиент для прокси на Rust. Интерфейс построен на **egui/eframe**: без WebView, HTML, JavaScript и Node.js. Приложение само генерирует конфигурации и запускает **sing-box** или **Xray-core**, а вы управляете серверами, подписками, маршрутизацией и режимом подключения из одного окна.
 
+**Статус:** публичная бета.
+
 <p align="center">
   <img src="docs/icon.png" width="96" alt="ProtoGrid icon" />
 </p>
@@ -10,14 +12,15 @@
 
 - Окно и весь UI рисуются Rust-кодом через egui/OpenGL.
 - Нет WebView2/WebKitGTK, нет HTML/CSS/JS и нет Node.js.
-- Один компактный бинарник, меньше памяти и никаких webview-процессов.
+- Компактный бинарник-лончер; ядро ProtoGrid лежит рядом (`protogrid-core.exe`) и не встраивается в него, поэтому запуск не раздувается. Меньше памяти и никаких webview-процессов.
 - Тяжёлая работа с сетью, ядрами и системным прокси — в отдельном Rust-движке `protogrid-core`.
 
 ## Возможности
 
-- **Импорт ссылок**: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://` (`hy2://`), `tuic://`, вставка из буфера.
+- **Импорт ссылок**: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://` (`hy2://`), `tuic://`, `ovpn://`/`openvpn://` (base64 профиля), файл `.ovpn` (OpenVPN), вставка из буфера.
 - **Подписки**: base64, списки ссылок, Clash/Clash.Meta YAML, трафик и срок из `subscription-userinfo`, автообновление раз в 12 часов.
 - **Три ядра**: ProtoGrid (форк sing-box с XHTTP/MASQUE/XDRIVE), sing-box и Xray-core — у каждого свой бинарник и путь, автоопределение версии; стоковые ядра можно скачать с GitHub.
+- **OpenVPN**: через штатный endpoint sing-box 1.14+ (`with_openvpn`), только на sing-box-подобных ядрах; внешний бинарник `openvpn` не нужен.
 - **Подключение**: системный прокси (Windows / GNOME / KDE / macOS), TUN (sing-box), локальные HTTP/SOCKS-порты.
 - **Маршрутизация**: пресеты «Умный обход / Глобально / Напрямую», правила по доменам, IP/CIDR, GeoIP, GeoSite и процессам. Базы GeoIP/GeoSite кэшируются, поэтому после первого запуска подключение не зависит от доступности GitHub.
 - **Пинг**: TCP, реальная задержка через Clash API sing-box, проверка текущего соединения через локальный прокси.
@@ -70,8 +73,9 @@
 - Ядро:
   - **sing-box 1.12+** (проверено на 1.14.4);
   - **Xray-core** (проверено на 26.11.9).
+- **OpenVPN** — только sing-box 1.14+ с тегом сборки `with_openvpn`: подходят официальные релизы, форк ProtoGrid собирается с этим тегом. Xray-core OpenVPN не поддерживает.
 
-Ядра можно скачать в **Настройки → Подключение** или указать путь вручную.
+Стоковые ядра можно скачать в **Настройки → Подключение** или указать путь вручную. Ядро ProtoGrid (форк sing-box) поставляется рядом с приложением как `protogrid-core.exe` (Windows) или `protogrid-core` (Linux) и подхватывается автоматически.
 
 ## Сборка и запуск
 
@@ -102,12 +106,9 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 # результат: target/x86_64-pc-windows-gnu/release/protogrid.exe
 ```
 
-В этой рабочей папке уже лежит готовая **нативная** Windows-сборка (собрана до переименования, поэтому внутри всё ещё носит прежнее имя):
-
-- `dist/Rast-0.1.1-windows-x64/Rast.exe`
-- `dist/Rast-0.1.1-windows-x64.zip`
-
 В отличие от старой Tauri-версии, здесь нет WebView и `WebView2Loader.dll`; exe зависит только от системных DLL Windows.
+
+Готовые Windows-пакеты собирает `scripts/package-windows.sh`: установщик NSIS и портативный zip. В обоих `protogrid-core.exe` и `wintun.dll` лежат рядом с `ProtoGrid.exe`, а не внутри него.
 
 ## Где лежат данные
 
@@ -121,10 +122,8 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 - `config.json` — серверы, подписки, правила, настройки;
 - `runtime/singbox.json` или `runtime/xray.json` — последний конфиг ядра;
-- `cores/` — скачанные sing-box/Xray и файлы GeoIP/GeoSite;
+- `cores/` — скачанные sing-box/Xray и файлы GeoIP/GeoSite (ядро ProtoGrid хранится рядом с приложением);
 - `rulesets/` — кэш `*.srs` баз правил sing-box (обновление раз в 7 дней; при недоступности сети используются сохранённые копии, отсутствующие правила пропускаются).
-
-При первом запуске после переименования профиль автоматически переносится из старого каталога `app.rast.client`, а прежние записи автозапуска удаляются.
 
 ## Совместимость протоколов
 
@@ -138,6 +137,7 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 | Shadowsocks | TCP | SIP002/legacy, `obfs-local`, `v2ray-plugin` |
 | Hysteria2 | QUIC | Salamander obfs, up/down |
 | TUIC | QUIC | congestion control, UDP relay mode |
+| OpenVPN | UDP, TCP | endpoint, профиль `.ovpn`, TLS, `auth-user-pass`, `tls-auth`/`tls-crypt` |
 
 `*` XHTTP в sing-box доступен только в форке ProtoGrid; стоковый sing-box его не поддерживает. mKCP, VLESS Encryption и UDP noise (Xray `finalmask`) также добавлены в форк. См. `docs/xhttp-fork-plan.md` и `docs/xray-parity-plan.md`.
 
@@ -159,7 +159,7 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 ## TUN-режим
 
-- **Windows**: права администратора + `wintun.dll` рядом с `sing-box.exe` (папка `cores/sing-box`). Wintun: <https://www.wintun.net/>.
+- **Windows**: права администратора + `wintun.dll` рядом с исполняемым файлом ядра (в готовых пакетах — рядом с `ProtoGrid.exe`; для стокового sing-box — папка `cores/sing-box`). Wintun: <https://www.wintun.net/>.
 - **Linux**: root или `CAP_NET_ADMIN`.
 - **macOS**: запуск с правами администратора.
 
@@ -167,15 +167,16 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 ```
 .
-├── crates/protogrid-core/          # модели, share-ссылки, подписки, Clash YAML,
-│                              # генерация конфигов sing-box/Xray, ping, системный прокси
-├── apps/protogrid-desktop/         # нативное приложение egui/eframe
+├── crates/protogrid-core/     # модели, ссылки, подписки, Clash YAML, конфиги
+│                              # sing-box/Xray, OpenVPN, GeoIP, ping, системный прокси
+├── apps/protogrid-desktop/    # нативное приложение egui/eframe
 │   ├── src/app.rs             # окно, трей, тема, жизненный цикл
 │   ├── src/engine.rs          # состояние, процессы ядер, подписки, пинг, логи
 │   ├── src/installer.rs       # поиск/скачивание/распаковка ядер
 │   ├── src/ui.rs              # все экраны, формы и модальные окна
-│   └── assets/                # шрифты Inter и DejaVu Mono
-└── docs/screenshots/          # скриншоты нативного интерфейса
+│   ├── src/flags.rs           # флаги стран из assets/flags.rgba
+│   └── assets/                # шрифты, флаги, иконка
+└── docs/                      # скриншоты, патчи форка, планы
 ```
 
 - При подключении генерируется JSON-конфиг, запускается ядро дочерним процессом и проверяется открытие локального порта.
@@ -185,7 +186,7 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 ## Проверка
 
-- 34 юнит-теста `protogrid-core`, `cargo clippy` без предупреждений.
+- 87 юнит-тестов `protogrid-core`, `cargo clippy` без предупреждений.
 - Конфиги проверены на **sing-box 1.14.4** и **Xray 26.11.9**.
 - Реальное подключение через оба ядра проверено на Linux.
 - Код приложения проходит `cargo check` под Windows-таргет и собирается в нативный `.exe`.
@@ -201,6 +202,24 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 - Нет синхронизации настроек и защиты от запуска второй копии.
 - Импорт QR-кодов и статистика трафика в реальном времени пока не реализованы.
 
+### OpenVPN
+
+- Нет obfuscation и XOR/scramble, `obfsproxy` и `--plugin`; поддержаны только штатные TLS, `tls-auth`, `tls-crypt` и `tls-crypt-v2`.
+- Нет TAP/L2 и DCO — только tun (L3) и userspace-стек sing-box.
+- `<connection>`-блоки не раскрываются: в профиле должен быть top-level `remote`.
+- Для UDP-серверов TCP-пинг не работает; реальная задержка показывается через Clash API, когда ядро подключено.
+- Профиль `.ovpn` вместе с встроенными ключами и паролями хранится в `config.json` открытым текстом, как и остальные секреты приложения; в логи не пишется.
+- OpenVPN работает только на sing-box-подобном ядре 1.14+ с `with_openvpn`; Xray-core его не поддерживает.
+
 ## Лицензия
 
-MIT. См. [LICENSE](LICENSE). Шрифт Inter распространяется по SIL Open Font License (файл лицензии — в `apps/protogrid-desktop/assets/Inter-LICENSE.txt`).
+Код приложения — MIT, см. [LICENSE](LICENSE). Сторонние компоненты и их
+лицензии — в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): шрифты Inter,
+JetBrains Mono и DejaVu — OFL, патчи форка sing-box — GPLv3.
+
+## Участие и релизы
+
+- [CHANGELOG.md](CHANGELOG.md) — что изменилось в каждом релизе.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — ветки, стиль коммитов, проверки.
+- [docs/releasing.md](docs/releasing.md) — как выпускается релиз.
+- [SECURITY.md](SECURITY.md) — как сообщить об уязвимости.

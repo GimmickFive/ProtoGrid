@@ -9,6 +9,7 @@
 | TUN | да | да | есть |
 | Hysteria2 | да | да | есть |
 | TUIC | нет | да | есть, преимущество sing-box |
+| OpenVPN | нет | да, endpoint с 1.14 | включено в форке (with_openvpn) |
 | XHTTP: stream-one / stream-up / packet-up | да | нет | добавлено |
 | XHTTP: батчинг, CDN, `xmux`, `downloadSettings` | да | нет | батчинг/CDN; `xmux` pooling; `downloadSettings` с отдельным address/host/path и соединением |
 | XHTTP: HTTP/3 | да | нет | добавлено |
