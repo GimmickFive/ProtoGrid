@@ -127,16 +127,18 @@ pub enum ModalState {
     Rule,
     Import,
     Subscription,
+    ProfileName,
     Confirm,
     Help,
 }
 
 #[derive(Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ConfirmAction {
     DeleteServer(String),
     DeleteSubscription(String),
     DeleteRule(String),
-    ForkRoutingProfile,
+    DeleteRoutingProfile(String),
 }
 
 #[derive(Clone)]
@@ -167,6 +169,8 @@ pub struct View {
     pub subscription_url: String,
     pub subscription_edit: Option<String>,
     pub confirm: Option<Confirm>,
+    /// Id and current name of the routing profile being renamed.
+    pub profile_draft: Option<(String, String)>,
     pub settings_draft: Option<Settings>,
     pub settings_dirty: bool,
     pub toasts: Vec<UiToast>,
@@ -206,6 +210,7 @@ impl View {
             subscription_url: String::new(),
             subscription_edit: None,
             confirm: None,
+            profile_draft: None,
             settings_draft: None,
             settings_dirty: false,
             toasts: Vec::new(),
@@ -3852,13 +3857,18 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
     );
 
     let cards = routing_cards();
-    card_grid(ui, 3, 12.0, |ui, index| {
-        preset_card(ui, p, &cards[index], snapshot, engine);
+    let profiles = snapshot.config.custom_profiles.as_slice();
+    let total = cards.len() + profiles.len() + 1;
+    cards_grid(ui, 3, 12.0, total, |ui, index| {
+        if index < cards.len() {
+            preset_card(ui, p, &cards[index], snapshot, engine);
+        } else if index < cards.len() + profiles.len() {
+            let profile = &profiles[index - cards.len()];
+            custom_profile_card(ui, p, profile, snapshot, engine);
+        } else {
+            new_profile_card(ui, p, engine);
+        }
     });
-    if let Some(profile) = snapshot.config.custom_profile.as_ref() {
-        ui.add_space(12.0);
-        custom_profile_card(ui, p, profile, preset == RoutingPreset::Custom, engine);
-    }
     ui.add_space(14.0);
     let tun_on = tun_active(snapshot);
 
@@ -3885,6 +3895,39 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                             );
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if let Some(profile) = snapshot.config.active_custom_profile() {
+                                badge(ui, p, &profile.name, p.amber, p.amber_soft, true);
+                                if small_ghost(
+                                    ui,
+                                    p,
+                                    egui_phosphor::regular::PENCIL_SIMPLE,
+                                    "Переименовать",
+                                )
+                                .clicked()
+                                {
+                                    view.profile_draft =
+                                        Some((profile.id.clone(), profile.name.clone()));
+                                    view.modal = Some(ModalState::ProfileName);
+                                }
+                                if small_ghost(ui, p, egui_phosphor::regular::TRASH, "Удалить")
+                                    .clicked()
+                                {
+                                    view.confirm = Some(Confirm {
+                                        title: "Удалить профиль?".into(),
+                                        message: format!(
+                                            "«{}» и его правила будут удалены. Остальные профили \
+                                             останутся.",
+                                            profile.name
+                                        ),
+                                        label: "Удалить".into(),
+                                        danger: true,
+                                        action: ConfirmAction::DeleteRoutingProfile(
+                                            profile.id.clone(),
+                                        ),
+                                    });
+                                    view.modal = Some(ModalState::Confirm);
+                                }
+                            }
                             badge(
                                 ui,
                                 p,
@@ -3902,16 +3945,6 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                 p.accent_soft,
                                 false,
                             );
-                            if preset == RoutingPreset::Custom {
-                                badge(
-                                    ui,
-                                    p,
-                                    RoutingPreset::Custom.label(),
-                                    p.amber,
-                                    p.amber_soft,
-                                    true,
-                                );
-                            }
                         });
                     });
                 });
@@ -3944,25 +3977,12 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                     BtnKind::Outline,
                                 )
                                 .on_hover_text(
-                                    "Скопирует правила пресета в свой профиль — дальше их можно \
-                                     менять, сохранения пойдут уже в него",
+                                    "Скопирует правила пресета в новый свой профиль — дальше их \
+                                     можно менять, не трогая пресет",
                                 )
                                 .clicked()
                                 {
-                                    if snapshot.config.custom_profile.is_some() {
-                                        view.confirm = Some(Confirm {
-                                            title: "Заменить свой профиль?".into(),
-                                            message: "Правила пресета станут вашим профилем, \
-                                                      а сохранённые ранее правила пропадут."
-                                                .into(),
-                                            label: "Создать".into(),
-                                            danger: false,
-                                            action: ConfirmAction::ForkRoutingProfile,
-                                        });
-                                        view.modal = Some(ModalState::Confirm);
-                                    } else {
-                                        engine.fork_routing_profile();
-                                    }
+                                    engine.create_custom_profile();
                                 }
                             });
                         });
@@ -4135,7 +4155,7 @@ fn routing_cards() -> [PresetCard; 3] {
     [
         PresetCard {
             id: "bypass",
-            title: "Обход РФ",
+            title: "Жизнь в РФ",
             text: "Сайты РФ и локальная сеть — напрямую, реклама — блок, остальное — через прокси"
                 .into(),
             hint: "7 правил, первое совпадение выигрывает:\n\
@@ -4161,30 +4181,71 @@ fn routing_cards() -> [PresetCard; 3] {
             title: "Прямой",
             text: "Прокси выключен: весь трафик идёт напрямую".into(),
             hint: "Прокси не используется, маршрутизация не применяется.\n\
-                   Список активных правил очищается, но свои правила остаются \
-                   в «Свой профиль»."
+                   Список активных правил очищается, но свои профили остаются \
+                   и к ним можно вернуться."
                 .into(),
         },
     ]
 }
 
-/// Wide card for the user's own profile: keeps their rules reachable after a
-/// built-in preset is applied.
+/// Grid that lays `count` cards in rows of `columns`, unlike [`card_grid`]
+/// which only accepts a fixed cell count.
+fn cards_grid(
+    ui: &mut Ui,
+    columns: usize,
+    gap: f32,
+    count: usize,
+    mut add: impl FnMut(&mut Ui, usize),
+) {
+    if columns == 0 || count == 0 {
+        return;
+    }
+    let available = ui.available_width();
+    let width = ((available - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
+    let inherited_spacing = ui.spacing().item_spacing;
+    let mut index = 0;
+    while index < count {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for column in 0..columns {
+                if index >= count {
+                    break;
+                }
+                if column > 0 {
+                    ui.add_space(gap);
+                }
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing = inherited_spacing;
+                        ui.set_min_width(width);
+                        ui.set_max_width(width);
+                        add(ui, index);
+                    },
+                );
+                index += 1;
+            }
+        });
+        if index < count {
+            ui.add_space(gap);
+        }
+    }
+}
+
+/// Card for a user-created profile. Same size as the built-in preset cards.
 fn custom_profile_card(
     ui: &mut Ui,
     p: &Palette,
     profile: &CustomProfile,
-    active: bool,
+    snapshot: &Snapshot,
     engine: &Engine,
 ) {
+    let active = snapshot.config.settings.routing_preset == Some(RoutingPreset::Custom)
+        && snapshot.config.settings.custom_profile_id.as_deref() == Some(profile.id.as_str());
     let count = rules_count_label(profile.rules.len());
-    let text = if active {
-        format!("Ваши правила · {count}")
-    } else {
-        format!("{count} сохранено — нажмите, чтобы вернуть")
-    };
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 76.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 82.0), Sense::click());
     let radius = CornerRadius::same(12);
     if active {
         paint_vertical_fade(ui.painter(), rect, p.accent_soft, 0.8, 12.0);
@@ -4203,11 +4264,11 @@ fn custom_profile_card(
             egui::StrokeKind::Inside,
         );
     }
-    let inner = rect.shrink2(Vec2::new(15.0, 12.0));
+    let inner = rect.shrink(15.0);
     let mut child = ui.new_child(
         UiBuilder::new()
             .max_rect(inner)
-            .layout(Layout::left_to_right(Align::Center)),
+            .layout(Layout::left_to_right(Align::Min)),
     );
     child.spacing_mut().item_spacing.x = 12.0;
     let (radio, _) = child.allocate_exact_size(Vec2::splat(19.0), Sense::hover());
@@ -4225,33 +4286,91 @@ fn custom_profile_card(
             .painter()
             .circle_stroke(radio.center(), 9.0, Stroke::new(1.5, p.line_strong));
     }
-    let remaining = (child.available_width() - 120.0).max(120.0);
+    let remaining = child.available_width();
     child.allocate_ui_with_layout(
         Vec2::new(remaining, 0.0),
         Layout::top_down(Align::Min),
         |ui| {
             ui.set_max_width(remaining);
-            ui.label(theme::semibold(RoutingPreset::Custom.label(), 13.0));
-            ui.label(RichText::new(&text).size(11.0).color(p.faint));
+            ui.add(
+                egui::Label::new(theme::semibold(&profile.name, 13.0))
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add(egui::Label::new(RichText::new(count).size(11.0).color(p.faint)).truncate());
         },
     );
-    child.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        if active {
-            badge(ui, p, "Активен", p.accent_2, p.accent_soft, true);
-        } else {
-            badge(ui, p, "Вернуть", p.text, p.panel_2, false);
-        }
-    });
-    let tip = if active {
-        "Свои правила применяются сейчас. Правки сохраняются в этом профиле."
-    } else {
-        "Вернёт правила, которые были активны до перехода на пресет. \
-         Пресеты при этом останутся доступны."
-    };
     if response.clicked() && !active {
-        engine.restore_custom_profile();
+        engine.activate_custom_profile(&profile.id);
     }
-    response.on_hover_text(tip);
+    response.on_hover_text(if active {
+        "Профиль применяется сейчас. Название и удаление — в строке «Правила» ниже."
+    } else {
+        "Применит правила этого профиля."
+    });
+}
+
+/// Dashed-looking "create profile" card, sized like the preset cards.
+fn new_profile_card(ui: &mut Ui, p: &Palette, engine: &Engine) {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 82.0), Sense::click());
+    let radius = CornerRadius::same(12);
+    let fill = if response.hovered() {
+        p.panel_2
+    } else {
+        p.panel
+    };
+    ui.painter().rect(
+        rect,
+        radius,
+        fill,
+        Stroke::new(1.0, p.line),
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink(15.0);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = 12.0;
+    let (icon, _) = child.allocate_exact_size(Vec2::splat(19.0), Sense::hover());
+    child.painter().circle_filled(icon.center(), 9.5, p.panel_2);
+    child.painter().text(
+        icon.center(),
+        Align2::CENTER_CENTER,
+        egui_phosphor::regular::PLUS,
+        FontId::new(11.0, FontFamily::Proportional),
+        p.text,
+    );
+    let remaining = child.available_width();
+    child.allocate_ui_with_layout(
+        Vec2::new(remaining, 0.0),
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.set_max_width(remaining);
+            ui.add(
+                egui::Label::new(theme::semibold("Новый профиль", 13.0))
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Копия текущих правил")
+                        .size(11.0)
+                        .color(p.faint),
+                )
+                .truncate()
+                .selectable(false),
+            );
+        },
+    );
+    if response.clicked() {
+        engine.create_custom_profile();
+    }
+    response.on_hover_text(
+        "Создаст ещё один профиль с копией текущих правил. Название можно изменить.",
+    );
 }
 
 fn rules_count_label(count: usize) -> String {
@@ -4313,14 +4432,17 @@ fn preset_card(ui: &mut Ui, p: &Palette, card: &PresetCard, snapshot: &Snapshot,
         Layout::top_down(Align::Min),
         |ui| {
             ui.set_max_width(remaining);
-            ui.label(theme::semibold(card.title, 13.0));
-            ui.label(RichText::new(&card.text).size(11.0).color(p.faint));
+            ui.add(egui::Label::new(theme::semibold(card.title, 13.0)).selectable(false));
+            ui.add(
+                egui::Label::new(RichText::new(&card.text).size(11.0).color(p.faint))
+                    .selectable(false),
+            );
         },
     );
     let clicked = response.clicked();
     let tip = format!(
-        "{}\n\nПравила профиля заменят активные. Свой профиль, если он уже \
-         создан, останется — к нему можно вернуться.",
+        "{}\n\nПравила профиля заменят активные. Свои профили остаются — к ним \
+         можно вернуться.",
         card.hint
     );
     response.on_hover_text(tip);
@@ -5993,6 +6115,7 @@ pub fn modals(
                     Some(ModalState::Server) => server_modal(ui, p, view, snapshot, engine),
                     Some(ModalState::Subscription) => subscription_modal(ui, p, view, engine),
                     Some(ModalState::Rule) => rule_modal(ui, p, view, snapshot, engine),
+                    Some(ModalState::ProfileName) => profile_name_modal(ui, p, view, engine),
                     Some(ModalState::Confirm) => confirm_modal(ui, p, view, engine),
                     Some(ModalState::Help) => help_modal(ui, p),
                     None => {}
@@ -6477,6 +6600,58 @@ fn rule_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, en
         });
     });
     view.rule_draft = Some(rule);
+}
+
+fn profile_name_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
+    let Some((id, mut name)) = view.profile_draft.clone() else {
+        view.modal = None;
+        return;
+    };
+    modal_title(
+        ui,
+        p,
+        "Название профиля",
+        "Так профиль будет виден в списке маршрутизации.",
+    );
+    let field_id = Id::new("profile-name-field");
+    ui.memory_mut(|memory| memory.request_focus(field_id));
+    field(
+        ui,
+        p,
+        "Название",
+        TextEdit::singleline(&mut name)
+            .id(field_id)
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Сохранить").size(11.5).color(Color32::WHITE))
+                        .fill(p.accent)
+                        .corner_radius(8)
+                        .min_size(Vec2::new(0.0, 32.0)),
+                )
+                .clicked()
+            {
+                engine.rename_custom_profile(&id, &name);
+                view.modal = None;
+            }
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Отмена").size(11.5))
+                        .fill(Color32::TRANSPARENT)
+                        .corner_radius(8)
+                        .min_size(Vec2::new(0.0, 32.0)),
+                )
+                .clicked()
+            {
+                view.modal = None;
+            }
+        });
+    });
+    view.profile_draft = Some((id, name));
 }
 
 fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
@@ -7386,7 +7561,9 @@ fn confirm_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
                         engine.delete_subscription(id.as_str())
                     }
                     ConfirmAction::DeleteRule(id) => engine.delete_rule(id.as_str()),
-                    ConfirmAction::ForkRoutingProfile => engine.fork_routing_profile(),
+                    ConfirmAction::DeleteRoutingProfile(id) => {
+                        engine.delete_custom_profile(id.as_str())
+                    }
                 }
                 view.modal = None;
                 view.confirm = None;

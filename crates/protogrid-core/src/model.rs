@@ -201,7 +201,7 @@ impl RoutingPreset {
 
     pub fn label(self) -> &'static str {
         match self {
-            RoutingPreset::Bypass => "Обход РФ",
+            RoutingPreset::Bypass => "Жизнь в РФ",
             RoutingPreset::Global => "Глобальный прокси",
             RoutingPreset::Direct => "Прямой",
             RoutingPreset::Custom => "Свой профиль",
@@ -605,6 +605,9 @@ pub struct Settings {
     /// Routing preset the user picked last. `None` only appears in configs
     /// written before the field existed; `AppConfig::normalize` fills it in.
     pub routing_preset: Option<RoutingPreset>,
+    /// Which entry of [`AppConfig::custom_profiles`] is active when
+    /// `routing_preset` is `Custom`.
+    pub custom_profile_id: Option<String>,
     pub close_to_tray: bool,
     pub auto_connect: bool,
     pub auto_update_subscriptions: bool,
@@ -633,6 +636,7 @@ impl Default for Settings {
             test_url: "https://www.gstatic.com/generate_204".into(),
             final_action: RuleAction::Proxy,
             routing_preset: None,
+            custom_profile_id: None,
             close_to_tray: true,
             auto_connect: false,
             auto_update_subscriptions: true,
@@ -728,13 +732,29 @@ impl Settings {
     }
 }
 
-/// Rules of the user's own routing profile. Kept aside when a built-in preset
+/// Rules of a user-created routing profile. Kept aside when a built-in preset
 /// is applied so the user can switch back without losing anything.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CustomProfile {
+    pub id: String,
+    pub name: String,
     pub rules: Vec<RoutingRule>,
     pub final_action: RuleAction,
+}
+
+/// Name given to a profile created without an explicit one.
+pub const DEFAULT_PROFILE_NAME: &str = "Свой профиль";
+
+impl CustomProfile {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            rules: Vec::new(),
+            final_action: RuleAction::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -744,8 +764,11 @@ pub struct AppConfig {
     pub servers: Vec<Server>,
     pub subscriptions: Vec<Subscription>,
     pub rules: Vec<RoutingRule>,
-    /// The user's own profile, preserved while a built-in preset is active.
+    /// Single profile from configs written before multi-profile support.
+    /// Migrated into [`AppConfig::custom_profiles`] on load.
     pub custom_profile: Option<CustomProfile>,
+    /// Routing profiles created by the user.
+    pub custom_profiles: Vec<CustomProfile>,
     pub settings: Settings,
     pub active_server_id: Option<String>,
 }
@@ -758,6 +781,7 @@ impl Default for AppConfig {
             subscriptions: Vec::new(),
             rules: default_rules(),
             custom_profile: None,
+            custom_profiles: Vec::new(),
             settings: Settings::default(),
             active_server_id: None,
         }
@@ -810,7 +834,7 @@ impl AppConfig {
                 rule.id = uuid::Uuid::new_v4().to_string();
             }
         }
-        // Older builds shipped "Обход РФ" without the process rules; upgrade the
+        // Older builds shipped "Жизнь в РФ" (formerly "Обход РФ") without the process rules; upgrade the
         // stored copy so the preset keeps matching instead of becoming custom.
         if matches!(
             self.settings.routing_preset,
@@ -829,7 +853,8 @@ impl AppConfig {
             }
             _ => detect_preset(&self.rules, self.settings.final_action),
         });
-        // While the own profile is active, it *is* the current ruleset.
+        // While a custom profile is active, it *is* the current ruleset.
+        self.normalize_custom_profiles();
         self.sync_custom_profile();
         match &self.active_server_id {
             Some(id) if self.servers.iter().any(|s| &s.id == id) => {}
@@ -841,20 +866,93 @@ impl AppConfig {
         self.servers.iter().find(|s| s.id == id)
     }
 
-    /// Mirrors the active ruleset into the own profile while it is selected, so
-    /// the profile the user returns to is always the latest saved state.
+    /// Mirrors the active ruleset into the selected custom profile, so the
+    /// profile the user returns to is always the latest saved state.
     pub fn sync_custom_profile(&mut self) {
-        if self.settings.routing_preset == Some(RoutingPreset::Custom) {
-            self.custom_profile = Some(CustomProfile {
-                rules: self.rules.clone(),
-                final_action: self.settings.final_action,
-            });
+        if self.settings.routing_preset != Some(RoutingPreset::Custom) {
+            return;
         }
+        if let Some(id) = self.settings.custom_profile_id.clone() {
+            if let Some(profile) = self.custom_profiles.iter_mut().find(|p| p.id == id) {
+                profile.rules = self.rules.clone();
+                profile.final_action = self.settings.final_action;
+                return;
+            }
+        }
+        let mut profile = CustomProfile::new(DEFAULT_PROFILE_NAME);
+        profile.rules = self.rules.clone();
+        profile.final_action = self.settings.final_action;
+        self.settings.custom_profile_id = Some(profile.id.clone());
+        self.custom_profiles.push(profile);
+    }
+
+    /// Fills in ids and names for profiles loaded from older configs and
+    /// migrates the single-profile field into the list.
+    fn normalize_custom_profiles(&mut self) {
+        if let Some(mut legacy) = self.custom_profile.take() {
+            if legacy.id.trim().is_empty() {
+                legacy.id = uuid::Uuid::new_v4().to_string();
+            }
+            if legacy.name.trim().is_empty() {
+                legacy.name = DEFAULT_PROFILE_NAME.to_string();
+            }
+            if !self.custom_profiles.iter().any(|p| p.id == legacy.id) {
+                self.custom_profiles.push(legacy);
+            }
+        }
+        for (index, profile) in self.custom_profiles.iter_mut().enumerate() {
+            if profile.id.trim().is_empty() {
+                profile.id = uuid::Uuid::new_v4().to_string();
+            }
+            profile.name = profile.name.trim().to_string();
+            if profile.name.is_empty() {
+                profile.name = format!("{DEFAULT_PROFILE_NAME} {}", index + 1);
+            }
+            for rule in &mut profile.rules {
+                if rule.id.trim().is_empty() {
+                    rule.id = uuid::Uuid::new_v4().to_string();
+                }
+            }
+        }
+        if self.settings.routing_preset == Some(RoutingPreset::Custom) {
+            let known = self
+                .settings
+                .custom_profile_id
+                .as_deref()
+                .map(|id| self.custom_profiles.iter().any(|p| p.id == id))
+                .unwrap_or(false);
+            if !known {
+                self.settings.custom_profile_id =
+                    self.custom_profiles.first().map(|p| p.id.clone());
+            }
+        }
+    }
+
+    pub fn active_custom_profile(&self) -> Option<&CustomProfile> {
+        if self.settings.routing_preset != Some(RoutingPreset::Custom) {
+            return None;
+        }
+        let id = self.settings.custom_profile_id.as_deref()?;
+        self.custom_profiles.iter().find(|p| p.id == id)
+    }
+
+    /// Switches to a stored custom profile and makes its rules current.
+    pub fn activate_custom_profile(&mut self, id: &str) -> bool {
+        let Some(profile) = self.custom_profiles.iter().find(|p| p.id == id).cloned() else {
+            return false;
+        };
+        self.rules = profile.rules;
+        self.settings.final_action = profile.final_action;
+        self.settings.routing_preset = Some(RoutingPreset::Custom);
+        self.settings.custom_profile_id = Some(profile.id);
+        self.enforce_tun_process_rules();
+        self.sync_custom_profile();
+        true
     }
 
     /// Process rules cannot work without TUN (Discord, Telegram Desktop and
     /// friends ignore the system proxy). They follow the TUN state: off when it
-    /// is disabled or unsupported, on for the built-in "Обход РФ" profile when
+    /// is disabled or unsupported, on for the built-in "Жизнь в РФ" profile when
     /// TUN is available. A custom profile keeps whatever the user chose.
     pub fn enforce_tun_process_rules(&mut self) {
         let tun = self.settings.tun_active();
@@ -865,7 +963,7 @@ impl AppConfig {
             }
         }
         if !tun {
-            if let Some(profile) = &mut self.custom_profile {
+            for profile in &mut self.custom_profiles {
                 disable_process_rules(&mut profile.rules);
             }
         }
@@ -906,7 +1004,7 @@ pub fn default_rules() -> Vec<RoutingRule> {
         },
         RoutingRule {
             id: "default-ru-geoip".into(),
-            name: "Обход РФ (IP)".into(),
+            name: "Жизнь в РФ (IP)".into(),
             enabled: true,
             action: RuleAction::Direct,
             kind: RuleKind::Geoip,
@@ -914,7 +1012,7 @@ pub fn default_rules() -> Vec<RoutingRule> {
         },
         RoutingRule {
             id: "default-ru-geosite".into(),
-            name: "Обход РФ (домены)".into(),
+            name: "Жизнь в РФ (домены)".into(),
             enabled: true,
             action: RuleAction::Direct,
             kind: RuleKind::Geosite,
@@ -1151,10 +1249,10 @@ mod tests {
     #[test]
     fn custom_profile_survives_serialization() {
         let mut config = AppConfig::default();
-        config.custom_profile = Some(CustomProfile {
-            rules: default_rules(),
-            final_action: RuleAction::Proxy,
-        });
+        let mut profile = CustomProfile::new("Работа");
+        profile.rules = default_rules();
+        profile.final_action = RuleAction::Proxy;
+        config.custom_profiles.push(profile);
         config.settings.routing_preset = Some(RoutingPreset::Global);
         let json = serde_json::to_string(&config).unwrap();
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
@@ -1162,8 +1260,10 @@ mod tests {
             restored.settings.routing_preset,
             Some(RoutingPreset::Global)
         );
+        assert_eq!(restored.custom_profiles.len(), 1);
+        assert_eq!(restored.custom_profiles[0].name, "Работа");
         assert_eq!(
-            restored.custom_profile.unwrap().rules.len(),
+            restored.custom_profiles[0].rules.len(),
             default_rules().len()
         );
     }
@@ -1176,7 +1276,8 @@ mod tests {
         config.rules.pop();
         config.normalize();
         assert_eq!(config.settings.routing_preset, Some(RoutingPreset::Custom));
-        let saved = config.custom_profile.clone().expect("own profile is kept");
+        assert_eq!(config.custom_profiles.len(), 1);
+        let saved = config.custom_profiles[0].clone();
         assert_eq!(saved.rules.len(), default_rules().len() - 1);
 
         // A built-in preset never overwrites the saved own profile.
@@ -1185,8 +1286,57 @@ mod tests {
         config.normalize();
         assert_eq!(config.settings.routing_preset, Some(RoutingPreset::Global));
         assert_eq!(
-            config.custom_profile.unwrap().rules.len(),
+            config.custom_profiles[0].rules.len(),
             default_rules().len() - 1
+        );
+    }
+
+    #[test]
+    fn multiple_profiles_switch_and_keep_their_rules() {
+        let mut config = AppConfig::default();
+        let mut work = CustomProfile::new("Работа");
+        work.rules = routing_preset("global").unwrap().0;
+        let mut home = CustomProfile::new("Дом");
+        home.rules = Vec::new();
+        home.final_action = RuleAction::Direct;
+        let home_id = home.id.clone();
+        config.custom_profiles = vec![work, home];
+        config.settings.routing_preset = Some(RoutingPreset::Custom);
+        config.settings.custom_profile_id = Some(home_id.clone());
+        config.rules = config.custom_profiles[1].rules.clone();
+        config.settings.final_action = RuleAction::Direct;
+        config.normalize();
+        assert!(config.rules.is_empty());
+
+        assert!(config.activate_custom_profile(&home_id));
+        assert!(config.rules.is_empty());
+        assert_eq!(config.settings.final_action, RuleAction::Direct);
+        let global = config.custom_profiles[0].id.clone();
+        assert!(config.activate_custom_profile(&global));
+        assert_eq!(config.rules.len(), 1);
+        assert_eq!(config.settings.final_action, RuleAction::Proxy);
+        // Both profiles are still stored.
+        assert_eq!(config.custom_profiles.len(), 2);
+    }
+
+    #[test]
+    fn legacy_single_profile_is_migrated_to_the_list() {
+        let mut config = AppConfig::default();
+        config.custom_profile = Some(CustomProfile {
+            rules: default_rules(),
+            final_action: RuleAction::Proxy,
+            ..Default::default()
+        });
+        config.settings.routing_preset = Some(RoutingPreset::Custom);
+        config.normalize();
+        assert!(config.custom_profile.is_none());
+        assert_eq!(config.custom_profiles.len(), 1);
+        let profile = &config.custom_profiles[0];
+        assert!(!profile.id.is_empty());
+        assert_eq!(profile.name, DEFAULT_PROFILE_NAME);
+        assert_eq!(
+            config.settings.custom_profile_id.as_deref(),
+            Some(profile.id.as_str())
         );
     }
 

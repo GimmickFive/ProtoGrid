@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use protogrid_core::link::{display_error_list, parse_links};
 use protogrid_core::model::{
     routing_preset, AppConfig, CoreCapabilities, CoreKind, CustomProfile, RoutingPreset,
-    RoutingRule, RuleAction, RuleKind, Server, Settings, Subscription,
+    RoutingRule, RuleAction, RuleKind, Server, Settings, Subscription, DEFAULT_PROFILE_NAME,
 };
 use protogrid_core::{geo, ping, ruleset, singbox, subscription, sysproxy, xray};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -1126,16 +1126,12 @@ impl Engine {
         let was_connected = self.lock().status == ConnStatus::Connected;
         {
             let mut guard = self.lock();
-            // Keep the user's own ruleset so it can be restored later.
-            if guard.config.settings.routing_preset == Some(RoutingPreset::Custom) {
-                guard.config.custom_profile = Some(CustomProfile {
-                    rules: guard.config.rules.clone(),
-                    final_action: guard.config.settings.final_action,
-                });
-            }
+            // Keep the active custom profile up to date before switching away.
+            guard.config.sync_custom_profile();
             guard.config.rules = rules;
             guard.config.settings.final_action = final_action;
             guard.config.settings.routing_preset = RoutingPreset::from_id(preset);
+            guard.config.settings.custom_profile_id = None;
             guard.config.enforce_tun_process_rules();
             let _ = guard.persist();
             guard.touch();
@@ -1152,19 +1148,21 @@ impl Engine {
         );
     }
 
-    /// Switches back to the rules that were active before a built-in preset.
-    pub fn restore_custom_profile(&self) {
+    /// Switches to one of the stored custom profiles.
+    pub fn activate_custom_profile(&self, id: &str) {
         let was_connected = self.lock().status == ConnStatus::Connected;
         {
             let mut guard = self.lock();
-            let Some(profile) = guard.config.custom_profile.clone() else {
-                return;
-            };
-            guard.config.rules = profile.rules;
-            guard.config.settings.final_action = profile.final_action;
-            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
-            guard.config.enforce_tun_process_rules();
             guard.config.sync_custom_profile();
+            if !guard.config.activate_custom_profile(id) {
+                push_toast(
+                    &self.inner,
+                    &self.ctx,
+                    "Профиль не найден",
+                    ToastKind::Error,
+                );
+                return;
+            }
             let _ = guard.persist();
             guard.touch();
         }
@@ -1175,22 +1173,63 @@ impl Engine {
         push_toast(
             &self.inner,
             &self.ctx,
-            "Возвращены свои правила маршрутизации",
+            "Профиль маршрутизации применён",
             ToastKind::Success,
         );
     }
 
-    /// Copies the active built-in preset into an editable profile. The rules
-    /// stay as they are; later edits are saved to the copy, never to the preset.
-    pub fn fork_routing_profile(&self) {
+    /// Creates a custom profile from the rules active right now.
+    pub fn create_custom_profile(&self) {
+        let was_connected = self.lock().status == ConnStatus::Connected;
+        let name;
         {
             let mut guard = self.lock();
-            if guard.config.settings.routing_preset == Some(RoutingPreset::Custom) {
-                return;
-            }
-            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
-            guard.config.enforce_tun_process_rules();
             guard.config.sync_custom_profile();
+            let index = guard.config.custom_profiles.len() + 1;
+            name = format!("{DEFAULT_PROFILE_NAME} {index}");
+            let mut profile = CustomProfile::new(name.clone());
+            profile.rules = guard.config.rules.clone();
+            profile.final_action = guard.config.settings.final_action;
+            let id = profile.id.clone();
+            guard.config.custom_profiles.push(profile);
+            guard.config.activate_custom_profile(&id);
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        if was_connected {
+            self.connect();
+        }
+        push_toast(
+            &self.inner,
+            &self.ctx,
+            &format!("Создан профиль «{name}»"),
+            ToastKind::Success,
+        );
+    }
+
+    pub fn rename_custom_profile(&self, id: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            push_toast(
+                &self.inner,
+                &self.ctx,
+                "Название не может быть пустым",
+                ToastKind::Warn,
+            );
+            return;
+        }
+        {
+            let mut guard = self.lock();
+            let Some(profile) = guard
+                .config
+                .custom_profiles
+                .iter_mut()
+                .find(|profile| profile.id == id)
+            else {
+                return;
+            };
+            profile.name = name.to_string();
             let _ = guard.persist();
             guard.touch();
         }
@@ -1198,9 +1237,39 @@ impl Engine {
         push_toast(
             &self.inner,
             &self.ctx,
-            "Создан свой профиль — правила теперь можно менять",
+            "Профиль переименован",
             ToastKind::Success,
         );
+    }
+
+    pub fn delete_custom_profile(&self, id: &str) {
+        let was_connected = self.lock().status == ConnStatus::Connected;
+        {
+            let mut guard = self.lock();
+            guard.config.sync_custom_profile();
+            let active = guard.config.settings.routing_preset == Some(RoutingPreset::Custom)
+                && guard.config.settings.custom_profile_id.as_deref() == Some(id);
+            guard
+                .config
+                .custom_profiles
+                .retain(|profile| profile.id != id);
+            if active {
+                guard.config.settings.custom_profile_id = None;
+                if let Some((rules, action)) = routing_preset(RoutingPreset::Bypass.id()) {
+                    guard.config.rules = rules;
+                    guard.config.settings.final_action = action;
+                    guard.config.settings.routing_preset = Some(RoutingPreset::Bypass);
+                }
+            }
+            guard.config.enforce_tun_process_rules();
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        if was_connected {
+            self.connect();
+        }
+        push_toast(&self.inner, &self.ctx, "Профиль удалён", ToastKind::Success);
     }
 
     pub fn save_rule(&self, mut rule: RoutingRule) {
