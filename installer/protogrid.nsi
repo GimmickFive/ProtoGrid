@@ -26,6 +26,10 @@ VIAddVersionKey "LegalCopyright" "MIT"
 
 !define MUI_ICON "..\apps\protogrid-desktop\assets\icon.ico"
 !define MUI_UNICON "..\apps\protogrid-desktop\assets\icon.ico"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "..\installer\welcome.bmp"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "..\installer\header.bmp"
+!define MUI_HEADERIMAGE_RIGHT
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Запустить ${APP_NAME}"
