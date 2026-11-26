@@ -102,6 +102,20 @@ pub struct TrafficStats {
     pub proxy_up_bps: u64,
     pub direct_down_bps: u64,
     pub direct_up_bps: u64,
+    /// Exact byte counters reported by the core since it started. The four
+    /// route totals below are cumulative byte counts derived from the same
+    /// counters. Both are only meaningful when `totals_known` is set; cores
+    /// without byte counters (Xray) leave it unset and the UI integrates the
+    /// sampled rates instead.
+    pub total_down: u64,
+    pub total_up: u64,
+    /// Cumulative bytes attributed to each route by diffing per-connection
+    /// counters between samples. Their sum always equals `total_down + total_up`.
+    pub proxy_down_total: u64,
+    pub proxy_up_total: u64,
+    pub direct_down_total: u64,
+    pub direct_up_total: u64,
+    pub totals_known: bool,
 }
 
 pub struct Inner {
@@ -2388,6 +2402,8 @@ struct ClashTraffic {
 #[derive(Debug, serde::Deserialize)]
 struct ClashConnection {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     download: u64,
     #[serde(default)]
     upload: u64,
@@ -2434,10 +2450,15 @@ fn system_totals(networks: &sysinfo::Networks) -> (u64, u64) {
     let mut rx = 0_u64;
     let mut tx = 0_u64;
     for (name, data) in networks {
-        let name = name.to_string_lossy();
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        // Loopback is irrelevant, and the TUN adapter sees the very same packets
+        // as the physical link, so counting both doubles every proxied byte.
         if name == "lo"
-            || name.starts_with("Loopback")
-            || name.contains("Loopback Pseudo-Interface")
+            || name.starts_with("loopback")
+            || name.contains("pseudo-interface")
+            || name.contains("protogrid_tun")
+            || name.starts_with("tun")
+            || name.starts_with("utun")
         {
             continue;
         }
@@ -2463,6 +2484,40 @@ async fn clash_traffic(client: &reqwest::Client, port: u16) -> Result<ClashTraff
         .map_err(|error| error.to_string())
 }
 
+/// Splits a byte delta between the proxy and direct routes using the ratio seen
+/// in live connections. The four returned values always add up to the input
+/// delta, so route totals can never drift away from the core's byte counters.
+fn split_route_bytes(
+    delta_down: u64,
+    delta_up: u64,
+    proxy_down: u64,
+    proxy_up: u64,
+    direct_down: u64,
+    direct_up: u64,
+    fallback: f64,
+) -> (u64, u64, u64, u64) {
+    let down_accounted = proxy_down.saturating_add(direct_down);
+    let up_accounted = proxy_up.saturating_add(direct_up);
+    let share_down = if down_accounted > 0 {
+        proxy_down as f64 / down_accounted as f64
+    } else {
+        fallback
+    };
+    let share_up = if up_accounted > 0 {
+        proxy_up as f64 / up_accounted as f64
+    } else {
+        fallback
+    };
+    let split_down = (delta_down as f64 * share_down.clamp(0.0, 1.0)) as u64;
+    let split_up = (delta_up as f64 * share_up.clamp(0.0, 1.0)) as u64;
+    (
+        split_down,
+        split_up,
+        delta_down - split_down,
+        delta_up - split_up,
+    )
+}
+
 fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
     tokio::spawn(async move {
         let client = reqwest::Client::builder()
@@ -2471,7 +2526,17 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
             .build()
             .ok();
         let mut system = SystemMeter::new();
-        let mut prev_clash: Option<(u64, u64)> = None;
+        let monitor_started = Instant::now();
+        let mut prev_clash: Option<(u64, u64, Instant)> = None;
+        let mut last_stats: Option<TrafficStats> = None;
+        let mut clash_misses = 0_u32;
+        // Per-connection counters from the previous sample, keyed by the
+        // connection id, so bursts that close between two polls are still
+        // attributed to the route they actually took.
+        let mut conn_seen: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut proxy_share: Option<f64> = None;
+        let (mut proxy_down_total, mut proxy_up_total) = (0_u64, 0_u64);
+        let (mut direct_down_total, mut direct_up_total) = (0_u64, 0_u64);
         loop {
             tokio::time::sleep(Duration::from_millis(1000)).await;
             let snapshot = {
@@ -2492,67 +2557,133 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
                 (
                     guard.config.settings.core,
                     guard.config.settings.clash_api_port,
-                    guard.config.settings.system_proxy || guard.config.settings.tun_enabled,
                 )
             };
-            let (core, port, proxied) = snapshot;
+            let (core, port) = snapshot;
             let (sys_down, sys_up) = system.sample();
             let mut stats = TrafficStats::default();
-            let mut used_clash = false;
-            if core == CoreKind::Singbox {
+            let mut have_stats = false;
+            if core.is_singbox_like() {
                 if let Some(client) = client.as_ref() {
                     if let Ok(data) = clash_traffic(client, port).await {
-                        let total_down = data.download_total;
-                        let total_up = data.upload_total;
-                        let (prev_down, prev_up) = prev_clash.unwrap_or((total_down, total_up));
-                        let down = total_down.saturating_sub(prev_down);
-                        let up = total_up.saturating_sub(prev_up);
-                        prev_clash = Some((total_down, total_up));
-                        stats.conns = data.connections.len().min(u32::MAX as usize) as u32;
-                        let mut proxy_bytes = 0_u64;
-                        let mut direct_bytes = 0_u64;
-                        for conn in &data.connections {
-                            let bytes = conn.download.saturating_add(conn.upload);
-                            if conn.chains.iter().any(|chain| chain == "direct") {
-                                direct_bytes = direct_bytes.saturating_add(bytes);
-                            } else {
-                                proxy_bytes = proxy_bytes.saturating_add(bytes);
+                        let now = Instant::now();
+                        let (delta_down, delta_up, secs) = match prev_clash {
+                            Some((prev_down, prev_up, at)) => {
+                                // The request takes time and can fail, so the gap
+                                // between two samples is not exactly one second.
+                                // Dividing by the real gap keeps bursts honest.
+                                (
+                                    data.download_total.saturating_sub(prev_down),
+                                    data.upload_total.saturating_sub(prev_up),
+                                    now.duration_since(at).as_secs_f64().max(0.2),
+                                )
                             }
-                        }
-                        let all = proxy_bytes.saturating_add(direct_bytes);
-                        let (proxy_down, proxy_up) = if all == 0 {
-                            if proxied {
-                                (down, up)
-                            } else {
-                                (0, 0)
-                            }
-                        } else {
-                            (
-                                down.saturating_mul(proxy_bytes) / all,
-                                up.saturating_mul(proxy_bytes) / all,
-                            )
+                            // The core starts its counters at zero, so the first
+                            // reading covers everything since the monitor started.
+                            // Averaging over that whole span avoids a fake spike
+                            // when the API took a few seconds to come up.
+                            None => (
+                                data.download_total,
+                                data.upload_total,
+                                now.duration_since(monitor_started).as_secs_f64().max(1.0),
+                            ),
                         };
-                        stats.down_bps = down;
-                        stats.up_bps = up;
-                        stats.proxy_down_bps = proxy_down;
-                        stats.proxy_up_bps = proxy_up;
-                        stats.direct_down_bps = down.saturating_sub(proxy_down);
-                        stats.direct_up_bps = up.saturating_sub(proxy_up);
-                        used_clash = true;
+                        prev_clash = Some((data.download_total, data.upload_total, now));
+
+                        let mut active = HashSet::new();
+                        let (mut p_down, mut p_up, mut d_down, mut d_up) =
+                            (0_u64, 0_u64, 0_u64, 0_u64);
+                        for conn in &data.connections {
+                            // Without an id the cumulative counter cannot be
+                            // diffed; its bytes fall into the ratio fallback.
+                            if conn.id.is_empty() {
+                                continue;
+                            }
+                            let direct = conn.chains.iter().any(|chain| chain == "direct");
+                            let (seen_down, seen_up) =
+                                conn_seen.get(&conn.id).copied().unwrap_or((0, 0));
+                            let conn_down = conn.download.saturating_sub(seen_down);
+                            let conn_up = conn.upload.saturating_sub(seen_up);
+                            if direct {
+                                d_down = d_down.saturating_add(conn_down);
+                                d_up = d_up.saturating_add(conn_up);
+                            } else {
+                                p_down = p_down.saturating_add(conn_down);
+                                p_up = p_up.saturating_add(conn_up);
+                            }
+                            conn_seen.insert(conn.id.clone(), (conn.download, conn.upload));
+                            active.insert(conn.id.clone());
+                        }
+                        // Forget closed connections so the map cannot grow forever.
+                        conn_seen.retain(|id, _| active.contains(id));
+
+                        // Scale the route ratio to the real byte delta: this keeps
+                        // "proxy + direct" equal to "received + sent" even when a
+                        // connection closed before we could read its last bytes.
+                        let down_accounted = p_down.saturating_add(d_down);
+                        let up_accounted = p_up.saturating_add(d_up);
+                        let accounted = down_accounted.saturating_add(up_accounted);
+                        let combined_share = if accounted > 0 {
+                            let share = (p_down.saturating_add(p_up)) as f64 / accounted as f64;
+                            proxy_share = Some(share);
+                            Some(share)
+                        } else {
+                            proxy_share
+                        };
+                        let (proxy_down, proxy_up, direct_down, direct_up) = split_route_bytes(
+                            delta_down,
+                            delta_up,
+                            p_down,
+                            p_up,
+                            d_down,
+                            d_up,
+                            combined_share.unwrap_or(1.0),
+                        );
+
+                        proxy_down_total = proxy_down_total.saturating_add(proxy_down);
+                        proxy_up_total = proxy_up_total.saturating_add(proxy_up);
+                        direct_down_total = direct_down_total.saturating_add(direct_down);
+                        direct_up_total = direct_up_total.saturating_add(direct_up);
+
+                        stats.conns = data.connections.len().min(u32::MAX as usize) as u32;
+                        stats.down_bps = (delta_down as f64 / secs) as u64;
+                        stats.up_bps = (delta_up as f64 / secs) as u64;
+                        stats.proxy_down_bps = (proxy_down as f64 / secs) as u64;
+                        stats.proxy_up_bps = (proxy_up as f64 / secs) as u64;
+                        stats.direct_down_bps = (direct_down as f64 / secs) as u64;
+                        stats.direct_up_bps = (direct_up as f64 / secs) as u64;
+                        stats.total_down = data.download_total;
+                        stats.total_up = data.upload_total;
+                        stats.proxy_down_total = proxy_down_total;
+                        stats.proxy_up_total = proxy_up_total;
+                        stats.direct_down_total = direct_down_total;
+                        stats.direct_up_total = direct_up_total;
+                        stats.totals_known = true;
+                        have_stats = true;
                     }
                 }
             }
-            if !used_clash {
-                stats.down_bps = sys_down;
-                stats.up_bps = sys_up;
-                if proxied {
-                    stats.proxy_down_bps = sys_down;
-                    stats.proxy_up_bps = sys_up;
+            if !have_stats {
+                clash_misses = clash_misses.saturating_add(1);
+                // Cores without a Clash API (Xray) expose nothing but the OS
+                // interface counters, and a short API hiccup should not punch a
+                // hole in the chart. Reuse the last real sample for a moment,
+                // then degrade to interface counters — never faking a split.
+                if clash_misses < 3 {
+                    if let Some(previous) = last_stats {
+                        stats = previous;
+                    } else {
+                        stats.down_bps = sys_down;
+                        stats.up_bps = sys_up;
+                    }
                 } else {
-                    stats.direct_down_bps = sys_down;
-                    stats.direct_up_bps = sys_up;
+                    stats.down_bps = sys_down;
+                    stats.up_bps = sys_up;
                 }
+            } else {
+                clash_misses = 0;
             }
+            last_stats = Some(stats);
             {
                 let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.run_id != run_id {
@@ -2945,6 +3076,38 @@ async fn ping_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_split_always_matches_the_real_delta() {
+        let cases = [
+            (0, 0, 0, 0, 0, 0, 1.0),
+            (1000, 500, 100, 50, 100, 50, 1.0),
+            (12_345, 67_890, 111, 222, 333, 444, 0.0),
+            (7, 3, 0, 0, 1, 0, 0.37),
+        ];
+        for (delta_down, delta_up, proxy_down, proxy_up, direct_down, direct_up, fallback) in cases
+        {
+            let (p_down, p_up, d_down, d_up) = split_route_bytes(
+                delta_down,
+                delta_up,
+                proxy_down,
+                proxy_up,
+                direct_down,
+                direct_up,
+                fallback,
+            );
+            assert_eq!(p_down + d_down, delta_down);
+            assert_eq!(p_up + d_up, delta_up);
+        }
+    }
+
+    #[test]
+    fn route_split_uses_connection_ratio() {
+        assert_eq!(
+            split_route_bytes(1000, 500, 100, 50, 100, 50, 0.0),
+            (500, 250, 500, 250)
+        );
+    }
 
     #[test]
     fn strips_singbox_prefix() {

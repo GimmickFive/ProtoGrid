@@ -265,6 +265,11 @@ impl View {
         if !due {
             return;
         }
+        let elapsed = self
+            .last_sample
+            .map(|at| now.duration_since(at).as_secs_f64())
+            .unwrap_or(1.0)
+            .clamp(0.0, 5.0);
         self.last_sample = Some(now);
         let stats: TrafficStats = snapshot.traffic;
         let ping = snapshot
@@ -281,12 +286,24 @@ impl View {
             direct_up: stats.direct_up_bps as f32,
             ping,
         };
-        self.totals.down += point.down as f64;
-        self.totals.up += point.up as f64;
-        self.totals.proxy_down += point.proxy_down as f64;
-        self.totals.proxy_up += point.proxy_up as f64;
-        self.totals.direct_down += point.direct_down as f64;
-        self.totals.direct_up += point.direct_up as f64;
+        // Prefer the core's own byte counters: integrating sampled rates drifts
+        // as soon as one frame is late, and double-counts when the UI samples
+        // twice between two core updates.
+        if stats.totals_known {
+            self.totals.down = stats.total_down as f64;
+            self.totals.up = stats.total_up as f64;
+            self.totals.proxy_down = stats.proxy_down_total as f64;
+            self.totals.proxy_up = stats.proxy_up_total as f64;
+            self.totals.direct_down = stats.direct_down_total as f64;
+            self.totals.direct_up = stats.direct_up_total as f64;
+        } else {
+            self.totals.down += point.down as f64 * elapsed;
+            self.totals.up += point.up as f64 * elapsed;
+            self.totals.proxy_down += point.proxy_down as f64 * elapsed;
+            self.totals.proxy_up += point.proxy_up as f64 * elapsed;
+            self.totals.direct_down += point.direct_down as f64 * elapsed;
+            self.totals.direct_up += point.direct_up as f64 * elapsed;
+        }
         self.series.push_back(point);
         while self.series.len() > 900 {
             self.series.pop_front();
@@ -2183,9 +2200,8 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
     let (down_value, down_unit) = rate(down.down);
     let (up_value, up_unit) = rate(down.up);
     let active = snapshot.active_server();
-    let latency = active
-        .and_then(|server| snapshot.pings.get(&server.id).copied().flatten())
-        .unwrap_or(0);
+    let latency = active.and_then(|server| snapshot.pings.get(&server.id).copied().flatten());
+    let api_core = snapshot.config.settings.core.is_singbox_like();
 
     card_grid(ui, 4, 14.0, |ui, index| match index {
         0 => stat_card(
@@ -2219,12 +2235,14 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             p,
             egui_phosphor::regular::ACTIVITY,
             "Задержка",
-            &latency.to_string(),
+            &latency
+                .map(|ms| ms.to_string())
+                .unwrap_or_else(|| "—".into()),
             "мс",
             active
                 .map(|server| truncate(&server.display_name(), 18))
                 .unwrap_or_else(|| "нет сервера".into()),
-            "потери 0%".into(),
+            "потери —".into(),
             &ping_values,
             p.green,
             p.green_soft,
@@ -2234,9 +2252,17 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             p,
             egui_phosphor::regular::WIFI_HIGH,
             "Соединения",
-            &format!("{:.0}", down.conns),
-            "шт",
-            "TCP + UDP".into(),
+            &if api_core {
+                format!("{:.0}", down.conns)
+            } else {
+                "—".into()
+            },
+            if api_core { "шт" } else { "" },
+            if api_core {
+                "TCP + UDP".into()
+            } else {
+                "нет API у ядра".into()
+            },
             if snapshot.is_connected() {
                 "активно".into()
             } else {
@@ -2346,8 +2372,13 @@ fn speed_card(
                         .iter()
                         .map(|point| point.down.max(point.up))
                         .fold(0.0_f32, f32::max);
+                    let source = if snapshot.config.settings.core.is_singbox_like() {
+                        "ядро"
+                    } else {
+                        "интерфейс"
+                    };
                     ui.label(
-                        RichText::new(format!("интерфейс · пик {}", rate_plain(peak)))
+                        RichText::new(format!("{source} · пик {}", rate_plain(peak)))
                             .size(11.0)
                             .color(p.faint),
                     );
@@ -2445,9 +2476,9 @@ fn route_card(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
         + view.totals.direct_up;
     let proxy = view.totals.proxy_down + view.totals.proxy_up;
     let share = if total > 0.0 {
-        (proxy / total * 100.0).round() as u32
+        Some((proxy / total * 100.0).round() as u32)
     } else {
-        0
+        None
     };
     let current = view.series.back().copied().unwrap_or_default();
     Frame::new()
@@ -2483,7 +2514,12 @@ fn route_card(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(theme::semibold(format!("{share}%"), 40.0));
+                ui.label(theme::semibold(
+                    share
+                        .map(|value| format!("{value}%"))
+                        .unwrap_or_else(|| "—".into()),
+                    40.0,
+                ));
                 ui.label(RichText::new("через прокси").size(11.5).color(p.faint));
             });
             ui.add_space(4.0);
