@@ -70,6 +70,21 @@ ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh
 `PROTOGRID_KEY_ALIAS` и `PROTOGRID_KEY_PASSWORD`. Без них тег `android-v*`
 завершится ошибкой.
 
+### Имена файлов для автообновления
+
+Встроенная проверка обновлений читает публичные релизы GitHub, поэтому имена
+ассетов важны:
+
+- десктоп — `ProtoGrid-<версия>-windows-x64-setup.exe` и
+  `ProtoGrid-<версия>-windows-x64-portable.zip`;
+- Android — `ProtoGrid-<версия>-arm64-v8a.apk` (при сборке под эмулятор —
+  `ProtoGrid-<версия>-x86_64.apk`).
+
+Релиз с ассетами APK может иметь тег `vX.Y.Z` (как в 0.2.1) или
+`android-vX.Y.Z`; десктопная проверка теги `android-*` игнорирует. GitHub
+отдаёт SHA-256 ассета в поле `digest`, и клиенты сверяют его после загрузки.
+Если файла для платформы нет, приложение предлагает открыть страницу релиза.
+
 ## 5. Тег и публикация
 
 ```bash

@@ -225,7 +225,7 @@ impl RoutingPreset {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Server {
     pub id: String,

@@ -215,6 +215,21 @@ fn prepare_rule_sets_json(
     .to_string())
 }
 
+fn fetch_subscription_json(url: &str) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("tokio: {error}"))?;
+    let fetched = runtime.block_on(protogrid_core::subscription::fetch_subscription(url))?;
+    Ok(json!({
+        "servers": fetched.servers,
+        "errors": fetched.errors,
+        "userinfo": fetched.userinfo,
+        "display_url": protogrid_core::subscription::display_url(url),
+    })
+    .to_string())
+}
+
 fn new_string(env: &mut JNIEnv<'_>, value: String) -> jstring {
     match env.new_string(value) {
         Ok(string) => string.into_raw(),
@@ -240,6 +255,28 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_parseLinks<'loc
     let result = catch_unwind(AssertUnwindSafe(|| parse_links_json(&input)))
         .unwrap_or_else(|_| error_json("внутренняя ошибка разбора ссылок"));
     new_string(&mut env, result)
+}
+
+/// Kotlin: `CoreBridge.fetchSubscription(url: String): String`
+#[no_mangle]
+pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_fetchSubscription<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    url: JString<'local>,
+) -> jstring {
+    let url: String = match env.get_string(&url) {
+        Ok(value) => value.into(),
+        Err(error) => return new_string(&mut env, error_json(format!("JNI: {error}"))),
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| fetch_subscription_json(&url)))
+        .unwrap_or_else(|_| Err("внутренняя ошибка загрузки подписки".into()));
+    new_string(
+        &mut env,
+        match result {
+            Ok(status) => status,
+            Err(error) => error_json(error),
+        },
+    )
 }
 
 /// Kotlin: `CoreBridge.buildConfig(serversJson: String, activeId: String, routingJson: String, apiSecret: String): String`

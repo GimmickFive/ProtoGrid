@@ -2925,7 +2925,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "protogrid-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "percent-encoding",
@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "protogrid-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "chrono",
@@ -2957,6 +2957,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tar",
  "tokio",
@@ -2970,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "protogrid-mobile"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "jni 0.21.1",
  "protogrid-core",
@@ -3469,6 +3470,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

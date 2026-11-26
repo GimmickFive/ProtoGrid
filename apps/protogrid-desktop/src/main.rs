@@ -8,6 +8,7 @@ mod flags;
 mod installer;
 mod theme;
 mod ui;
+mod updates;
 
 fn main() -> eframe::Result<()> {
     autostart::remove_legacy();

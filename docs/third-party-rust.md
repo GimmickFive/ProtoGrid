@@ -3,7 +3,7 @@
 Сгенерировано из `Cargo.lock` скриптом `scripts/third-party.py`.
 Не редактировать вручную.
 
-Всего пакетов: 513.
+Всего пакетов: 514.
 
 | Пакет | Версия | Лицензия |
 |---|---|---|
@@ -335,6 +335,7 @@
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 |
 | `serde_yaml` | 0.9.34+deprecated | MIT OR Apache-2.0 |
 | `sha1` | 0.10.7 | MIT OR Apache-2.0 |
+| `sha2` | 0.10.9 | MIT OR Apache-2.0 |
 | `shlex` | 2.0.1 | MIT OR Apache-2.0 |
 | `signal-hook-registry` | 1.4.8 | MIT OR Apache-2.0 |
 | `simd-adler32` | 0.3.10 | MIT |

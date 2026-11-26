@@ -13,10 +13,12 @@ use protogrid_core::model::{
 };
 
 use crate::engine::{
-    now_ms, ConnStatus, Engine, LogEntry, LogRoute, Snapshot, ToastEvent, ToastKind, TrafficStats,
+    now_ms, strip_conn_prefix, ConnStatus, Engine, LogEntry, LogRoute, Snapshot, ToastEvent,
+    ToastKind, TrafficStats,
 };
 use crate::installer::CoreFeatures;
 use crate::theme::{self, Palette};
+use crate::updates::UpdateState;
 
 /* -------------------------------------------------------------------------- */
 /* State                                                                      */
@@ -2192,6 +2194,11 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
         ui.add_space(12.0);
     }
 
+    if snapshot.update.available.is_some() || snapshot.update.downloading {
+        update_banner(ui, p, snapshot, engine);
+        ui.add_space(12.0);
+    }
+
     let points = view.last_points(view.ov_range);
     let down = view.series.back().copied().unwrap_or_default();
     let down_values: Vec<f32> = points.iter().map(|pt| pt.down).collect();
@@ -2351,6 +2358,73 @@ fn alert_banner(
                 ui.with_layout(Layout::right_to_left(Align::Center), actions);
             });
         });
+}
+
+fn update_banner(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
+    let Some(update) = snapshot.update.available.as_ref() else {
+        return;
+    };
+    let downloaded = snapshot.update.downloaded.is_some();
+    let message = if snapshot.update.downloading {
+        format!("Скачивание ProtoGrid {}…", update.version)
+    } else if downloaded {
+        if update.asset_name.to_ascii_lowercase().ends_with(".exe") {
+            format!("ProtoGrid {} скачан. Запустите установщик.", update.version)
+        } else {
+            format!(
+                "ProtoGrid {} скачан. Закройте ProtoGrid и распакуйте архив поверх папки с приложением.",
+                update.version
+            )
+        }
+    } else {
+        format!(
+            "Доступна новая версия ProtoGrid {} — сейчас установлена {}.",
+            update.version, snapshot.update.current
+        )
+    };
+    alert_banner(ui, p, &message, false, |ui| {
+        if snapshot.update.downloading {
+            ui.spinner();
+            return;
+        }
+        if downloaded {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Открыть папку").size(11.0).color(p.amber))
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, p.amber_soft))
+                        .corner_radius(7),
+                )
+                .clicked()
+            {
+                engine.open_downloaded_update();
+            }
+            return;
+        }
+        if ui
+            .add(
+                egui::Button::new(RichText::new("Скачать").size(11.0).color(p.amber))
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, p.amber_soft))
+                    .corner_radius(7),
+            )
+            .clicked()
+        {
+            engine.download_update();
+        }
+        if !update.page_url.trim().is_empty()
+            && ui
+                .add(
+                    egui::Button::new(RichText::new("Что нового").size(11.0).color(p.amber))
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, p.amber_soft))
+                        .corner_radius(7),
+                )
+                .clicked()
+        {
+            engine.open_release_page();
+        }
+    });
 }
 
 fn speed_card(
@@ -5064,6 +5138,10 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
         .iter()
         .filter(|entry| entry.route == Some(LogRoute::Tun))
         .count();
+    let inbound = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Inbound))
+        .count();
 
     // One measured character cell drives every journal column, so the header
     // and all rows stay on the same monospace grid regardless of text length.
@@ -5160,6 +5238,9 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             }
             if tun > 0 {
                 summary.push_str(&format!(" · tun {tun}"));
+            }
+            if inbound > 0 {
+                summary.push_str(&format!(" · входящие {inbound}"));
             }
             Frame::new()
                 .inner_margin(Margin::symmetric(16, 8))
@@ -5431,6 +5512,9 @@ fn log_route_badge(
         LogRoute::Proxy => Some(("PROXY", p.green, p.green_soft)),
         LogRoute::Block => Some(("BLOCK", p.red, p.red_soft)),
         LogRoute::Tun => Some(("TUN", p.cyan, p.cyan_soft)),
+        // Inbound lines have no route yet, so the chip just says where the
+        // connection came from instead of leaving the column blank.
+        LogRoute::Inbound => Some(("IN", p.muted, p.panel_3)),
     }
 }
 
@@ -5448,7 +5532,13 @@ fn log_message_job(p: &Palette, entry: &LogEntry) -> LayoutJob {
     };
     let font = FontId::monospace(11.5);
     let mut job = LayoutJob::default();
-    let line = entry.line.as_str();
+    // The saved log file keeps the `[id Xms]` prefix; the journal hides it
+    // because the time column and the message itself are what matter here.
+    let line = if entry.source == "core" {
+        strip_conn_prefix(&entry.line)
+    } else {
+        entry.line.as_str()
+    };
     let mut pos = 0;
 
     while pos < line.len() {
@@ -6416,15 +6506,27 @@ fn settings_core(
                         {
                             engine.refresh_cores();
                         }
-                        let (icon, label) = if draft.core == CoreKind::Protogrid {
-                            (egui_phosphor::regular::PACKAGE, "Найти рядом с приложением")
+                        let latest = snapshot
+                            .core_update(draft.core)
+                            .filter(|update| update.available)
+                            .and_then(|update| update.latest.clone());
+                        let (icon, label): (&str, String) = if draft.core == CoreKind::Protogrid {
+                            (
+                                egui_phosphor::regular::PACKAGE,
+                                "Найти рядом с приложением".into(),
+                            )
+                        } else if let Some(latest) = latest {
+                            (
+                                egui_phosphor::regular::ARROW_CIRCLE_UP,
+                                format!("Обновить до {latest}"),
+                            )
                         } else {
                             (
                                 egui_phosphor::regular::DOWNLOAD_SIMPLE,
-                                "Скачать обновление",
+                                "Скачать обновление".into(),
                             )
                         };
-                        if action_button(ui, p, icon, label, BtnKind::Outline).clicked() {
+                        if action_button(ui, p, icon, &label, BtnKind::Outline).clicked() {
                             engine.install_core(draft.core);
                         }
                     });
@@ -6461,15 +6563,28 @@ fn core_option(
                         },
                         12.0,
                     ));
-                    ui.label(
-                        RichText::new(
-                            info.and_then(|info| info.version.clone())
-                                .map(|version| format!("v{version}"))
-                                .unwrap_or_else(|| "не найден".into()),
-                        )
-                        .size(9.5)
-                        .color(p.faint),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(
+                                info.and_then(|info| info.version.clone())
+                                    .map(|version| format!("v{version}"))
+                                    .unwrap_or_else(|| "не найден".into()),
+                            )
+                            .size(9.5)
+                            .color(p.faint),
+                        );
+                        if let Some(latest) = snapshot
+                            .core_update(kind)
+                            .filter(|update| update.available)
+                            .and_then(|update| update.latest.as_deref())
+                        {
+                            ui.label(
+                                RichText::new(format!("· есть {latest}"))
+                                    .size(9.5)
+                                    .color(p.amber),
+                            );
+                        }
+                    });
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let (radio, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
@@ -6655,9 +6770,175 @@ fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine
                             }
                         }
                     });
+                    ui.add_space(12.0);
+                    let (line, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+                    ui.painter().rect_filled(line, 0, p.line);
+                    ui.add_space(10.0);
+                    settings_updates(ui, p, snapshot, engine);
                 });
         },
     );
+}
+
+fn settings_updates(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
+    let update: &UpdateState = &snapshot.update;
+    let (status, color) = if update.checking {
+        ("Проверяем обновления на GitHub…".to_string(), p.faint)
+    } else if let Some(available) = update.available.as_ref() {
+        let mut status = format!(
+            "Доступна ProtoGrid {}. Сейчас установлена {}.",
+            available.version, update.current
+        );
+        if let Some(date) = available.published.as_deref() {
+            status.push_str(&format!(" Опубликована {date}."));
+        }
+        if available.prerelease {
+            status.push_str(" public beta.");
+        }
+        (status, p.amber)
+    } else if let Some(error) = update.error.as_ref() {
+        (format!("Не удалось проверить обновления: {error}"), p.red)
+    } else if update.checked {
+        (
+            format!("ProtoGrid {} — последняя версия.", update.current),
+            p.muted,
+        )
+    } else {
+        ("Проверка ещё не выполнялась.".to_string(), p.muted)
+    };
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_max_width((ui.available_width() - 360.0).max(180.0));
+            ui.label(theme::medium("Обновления", 12.5));
+            ui.label(RichText::new(status).size(10.5).color(color));
+            if let Some(available) = update.available.as_ref() {
+                let hint = if update.downloading {
+                    "Файл скачивается…".to_string()
+                } else if let Some(path) = update.downloaded.as_ref() {
+                    format!("Файл готов: {}", path.display())
+                } else if available.asset_url.is_empty() {
+                    "Для этой платформы нет готового файла — откройте страницу релиза."
+                        .to_string()
+                } else {
+                    let action = if available.asset_name.to_ascii_lowercase().ends_with(".exe") {
+                        "Запустите установщик"
+                    } else {
+                        "Закройте ProtoGrid и распакуйте архив поверх папки с приложением"
+                    };
+                    let size = if available.asset_size > 0 {
+                        format!("Файл {}. ", bytes_f(available.asset_size as f64))
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{size}{action}. Ядро ProtoGrid-core входит в сборку и обновляется вместе с приложением."
+                    )
+                };
+                ui.label(RichText::new(hint).size(10.0).color(p.faint));
+                if let Some(error) = update.error.as_deref() {
+                    ui.label(
+                        RichText::new(format!("Ошибка загрузки: {error}"))
+                            .size(10.0)
+                            .color(p.red),
+                    );
+                }
+                if let Some(note) = available
+                    .notes
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                {
+                    ui.label(
+                        RichText::new(truncate(note.trim_start_matches('#').trim(), 120))
+                            .size(10.0)
+                            .color(p.faint),
+                    );
+                }
+            }
+            let mut cores = Vec::new();
+            let mut core_errors = Vec::new();
+            for (name, core) in [
+                ("sing-box", &snapshot.core_updates.singbox),
+                ("Xray", &snapshot.core_updates.xray),
+            ] {
+                if let Some(latest) = core.latest.as_deref().filter(|_| core.available) {
+                    cores.push(format!("{name} {latest}"));
+                }
+                if let Some(error) = core.error.as_deref() {
+                    core_errors.push(format!("{name}: {error}"));
+                }
+            }
+            if !cores.is_empty() {
+                ui.label(
+                    RichText::new(format!("Доступны ядра: {}.", cores.join(", ")))
+                        .size(10.5)
+                        .color(p.amber),
+                );
+            }
+            if !core_errors.is_empty() {
+                ui.label(
+                    RichText::new(format!("Ядра: {}.", core_errors.join("; ")))
+                        .size(9.5)
+                        .color(p.faint),
+                );
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if action_button(
+                ui,
+                p,
+                egui_phosphor::regular::ARROWS_CLOCKWISE,
+                "Проверить",
+                BtnKind::Ghost,
+            )
+            .clicked()
+            {
+                engine.check_updates();
+            }
+            let Some(available) = update.available.as_ref() else {
+                return;
+            };
+            if update.downloading {
+                ui.spinner();
+            } else if update.downloaded.is_some() {
+                if action_button(
+                    ui,
+                    p,
+                    egui_phosphor::regular::FOLDER_OPEN,
+                    "Открыть папку",
+                    BtnKind::Outline,
+                )
+                .clicked()
+                {
+                    engine.open_downloaded_update();
+                }
+            } else if !available.asset_url.is_empty()
+                && action_button(
+                    ui,
+                    p,
+                    egui_phosphor::regular::DOWNLOAD_SIMPLE,
+                    &format!("Скачать {}", available.version),
+                    BtnKind::Primary,
+                )
+                .clicked()
+            {
+                engine.download_update();
+            }
+            if !available.page_url.trim().is_empty()
+                && action_button(
+                    ui,
+                    p,
+                    egui_phosphor::regular::ARROW_SQUARE_OUT,
+                    "Релиз",
+                    BtnKind::Ghost,
+                )
+                .clicked()
+            {
+                engine.open_release_page();
+            }
+        });
+    });
 }
 
 /* -------------------------------------------------------------------------- */

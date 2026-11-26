@@ -47,14 +47,19 @@ import io.nekohasekai.libbox.WIFIState
 import io.nekohasekai.libbox.NetworkInterface as LibboxNetworkInterface
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.net.Inet6Address
 import java.net.InterfaceAddress
 import java.net.NetworkInterface as JavaNetworkInterface
+import java.util.Locale
 import java.util.UUID
+import app.protogrid.client.widget.ProtoGridWidget
 
 class ProtoGridVpnService :
     VpnService(),
@@ -70,6 +75,7 @@ class ProtoGridVpnService :
     private var commandServer: CommandServer? = null
     private var tunFd: ParcelFileDescriptor? = null
     private var clashApiSecret: String = ""
+    private var notificationJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -121,6 +127,7 @@ class ProtoGridVpnService :
         try {
             VpnState.update(VpnStatus.Connecting)
             updateNotification(getString(R.string.notification_connecting))
+            ProtoGridWidget.updateAll(this)
 
             val profiles = store.profiles()
             if (profiles.isEmpty()) {
@@ -146,18 +153,30 @@ class ProtoGridVpnService :
                 settings.routingJson(),
                 clashApiSecret,
             )
-            val error = JSONObject(config).optString("error")
+            val configJson = JSONObject(config)
+            val error = configJson.optString("error")
             if (error.isNotBlank()) {
                 fail(error)
                 return
             }
 
+            // Keep a core log next to the app's external files so a failed
+            // connection can be diagnosed over adb without a debug build.
+            configJson.optJSONObject("log")?.apply {
+                put("level", "info")
+                getExternalFilesDir(null)?.let { dir ->
+                    put("output", java.io.File(dir, "core.log").absolutePath)
+                }
+            }
+
             val server = commandServer ?: error("libbox не инициализирован")
-            server.startOrReloadService(config, perAppOptions(settings))
+            server.startOrReloadService(configJson.toString(), perAppOptions(settings))
 
             VpnState.update(VpnStatus.Connected)
             TrafficMonitor.start(scope, clashApiSecret)
             updateNotification(getString(R.string.notification_connected))
+            startNotificationUpdates()
+            ProtoGridWidget.updateAll(this)
         } catch (error: Throwable) {
             fail(error.message ?: error.toString())
         }
@@ -169,7 +188,7 @@ class ProtoGridVpnService :
         when (settings.perAppMode) {
             PerAppMode.Include -> if (selected.isNotEmpty()) {
                 options.setIncludePackage(
-                    LibboxStrings((selected + packageName).iterator()),
+                    LibboxStrings(selected.iterator()),
                 )
             }
 
@@ -193,6 +212,8 @@ class ProtoGridVpnService :
     private fun stopTunnel() {
         if (stopping) return
         stopping = true
+        notificationJob?.cancel()
+        notificationJob = null
         TrafficMonitor.stop()
         closeEngine()
         DefaultNetworkMonitor.stop(this)
@@ -201,9 +222,12 @@ class ProtoGridVpnService :
         if (VpnState.status.value != VpnStatus.Error) {
             VpnState.update(VpnStatus.Stopped)
         }
+        ProtoGridWidget.updateAll(this)
     }
 
     private fun closeEngine() {
+        notificationJob?.cancel()
+        notificationJob = null
         runCatching { commandServer?.closeService() }
             .onFailure { Log.w(TAG, "closeService failed", it) }
         runCatching { commandServer?.close() }
@@ -259,6 +283,10 @@ class ProtoGridVpnService :
             builder.setMetered(false)
         }
         builder.allowBypass()
+        // The UI process fetches subscriptions and update metadata; keep its
+        // own traffic out of the tunnel so those requests never loop through
+        // a possibly broken proxy. The core's sockets are protected separately.
+        runCatching { builder.addDisallowedApplication(packageName) }
 
         var hasIpv4 = false
         var hasIpv6 = false
@@ -275,8 +303,8 @@ class ProtoGridVpnService :
             hasIpv6 = true
         }
 
-        val dnsMode = options.getDNSMode().getValue()
-        if (!dnsMode.isNullOrEmpty() && dnsMode != Libbox.DNSModeDisabled) {
+        val dnsMode = options.getDNSMode().getValue().orEmpty()
+        if (dnsMode != Libbox.DNSModeDisabled && (options.getAutoRoute() || dnsMode.isNotEmpty())) {
             val dnsServers = options.getDNSServerAddress()
             while (dnsServers.hasNext()) {
                 val address = dnsServers.next()
@@ -354,6 +382,9 @@ class ProtoGridVpnService :
         for (network in manager.allNetworks) {
             val properties = manager.getLinkProperties(network) ?: continue
             val capabilities = manager.getNetworkCapabilities(network) ?: continue
+            // Our own tun is part of allNetworks; using it as an outbound
+            // interface would send proxy traffic back into the tunnel.
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
             val name = properties.interfaceName ?: continue
             val javaInterface = javaInterfaces.firstOrNull { it.name == name } ?: continue
 
@@ -484,14 +515,48 @@ class ProtoGridVpnService :
     // --- Notifications --------------------------------------------------------
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.notification_channel),
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply {
-            setShowBadge(false)
+        val manager = getSystemService(NotificationManager::class.java)
+        runCatching { manager.deleteNotificationChannel(CHANNEL_ID) }
+        val name = getString(R.string.notification_channel)
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID_NORMAL, name, NotificationManager.IMPORTANCE_LOW).apply {
+                setShowBadge(false)
+            },
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID_SILENT, name, NotificationManager.IMPORTANCE_MIN).apply {
+                setShowBadge(false)
+            },
+        )
+    }
+
+    private fun channelId(): String =
+        if (AndroidSettings(this).silentNotification) CHANNEL_ID_SILENT else CHANNEL_ID_NORMAL
+
+    private fun startNotificationUpdates() {
+        notificationJob?.cancel()
+        notificationJob = null
+        if (!AndroidSettings(this).notificationSpeed) return
+        notificationJob = scope.launch {
+            while (isActive) {
+                delay(2500)
+                val point = TrafficMonitor.points.value.lastOrNull() ?: continue
+                updateNotification(
+                    "↓ ${formatRate(point.down)} · ↑ ${formatRate(point.up)}",
+                )
+            }
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun formatRate(bytes: Long): String {
+        if (bytes < 1024) return "$bytes Б/с"
+        var value = bytes.toDouble()
+        var unit = 0
+        while (value >= 1024 && unit < RATE_UNITS.lastIndex) {
+            value /= 1024
+            unit++
+        }
+        return String.format(Locale.US, "%.1f %s/с", value, RATE_UNITS[unit])
     }
 
     private fun startForegroundNotification(text: String) {
@@ -521,7 +586,7 @@ class ProtoGridVpnService :
             Intent(this, ProtoGridVpnService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, channelId())
             .setSmallIcon(R.drawable.ic_stat_vpn)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
@@ -538,7 +603,10 @@ class ProtoGridVpnService :
         private const val TAG = "ProtoGridVpn"
         private const val RULE_SET_MAX_AGE_SECONDS = 7L * 24 * 60 * 60
         private const val CHANNEL_ID = "protogrid_vpn"
+        private const val CHANNEL_ID_NORMAL = "protogrid_vpn_normal"
+        private const val CHANNEL_ID_SILENT = "protogrid_vpn_silent"
         private const val NOTIFICATION_ID = 1
+        private val RATE_UNITS = arrayOf("Б", "КБ", "МБ", "ГБ")
 
         const val ACTION_STOP = "app.protogrid.client.action.STOP"
 

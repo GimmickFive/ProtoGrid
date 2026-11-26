@@ -144,6 +144,20 @@ class AndroidSettings(context: Context) {
             prefs.edit().putBoolean(KEY_SHOW_SYSTEM, value).apply()
         }
 
+    /** Low-importance VPN notification: no sound, no heads-up. */
+    var silentNotification: Boolean
+        get() = prefs.getBoolean(KEY_SILENT_NOTIFICATION, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_SILENT_NOTIFICATION, value).apply()
+        }
+
+    /** Replace the notification text with live upload/download rates. */
+    var notificationSpeed: Boolean
+        get() = prefs.getBoolean(KEY_NOTIFICATION_SPEED, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_NOTIFICATION_SPEED, value).apply()
+        }
+
     val rulesetDir: File
         get() = File(appContext.filesDir, "rulesets")
 
@@ -172,5 +186,7 @@ class AndroidSettings(context: Context) {
         const val KEY_FINAL_ACTION = "final_action"
         const val KEY_RULES = "custom_rules"
         const val KEY_SHOW_SYSTEM = "show_system_apps"
+        const val KEY_SILENT_NOTIFICATION = "silent_notification"
+        const val KEY_NOTIFICATION_SPEED = "notification_speed"
     }
 }

@@ -7,7 +7,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.2.1"
+val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.2.2"
 val versionCodeEnv = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
 
 // Release builds are arm64-only. For an x86_64 emulator run:

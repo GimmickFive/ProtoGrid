@@ -109,6 +109,14 @@ adb install -r apps/protogrid-android/app/build/outputs/apk/release/app-release.
 Workflow `.github/workflows/android.yml` запускается по тегу `android-v*`
 или вручную. Он собирает libbox, Rust `.so`, APK и прикрепляет файл к Release.
 
+Приложение проверяет публичные релизы `GimmickFive/ProtoGrid` на GitHub при
+запуске. Если в ассетах есть APK для ABI устройства (обычно
+`ProtoGrid-<версия>-arm64-v8a.apk`), на «Обзоре» появляется карточка
+обновления: APK скачивается с прогрессом, сверяется SHA-256 из GitHub и
+открывается системный установщик. Ядро ProtoGrid-core находится внутри APK,
+поэтому отдельного скачивания ядра на Android нет — оно обновляется вместе с
+приложением.
+
 Секреты для стабильной подписи:
 
 | Секрет | Значение |

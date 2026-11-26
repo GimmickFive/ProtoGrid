@@ -20,6 +20,7 @@ use tokio::sync::Semaphore;
 
 use crate::autostart;
 use crate::installer::{self, CoreInfo};
+use crate::updates::{self, CoreUpdate, UpdateState};
 
 pub const MAX_LOG_LINES: usize = 2000;
 
@@ -199,6 +200,10 @@ pub enum LogRoute {
     Proxy,
     Block,
     Tun,
+    /// A connection that only entered through an HTTP/SOCKS inbound. The
+    /// route is not known yet: it is decided later on the `outbound/...` line
+    /// that shares the same connection id.
+    Inbound,
 }
 
 /// Bounded journal with a lazily materialized, shared view for the UI.
@@ -254,10 +259,7 @@ impl Journal {
 
 fn detect_log_route(line: &str) -> Option<LogRoute> {
     if let Some((_, rest)) = line.split_once("outbound/") {
-        let proto = rest
-            .split(|c: char| c == '[' || c == ' ' || c == ':')
-            .next()
-            .unwrap_or_default();
+        let proto = rest.split(['[', ' ', ':']).next().unwrap_or_default();
         return match proto {
             "direct" => Some(LogRoute::Direct),
             "block" => Some(LogRoute::Block),
@@ -265,8 +267,13 @@ fn detect_log_route(line: &str) -> Option<LogRoute> {
             _ => Some(LogRoute::Proxy),
         };
     }
-    if line.contains("inbound/tun[") {
-        return Some(LogRoute::Tun);
+    if let Some((_, rest)) = line.split_once("inbound/") {
+        let proto = rest.split(['[', ' ', ':']).next().unwrap_or_default();
+        return match proto {
+            "" => None,
+            "tun" => Some(LogRoute::Tun),
+            _ => Some(LogRoute::Inbound),
+        };
     }
     None
 }
@@ -322,6 +329,9 @@ pub struct Inner {
     pub core_singbox: Option<CoreInfo>,
     pub core_xray: Option<CoreInfo>,
     pub core_protogrid: Option<CoreInfo>,
+    /// GitHub update state for the launcher, sing-box and Xray.
+    pub update: UpdateState,
+    pub core_updates: updates::CoreUpdates,
     pub autostart: bool,
     pub proxy_supported: bool,
     pub toasts: Vec<ToastEvent>,
@@ -368,6 +378,8 @@ impl Inner {
             core_singbox: self.core_singbox.clone(),
             core_xray: self.core_xray.clone(),
             core_protogrid: self.core_protogrid.clone(),
+            update: self.update.clone(),
+            core_updates: self.core_updates.clone(),
             autostart: self.autostart,
             proxy_supported: self.proxy_supported,
             pid: self.pid,
@@ -391,6 +403,8 @@ pub struct Snapshot {
     pub core_singbox: Option<CoreInfo>,
     pub core_xray: Option<CoreInfo>,
     pub core_protogrid: Option<CoreInfo>,
+    pub update: UpdateState,
+    pub core_updates: updates::CoreUpdates,
     pub autostart: bool,
     pub proxy_supported: bool,
     pub pid: Option<u32>,
@@ -406,6 +420,16 @@ impl Snapshot {
             CoreKind::Singbox => self.core_singbox.as_ref(),
             CoreKind::Xray => self.core_xray.as_ref(),
             CoreKind::Protogrid => self.core_protogrid.as_ref(),
+        }
+    }
+
+    /// Latest GitHub release for a downloadable core. ProtoGrid-core is
+    /// shipped with the launcher, so it follows the application update.
+    pub fn core_update(&self, kind: CoreKind) -> Option<&CoreUpdate> {
+        match kind {
+            CoreKind::Singbox => Some(&self.core_updates.singbox),
+            CoreKind::Xray => Some(&self.core_updates.xray),
+            CoreKind::Protogrid => None,
         }
     }
 
@@ -684,6 +708,8 @@ impl Engine {
             core_singbox: None,
             core_xray: None,
             core_protogrid: None,
+            update: UpdateState::default(),
+            core_updates: updates::CoreUpdates::default(),
             autostart: autostart::is_enabled(),
             proxy_supported: sysproxy::is_supported(),
             toasts: Vec::new(),
@@ -783,6 +809,15 @@ impl Engine {
             );
             detect_both(&inner, &ctx).await;
             log_core_versions(&inner, &ctx);
+            // Check GitHub in parallel with the rest of the startup work. A
+            // failed check is not fatal: the app keeps working offline.
+            {
+                let update_inner = inner.clone();
+                let update_ctx = ctx.clone();
+                tokio::spawn(async move {
+                    check_updates_task(&update_inner, &update_ctx, true).await;
+                });
+            }
             let (auto_connect, has_active) = {
                 let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                 (
@@ -837,6 +872,7 @@ impl Engine {
         self.spawn(async move {
             match installer::install(kind, &inner, &ctx).await {
                 Ok(info) => {
+                    let installed = info.version.clone().unwrap_or_default();
                     {
                         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                         match kind {
@@ -845,12 +881,20 @@ impl Engine {
                                     guard.config.settings.singbox_path = path.clone();
                                 }
                                 guard.core_singbox = Some(info.clone());
+                                if let Some(latest) = guard.core_updates.singbox.latest.clone() {
+                                    guard.core_updates.singbox.available =
+                                        updates::is_newer(&latest, &installed);
+                                }
                             }
                             CoreKind::Xray => {
                                 if let Some(path) = &info.path {
                                     guard.config.settings.xray_path = path.clone();
                                 }
                                 guard.core_xray = Some(info.clone());
+                                if let Some(latest) = guard.core_updates.xray.latest.clone() {
+                                    guard.core_updates.xray.available =
+                                        updates::is_newer(&latest, &installed);
+                                }
                             }
                             CoreKind::Protogrid => {
                                 if let Some(path) = &info.path {
@@ -887,6 +931,134 @@ impl Engine {
             }
             clear_busy(&inner, &ctx, &key);
         });
+    }
+
+    /// Ask GitHub for the newest launcher, sing-box and Xray releases.
+    pub fn check_updates(&self) {
+        if self.lock().update.checking {
+            return;
+        }
+        let inner = self.inner.clone();
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            check_updates_task(&inner, &ctx, false).await;
+        });
+    }
+
+    pub fn download_update(&self) {
+        let (update, dir) = {
+            let guard = self.lock();
+            (
+                guard.update.available.clone(),
+                guard.data_dir.join("updates"),
+            )
+        };
+        let Some(update) = update else {
+            push_toast(
+                &self.inner,
+                &self.ctx,
+                "Новая версия не найдена",
+                ToastKind::Info,
+            );
+            return;
+        };
+        if update.asset_url.is_empty() || update.asset_name.is_empty() {
+            push_toast(
+                &self.inner,
+                &self.ctx,
+                "Для этой платформы нет готового файла — откройте страницу релиза",
+                ToastKind::Warn,
+            );
+            return;
+        }
+        {
+            let mut guard = self.lock();
+            if guard.update.downloading {
+                return;
+            }
+            guard.update.downloading = true;
+            guard.update.downloaded = None;
+            guard.update.error = None;
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        let inner = self.inner.clone();
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            push_log(
+                &inner,
+                &ctx,
+                "app",
+                Some("info"),
+                format!("Скачивание ProtoGrid {}…", update.version),
+            );
+            let result = updates::download(
+                &update.asset_url,
+                &update.asset_name,
+                update.asset_digest.as_deref(),
+                update.asset_size,
+                &dir,
+            )
+            .await;
+            let (message, kind) = match result {
+                Ok(path) => {
+                    {
+                        let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.update.downloading = false;
+                        guard.update.downloaded = Some(path.clone());
+                        guard.update.error = None;
+                        guard.touch();
+                    }
+                    (
+                        format!("ProtoGrid {} скачан: {}", update.version, path.display()),
+                        ToastKind::Success,
+                    )
+                }
+                Err(error) => {
+                    {
+                        let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.update.downloading = false;
+                        guard.update.error = Some(error.clone());
+                        guard.touch();
+                    }
+                    (error, ToastKind::Error)
+                }
+            };
+            push_log(&inner, &ctx, "app", Some("info"), message.clone());
+            push_toast(&inner, &ctx, message, kind);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn open_release_page(&self) {
+        let url = self
+            .lock()
+            .update
+            .available
+            .as_ref()
+            .map(|update| update.page_url.clone());
+        let Some(url) = url.filter(|url| !url.trim().is_empty()) else {
+            push_toast(
+                &self.inner,
+                &self.ctx,
+                "Ссылка на релиз недоступна",
+                ToastKind::Warn,
+            );
+            return;
+        };
+        if let Err(error) = updates::open_url(&url) {
+            push_toast(&self.inner, &self.ctx, error, ToastKind::Error);
+        }
+    }
+
+    pub fn open_downloaded_update(&self) {
+        let path = self.lock().update.downloaded.clone();
+        let Some(path) = path else {
+            return;
+        };
+        if let Err(error) = updates::reveal_path(&path) {
+            push_toast(&self.inner, &self.ctx, error, ToastKind::Error);
+        }
     }
 
     pub fn connect(&self) {
@@ -1972,6 +2144,38 @@ fn strip_core_prefix(line: &str) -> &str {
     rest.trim_start()
 }
 
+/// Hides the per-connection prefix sing-box puts in front of every line:
+/// `[3441978519 0ms]` (older builds wrote `[3441978519_0ms]`). The first value
+/// is a random connection id, the second is the time since that connection was
+/// created. The journal drops it at render time because the time column
+/// already covers the timestamp and the id is only useful when tracing one
+/// connection in the saved log file, which keeps the full line.
+pub(crate) fn strip_conn_prefix(line: &str) -> &str {
+    fn inner(line: &str) -> Option<&str> {
+        let close = line.find(']')?;
+        // Guard against swallowing a long bracket that is part of the message.
+        if close > 32 {
+            return None;
+        }
+        let inner = line.strip_prefix('[')?.get(..close - 1)?;
+        let (id, duration) = inner.split_once(' ').or_else(|| inner.split_once('_'))?;
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if !duration.starts_with(|c: char| c.is_ascii_digit())
+            || !duration.ends_with(|c: char| c.is_ascii_alphabetic())
+            || !duration
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_alphabetic())
+        {
+            return None;
+        }
+        let rest = &line[close + 1..];
+        Some(rest.strip_prefix(' ').unwrap_or(rest))
+    }
+    inner(line).unwrap_or(line)
+}
+
 fn take_timezone(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
@@ -2178,6 +2382,153 @@ fn clear_busy(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, key: &str) {
     ctx.request_repaint();
 }
 
+fn excerpt(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut value: String = text.chars().take(limit.saturating_sub(1)).collect();
+    value.push('…');
+    value
+}
+
+fn core_update_from(
+    result: Result<Vec<updates::Release>, String>,
+    installed: Option<String>,
+) -> CoreUpdate {
+    match result {
+        Ok(releases) => match updates::pick_core_release(&releases) {
+            Some(release) => {
+                let latest = updates::version_of(&release.tag);
+                let available = installed
+                    .as_deref()
+                    .is_some_and(|installed| updates::is_newer(&latest, installed));
+                CoreUpdate {
+                    latest: Some(latest),
+                    available,
+                    error: None,
+                }
+            }
+            None => CoreUpdate {
+                latest: None,
+                available: false,
+                error: Some("в релизах GitHub нет подходящей версии".into()),
+            },
+        },
+        Err(error) => CoreUpdate {
+            latest: None,
+            available: false,
+            error: Some(error),
+        },
+    }
+}
+
+async fn check_updates_task(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, notify: bool) {
+    {
+        let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.update.checking || guard.update.downloading {
+            return;
+        }
+        guard.update.checking = true;
+        guard.update.error = None;
+        guard.touch();
+    }
+    ctx.request_repaint();
+
+    let (installed_singbox, installed_xray) = {
+        let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            guard
+                .core_singbox
+                .as_ref()
+                .filter(|info| info.found)
+                .and_then(|info| info.version.clone()),
+            guard
+                .core_xray
+                .as_ref()
+                .filter(|info| info.found)
+                .and_then(|info| info.version.clone()),
+        )
+    };
+
+    let (app, singbox, xray) = tokio::join!(
+        updates::fetch_releases(updates::PROTOGRID_REPO),
+        updates::fetch_releases(updates::SINGBOX_REPO),
+        updates::fetch_releases(updates::XRAY_REPO)
+    );
+
+    let mut error = None;
+    let available = match app {
+        Ok(releases) => updates::pick_app_release(&releases).and_then(|release| {
+            let version = updates::version_of(&release.tag);
+            if !updates::is_newer(&version, env!("CARGO_PKG_VERSION")) {
+                return None;
+            }
+            let portable = is_portable();
+            let asset = updates::app_asset(release, portable);
+            let page_url = if release.page_url.trim().is_empty() {
+                format!(
+                    "https://github.com/{}/releases/tag/{}",
+                    updates::PROTOGRID_REPO,
+                    release.tag
+                )
+            } else {
+                release.page_url.clone()
+            };
+            Some(updates::AppUpdate {
+                version,
+                notes: excerpt(&release.notes, 4000),
+                page_url,
+                published: release.published_date().map(str::to_string),
+                prerelease: release.prerelease,
+                asset_name: asset.map(|asset| asset.name.clone()).unwrap_or_default(),
+                asset_url: asset.map(|asset| asset.url.clone()).unwrap_or_default(),
+                asset_size: asset.map(|asset| asset.size).unwrap_or(0),
+                asset_digest: asset.and_then(|asset| asset.digest.clone()),
+            })
+        }),
+        Err(failure) => {
+            error = Some(failure);
+            None
+        }
+    };
+    let singbox_update = core_update_from(singbox, installed_singbox);
+    let xray_update = core_update_from(xray, installed_xray);
+    let notification = available
+        .as_ref()
+        .map(|update| format!("Доступна новая версия ProtoGrid {}", update.version));
+
+    {
+        let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = guard
+            .update
+            .available
+            .as_ref()
+            .map(|update| update.version.clone());
+        let next = available.as_ref().map(|update| update.version.clone());
+        if previous != next {
+            // A different release is on offer: an already downloaded archive
+            // belongs to the previous version and must not be installed.
+            guard.update.downloaded = None;
+        }
+        guard.update.checking = false;
+        guard.update.checked = true;
+        guard.update.error = error;
+        guard.update.available = available;
+        guard.update.last_checked = Some(now_secs());
+        guard.core_updates.singbox = singbox_update;
+        guard.core_updates.xray = xray_update;
+        guard.touch();
+    }
+    if let Some(message) = notification {
+        push_log(inner, ctx, "app", Some("info"), message.clone());
+        if notify {
+            push_toast(inner, ctx, message, ToastKind::Info);
+        }
+    }
+    ctx.request_repaint();
+}
+
 async fn detect_both(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
     let (settings, data_dir) = {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2312,14 +2663,14 @@ async fn refresh_subscription_inner(
         }
     };
 
-    let was_connected =
-        inner.lock().unwrap_or_else(|e| e.into_inner()).status == ConnStatus::Connected;
-    let active_before = inner
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .config
-        .active_server_id
-        .clone();
+    let (was_connected, active_before, servers_before) = {
+        let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            guard.status == ConnStatus::Connected,
+            guard.config.active_server_id.clone(),
+            guard.config.servers.clone(),
+        )
+    };
     let mut country_ids = Vec::new();
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2401,13 +2752,17 @@ async fn refresh_subscription_inner(
         Some("info"),
         format!("Подписка «{name}» обновлена"),
     );
-    let active_after = inner
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .config
-        .active_server_id
-        .clone();
-    if was_connected && active_before != active_after {
+    let (active_after, servers_changed) = {
+        let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            guard.config.active_server_id.clone(),
+            core_config_changed(&servers_before, &guard.config.servers),
+        )
+    };
+    // A running core keeps the config it was started with, so servers added or
+    // changed by the refresh stay invisible to the Clash API (and to switching)
+    // until it is restarted.
+    if was_connected && (servers_changed || active_before != active_after) {
         if active_after.is_some() {
             let _ = connect_core(inner, ctx).await;
         } else {
@@ -3373,10 +3728,33 @@ async fn ping_one(
         .await
         .ok();
     }
-    if latency.is_none() {
+    if latency.is_none() && !(connected && settings.tun_active()) {
+        // With TUN up, a plain connect() is answered by the local sing-box
+        // stack before the remote dial even starts, so it would report ~0-1 ms
+        // for every server. Better no value than a fake one.
         latency = ping::tcp_ping(&server, 4000).await.ok();
     }
     (id, latency)
+}
+
+/// Subscription refreshes also touch display-only fields (traffic counters in
+/// the name, resolved country). Only a change of the actual connection
+/// parameters requires regenerating the running core config.
+fn core_config_changed(before: &[Server], after: &[Server]) -> bool {
+    fn relevant(servers: &[Server]) -> Vec<Server> {
+        let mut list: Vec<Server> = servers
+            .iter()
+            .cloned()
+            .map(|mut server| {
+                server.name.clear();
+                server.country.clear();
+                server
+            })
+            .collect();
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        list
+    }
+    relevant(before) != relevant(after)
 }
 
 #[cfg(test)]
@@ -3413,6 +3791,37 @@ mod tests {
             split_route_bytes(1000, 500, 100, 50, 100, 50, 0.0),
             (500, 250, 500, 250)
         );
+    }
+
+    #[test]
+    fn core_config_change_ignores_display_only_fields() {
+        let before = Server {
+            id: "one".into(),
+            name: "vless 13.71GB".into(),
+            country: "DE".into(),
+            ..Server::default()
+        };
+        let after = Server {
+            name: "vless 14.02GB".into(),
+            country: "NL".into(),
+            ..before.clone()
+        };
+        assert!(!core_config_changed(&[before], &[after]));
+    }
+
+    #[test]
+    fn core_config_change_detects_connection_parameters() {
+        let before = Server::default();
+        let other_port = Server {
+            port: before.port + 1,
+            ..before.clone()
+        };
+        assert!(core_config_changed(&[before.clone()], &[other_port]));
+        let other_address = Server {
+            address: "203.0.113.10".into(),
+            ..before.clone()
+        };
+        assert!(core_config_changed(&[before], &[other_address]));
     }
 
     #[test]
@@ -3480,7 +3889,39 @@ mod tests {
         );
         assert_eq!(
             detect_log_route("inbound/mixed[mixed-in]: inbound connection to x:443"),
+            Some(LogRoute::Inbound)
+        );
+        assert_eq!(
+            detect_log_route("router: found process path: C:\\chrome.exe"),
             None
+        );
+    }
+
+    #[test]
+    fn strips_connection_prefix() {
+        assert_eq!(
+            strip_conn_prefix(
+                "[3441978519 0ms] inbound/mixed[mixed-in]: inbound connection to x:443"
+            ),
+            "inbound/mixed[mixed-in]: inbound connection to x:443"
+        );
+        assert_eq!(
+            strip_conn_prefix("[1082773346_94ms] outbound/vless[abc]: connected"),
+            "outbound/vless[abc]: connected"
+        );
+        assert_eq!(
+            strip_conn_prefix("[1 1.23s] outbound/direct[direct]: connected"),
+            "outbound/direct[direct]: connected"
+        );
+        // A core tag or a plain bracket is not a connection prefix.
+        assert_eq!(
+            strip_conn_prefix("[mixed-in]: inbound connection"),
+            "[mixed-in]: inbound connection"
+        );
+        assert_eq!(strip_conn_prefix("[1082773346 0ms]no-space"), "no-space");
+        assert_eq!(
+            strip_conn_prefix("router: found process path"),
+            "router: found process path"
         );
     }
 

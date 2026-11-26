@@ -55,6 +55,6 @@ jobs:
           cd forks/sing-box
           mkdir -p ../../dist
           go build -tags "with_quic,with_utls,with_clash_api,with_gvisor,with_openvpn" \
-            -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4-protogrid.3" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4-protogrid.4" \
             -o ../../dist/sing-box-protogrid ./cmd/sing-box
 

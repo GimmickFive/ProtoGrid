@@ -15,6 +15,16 @@ object CoreBridge {
     @JvmStatic
     external fun parseLinks(input: String): String
 
+    /**
+     * Downloads a subscription URL through ProtoGrid-core.
+     *
+     * Returns `{ "servers": [...], "errors": [...], "userinfo": {...} | null,
+     * "display_url": "..." }` or `{ "error": "..." }`. Blocks for up to 30 s,
+     * so call it from a background dispatcher.
+     */
+    @JvmStatic
+    external fun fetchSubscription(url: String): String
+
     /** Returns a ProtoGrid-core configuration or `{ "error": "..." }`. */
     @JvmStatic
     external fun buildConfig(

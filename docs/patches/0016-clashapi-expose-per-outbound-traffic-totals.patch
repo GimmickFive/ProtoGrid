@@ -1,0 +1,112 @@
+From a90d7e6c59f14517c28d832dc8e2e70772b8c26a Mon Sep 17 00:00:00 2001
+From: ProtoGrid <protogrid@localhost>
+Date: Thu, 26 Nov 2026 18:54:04 +0300
+Subject: [PATCH] clashapi: expose per-outbound traffic totals
+
+Track upload/download per final outbound tag, including closed connections,
+and include the maps in the Clash API connections snapshot. The Android
+client uses them to separate proxied traffic from direct traffic.
+---
+ common/trafficcontrol/manager.go     | 37 +++++++++++++++++++++++++++-
+ experimental/clashapi/connections.go |  7 ++++--
+ 2 files changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/common/trafficcontrol/manager.go b/common/trafficcontrol/manager.go
+index 5e938cf..900526a 100644
+--- a/common/trafficcontrol/manager.go
++++ b/common/trafficcontrol/manager.go
+@@ -40,6 +40,8 @@ type Manager struct {
+ 	closedConnections       list.List[TrackerMetadata]
+ 	closedUploadTotal       int64
+ 	closedDownloadTotal     int64
++	outboundUpload          map[string]int64
++	outboundDownload        map[string]int64
+ 
+ 	eventSubscriber *observable.Subscriber[ConnectionEvent]
+ 	eventObserver   *observable.Observer[ConnectionEvent]
+@@ -47,7 +49,9 @@ type Manager struct {
+ 
+ func NewManager() *Manager {
+ 	return &Manager{
+-		eventSubscriber: observable.NewSubscriber[ConnectionEvent](256),
++		eventSubscriber:  observable.NewSubscriber[ConnectionEvent](256),
++		outboundUpload:   make(map[string]int64),
++		outboundDownload: make(map[string]int64),
+ 	}
+ }
+ 
+@@ -97,6 +101,10 @@ func (m *Manager) leave(tracker Tracker) {
+ 	}
+ 	metadata.ClosedAt = closedAt
+ 	metadataCopy := *metadata
++	if metadata.Outbound != "" {
++		m.outboundUpload[metadata.Outbound] += metadata.Upload.Load()
++		m.outboundDownload[metadata.Outbound] += metadata.Download.Load()
++	}
+ 	if m.closedConnections.Len() >= closedConnectionsLimit {
+ 		evicted := m.closedConnections.PopFront()
+ 		m.closedUploadTotal += evicted.Upload.Load()
+@@ -130,6 +138,31 @@ func (m *Manager) Total() (uplinkTotal int64, downlinkTotal int64) {
+ 	return
+ }
+ 
++// OutboundTotals returns upload/download totals grouped by the final
++// outbound tag, including closed connections. Used by the Clash API to show
++// how much traffic went through the proxy versus direct.
++func (m *Manager) OutboundTotals() (map[string]int64, map[string]int64) {
++	m.closedConnectionsAccess.Lock()
++	defer m.closedConnectionsAccess.Unlock()
++	uplink := make(map[string]int64, len(m.outboundUpload))
++	for tag, value := range m.outboundUpload {
++		uplink[tag] = value
++	}
++	downlink := make(map[string]int64, len(m.outboundDownload))
++	for tag, value := range m.outboundDownload {
++		downlink[tag] = value
++	}
++	m.connections.Range(func(_ uuid.UUID, tracker Tracker) bool {
++		metadata := tracker.Metadata()
++		if metadata.Outbound != "" {
++			uplink[metadata.Outbound] += metadata.Upload.Load()
++			downlink[metadata.Outbound] += metadata.Download.Load()
++		}
++		return true
++	})
++	return uplink, downlink
++}
++
+ func (m *Manager) ConnectionsLen() int {
+ 	return m.connections.Len()
+ }
+@@ -180,4 +213,6 @@ func (m *Manager) Clear() {
+ 		m.closedDownloadTotal += element.Value.Download.Load()
+ 	}
+ 	m.closedConnections.Init()
++	m.outboundUpload = make(map[string]int64)
++	m.outboundDownload = make(map[string]int64)
+ }
+diff --git a/experimental/clashapi/connections.go b/experimental/clashapi/connections.go
+index 2cf0a71..c0a326d 100644
+--- a/experimental/clashapi/connections.go
++++ b/experimental/clashapi/connections.go
+@@ -31,12 +31,15 @@ func connectionRouter(ctx context.Context, network adapter.NetworkManager, traff
+ 
+ func connectionsSnapshot(trafficManager *trafficcontrol.Manager) render.M {
+ 	uplinkTotal, downlinkTotal := trafficManager.Total()
++	outboundUpload, outboundDownload := trafficManager.OutboundTotals()
+ 	connections := common.Filter(trafficManager.Connections(), func(metadata *trafficcontrol.TrackerMetadata) bool {
+ 		return metadata.OutboundType != C.TypeDNS
+ 	})
+ 	return render.M{
+-		"downloadTotal": downlinkTotal,
+-		"uploadTotal":   uplinkTotal,
++		"downloadTotal":        downlinkTotal,
++		"uploadTotal":          uplinkTotal,
++		"outboundUploadTotal":   outboundUpload,
++		"outboundDownloadTotal": outboundDownload,
+ 		"connections": common.Map(connections, func(metadata *trafficcontrol.TrackerMetadata) connectionObject {
+ 			return connectionObject(*metadata)
+ 		}),
+-- 
+2.34.1
+
