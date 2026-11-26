@@ -91,6 +91,7 @@ pub fn build_config_with_capabilities(
     let rule_sets = collect_rule_sets(rules, rule_set_dir);
     let use_http_client = modern_http_client && rule_set_dir.is_none() && !rule_sets.is_empty();
     let mut outbounds = Vec::new();
+    let mut endpoints = Vec::new();
     let ids: Vec<String> = valid.iter().map(|s| s.id.clone()).collect();
     if settings.auto_select {
         outbounds.push(json!({
@@ -110,7 +111,11 @@ pub fn build_config_with_capabilities(
         }));
     }
     for server in &valid {
-        outbounds.push(outbound(server, capabilities)?);
+        if server.protocol == Protocol::OpenVpn {
+            endpoints.push(crate::openvpn::endpoint(server)?);
+        } else {
+            outbounds.push(outbound(server, capabilities)?);
+        }
     }
     outbounds.push(json!({"type": "direct", "tag": "direct"}));
     if use_http_client {
@@ -216,6 +221,9 @@ pub fn build_config_with_capabilities(
             },
         },
     });
+    if !endpoints.is_empty() {
+        config["endpoints"] = Value::Array(endpoints);
+    }
     if settings.fake_dns {
         if let Some(servers) = config["dns"]["servers"].as_array_mut() {
             servers.push(json!({
@@ -489,6 +497,7 @@ fn outbound(server: &Server, capabilities: CoreCapabilities) -> Result<Value, St
     let transport = transport_object(server, capabilities)?;
 
     let mut object = match server.protocol {
+        Protocol::OpenVpn => return Err("OpenVPN собирается как endpoint, а не outbound".into()),
         Protocol::Vless => {
             let mut value = json!({
                 "type": "vless",
@@ -806,6 +815,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();
@@ -850,6 +860,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();
@@ -979,6 +990,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();
@@ -1105,6 +1117,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();
@@ -1153,6 +1166,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();
@@ -1200,6 +1214,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();
@@ -1240,6 +1255,7 @@ mod tests {
                 mldsa65: true,
                 masque: true,
                 noise: true,
+                openvpn: true,
             },
         )
         .unwrap();

@@ -127,6 +127,7 @@ fn main() {
             mldsa65: true,
             masque: true,
             noise: true,
+            openvpn: true,
         },
     )
     .unwrap();

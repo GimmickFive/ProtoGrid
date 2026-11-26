@@ -4,8 +4,10 @@
 //! data model and renders configuration files for sing-box and Xray.
 
 pub mod clash;
+pub mod geo;
 pub mod link;
 pub mod model;
+pub mod openvpn;
 pub mod ping;
 pub mod ruleset;
 pub mod singbox;

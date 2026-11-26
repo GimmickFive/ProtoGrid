@@ -323,6 +323,9 @@ fn xray_outbound(server: &Server, tag: &str) -> Result<Value, String> {
             return Err("Hysteria2 не поддерживается Xray. Выберите sing-box.".into())
         }
         Protocol::Tuic => return Err("TUIC не поддерживается Xray. Выберите sing-box.".into()),
+        Protocol::OpenVpn => {
+            return Err("OpenVPN не поддерживается Xray. Выберите sing-box.".into())
+        }
         Protocol::Masque => unreachable!("handled above"),
     };
     let mut value = value;

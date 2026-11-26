@@ -13,6 +13,7 @@ pub enum Protocol {
     Hysteria2,
     Tuic,
     Masque,
+    OpenVpn,
 }
 
 impl Protocol {
@@ -25,12 +26,14 @@ impl Protocol {
             Protocol::Hysteria2 => "Hysteria2",
             Protocol::Tuic => "TUIC",
             Protocol::Masque => "MASQUE",
+            Protocol::OpenVpn => "OpenVPN",
         }
     }
 
     pub fn default_port(self) -> u16 {
         match self {
             Protocol::Shadowsocks => 8388,
+            Protocol::OpenVpn => 1194,
             _ => 443,
         }
     }
@@ -125,6 +128,9 @@ pub struct CoreCapabilities {
     pub masque: bool,
     /// Xray-compatible UDP finalmask noise (ProtoGrid fork / Xray).
     pub noise: bool,
+    /// OpenVPN client endpoint (`openvpn-client`). Requires sing-box 1.14+
+    /// built with `with_openvpn` or the ProtoGrid fork.
+    pub openvpn: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -173,6 +179,52 @@ impl RuleKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingPreset {
+    Bypass,
+    Global,
+    Direct,
+    /// Rules were changed by hand, so they no longer match a preset.
+    Custom,
+}
+
+impl RoutingPreset {
+    pub fn id(self) -> &'static str {
+        match self {
+            RoutingPreset::Bypass => "bypass",
+            RoutingPreset::Global => "global",
+            RoutingPreset::Direct => "direct",
+            RoutingPreset::Custom => "custom",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RoutingPreset::Bypass => "Обход РФ",
+            RoutingPreset::Global => "Глобальный прокси",
+            RoutingPreset::Direct => "Прямой",
+            RoutingPreset::Custom => "Свой профиль",
+        }
+    }
+
+    /// Built-in presets ship a fixed ruleset; only `Custom` can be edited.
+    pub fn is_builtin(self) -> bool {
+        !matches!(self, RoutingPreset::Custom)
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        [
+            RoutingPreset::Bypass,
+            RoutingPreset::Global,
+            RoutingPreset::Direct,
+            RoutingPreset::Custom,
+        ]
+        .into_iter()
+        .find(|preset| preset.id() == id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Server {
@@ -180,6 +232,8 @@ pub struct Server {
     pub name: String,
     pub protocol: Protocol,
     pub address: String,
+    /// ISO 3166-1 alpha-2 country code resolved from the address on add.
+    pub country: String,
     pub port: u16,
     pub uuid: String,
     pub password: String,
@@ -226,6 +280,11 @@ pub struct Server {
     pub xdrive_s3_path_style: bool,
     pub masque_user: String,
     pub masque_pass: String,
+    /// Normalized `.ovpn` profile kept for the sing-box `openvpn-client`
+    /// endpoint (external files are inlined on import).
+    pub openvpn_profile: String,
+    pub openvpn_username: String,
+    pub openvpn_password: String,
     pub pinned_peer_cert_sha256: String,
     pub masque_remote_dns: String,
     pub service_name: String,
@@ -254,6 +313,7 @@ impl Default for Server {
             name: String::new(),
             protocol: Protocol::Vless,
             address: String::new(),
+            country: String::new(),
             port: Protocol::Vless.default_port(),
             uuid: String::new(),
             password: String::new(),
@@ -298,6 +358,9 @@ impl Default for Server {
             xdrive_s3_path_style: false,
             masque_user: String::new(),
             masque_pass: String::new(),
+            openvpn_profile: String::new(),
+            openvpn_username: String::new(),
+            openvpn_password: String::new(),
             pinned_peer_cert_sha256: String::new(),
             masque_remote_dns: String::new(),
             service_name: String::new(),
@@ -413,6 +476,11 @@ impl Server {
                 }
             }
             Protocol::Masque => {}
+            Protocol::OpenVpn => {
+                if self.openvpn_profile.trim().is_empty() {
+                    return Err("не загружен профиль OpenVPN (.ovpn)".into());
+                }
+            }
         }
         if self.security == Security::Reality && self.reality_public_key.trim().is_empty() {
             return Err("для Reality не указан публичный ключ (pbk)".into());
@@ -441,6 +509,11 @@ impl Server {
             return Err(
                 "протокол MASQUE требует sing-box с поддержкой MASQUE (ProtoGrid fork) или Xray"
                     .into(),
+            );
+        }
+        if self.protocol == Protocol::OpenVpn && core.is_singbox_like() && !capabilities.openvpn {
+            return Err(
+                "протокол OpenVPN требует sing-box 1.14+ с with_openvpn или форк ProtoGrid".into(),
             );
         }
         if self.noise_enabled && core.is_singbox_like() && !capabilities.noise {
@@ -529,6 +602,9 @@ pub struct Settings {
     pub log_level: String,
     pub test_url: String,
     pub final_action: RuleAction,
+    /// Routing preset the user picked last. `None` only appears in configs
+    /// written before the field existed; `AppConfig::normalize` fills it in.
+    pub routing_preset: Option<RoutingPreset>,
     pub close_to_tray: bool,
     pub auto_connect: bool,
     pub auto_update_subscriptions: bool,
@@ -556,6 +632,7 @@ impl Default for Settings {
             log_level: "info".into(),
             test_url: "https://www.gstatic.com/generate_204".into(),
             final_action: RuleAction::Proxy,
+            routing_preset: None,
             close_to_tray: true,
             auto_connect: false,
             auto_update_subscriptions: true,
@@ -582,6 +659,11 @@ impl Settings {
             CoreKind::Singbox | CoreKind::Protogrid => self.mixed_port,
             CoreKind::Xray => self.socks_port,
         }
+    }
+
+    /// TUN is only usable with sing-box-like cores, and only when turned on.
+    pub fn tun_active(&self) -> bool {
+        self.tun_enabled && self.core.is_singbox_like()
     }
 
     pub fn core_path(&self) -> &str {
@@ -646,6 +728,15 @@ impl Settings {
     }
 }
 
+/// Rules of the user's own routing profile. Kept aside when a built-in preset
+/// is applied so the user can switch back without losing anything.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CustomProfile {
+    pub rules: Vec<RoutingRule>,
+    pub final_action: RuleAction,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -653,6 +744,8 @@ pub struct AppConfig {
     pub servers: Vec<Server>,
     pub subscriptions: Vec<Subscription>,
     pub rules: Vec<RoutingRule>,
+    /// The user's own profile, preserved while a built-in preset is active.
+    pub custom_profile: Option<CustomProfile>,
     pub settings: Settings,
     pub active_server_id: Option<String>,
 }
@@ -664,6 +757,7 @@ impl Default for AppConfig {
             servers: Vec::new(),
             subscriptions: Vec::new(),
             rules: default_rules(),
+            custom_profile: None,
             settings: Settings::default(),
             active_server_id: None,
         }
@@ -679,6 +773,15 @@ impl AppConfig {
                 server.id = uuid::Uuid::new_v4().to_string();
             }
             server.address = server.address.trim().to_string();
+            server.country = server.country.trim().to_ascii_uppercase();
+            if server.country.len() != 2
+                || !server
+                    .country
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphabetic())
+            {
+                server.country.clear();
+            }
             server.sni = server.sni.trim().to_string();
             server.host = server.host.trim().to_string();
             server.path = server.path.trim().to_string();
@@ -690,6 +793,11 @@ impl AppConfig {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .collect();
+            server.openvpn_username = server.openvpn_username.trim().to_string();
+            server.openvpn_password = server.openvpn_password.trim().to_string();
+            // Only the outer whitespace is stripped: inline PEM blocks inside
+            // the profile must stay byte-for-byte intact.
+            server.openvpn_profile = server.openvpn_profile.trim().to_string();
         }
         for sub in &mut self.subscriptions {
             if sub.id.trim().is_empty() {
@@ -702,6 +810,27 @@ impl AppConfig {
                 rule.id = uuid::Uuid::new_v4().to_string();
             }
         }
+        // Older builds shipped "Обход РФ" without the process rules; upgrade the
+        // stored copy so the preset keeps matching instead of becoming custom.
+        if matches!(
+            self.settings.routing_preset,
+            None | Some(RoutingPreset::Bypass)
+        ) && is_legacy_bypass(&self.rules)
+        {
+            self.rules = default_rules();
+        }
+        self.enforce_tun_process_rules();
+        self.settings.routing_preset = Some(match self.settings.routing_preset {
+            // Keep the explicit choice, but drop it once the rules diverge from
+            // the preset (hand edits, imported configs, older builds).
+            Some(RoutingPreset::Custom) => RoutingPreset::Custom,
+            Some(preset) if preset_matches(preset, &self.rules, self.settings.final_action) => {
+                preset
+            }
+            _ => detect_preset(&self.rules, self.settings.final_action),
+        });
+        // While the own profile is active, it *is* the current ruleset.
+        self.sync_custom_profile();
         match &self.active_server_id {
             Some(id) if self.servers.iter().any(|s| &s.id == id) => {}
             _ => self.active_server_id = self.servers.first().map(|s| s.id.clone()),
@@ -710,6 +839,36 @@ impl AppConfig {
 
     pub fn server(&self, id: &str) -> Option<&Server> {
         self.servers.iter().find(|s| s.id == id)
+    }
+
+    /// Mirrors the active ruleset into the own profile while it is selected, so
+    /// the profile the user returns to is always the latest saved state.
+    pub fn sync_custom_profile(&mut self) {
+        if self.settings.routing_preset == Some(RoutingPreset::Custom) {
+            self.custom_profile = Some(CustomProfile {
+                rules: self.rules.clone(),
+                final_action: self.settings.final_action,
+            });
+        }
+    }
+
+    /// Process rules cannot work without TUN (Discord, Telegram Desktop and
+    /// friends ignore the system proxy). They follow the TUN state: off when it
+    /// is disabled or unsupported, on for the built-in "Обход РФ" profile when
+    /// TUN is available. A custom profile keeps whatever the user chose.
+    pub fn enforce_tun_process_rules(&mut self) {
+        let tun = self.settings.tun_active();
+        let preset = self.settings.routing_preset == Some(RoutingPreset::Bypass);
+        for rule in self.rules.iter_mut() {
+            if rule.kind == RuleKind::ProcessName {
+                rule.enabled = tun && (preset || rule.enabled);
+            }
+        }
+        if !tun {
+            if let Some(profile) = &mut self.custom_profile {
+                disable_process_rules(&mut profile.rules);
+            }
+        }
     }
 
     pub fn active_server(&self) -> Option<&Server> {
@@ -761,6 +920,25 @@ pub fn default_rules() -> Vec<RoutingRule> {
             kind: RuleKind::Geosite,
             value: "category-ru".into(),
         },
+        // Process rules only take effect with TUN: Discord and Telegram Desktop
+        // ignore the system proxy, so without TUN these connections never reach
+        // the core. They stay disabled until the user turns TUN on.
+        RoutingRule {
+            id: "default-discord".into(),
+            name: "Discord через прокси (нужен TUN)".into(),
+            enabled: true,
+            action: RuleAction::Proxy,
+            kind: RuleKind::ProcessName,
+            value: "Discord.exe".into(),
+        },
+        RoutingRule {
+            id: "default-telegram".into(),
+            name: "Telegram через прокси (нужен TUN)".into(),
+            enabled: true,
+            action: RuleAction::Proxy,
+            kind: RuleKind::ProcessName,
+            value: "Telegram.exe".into(),
+        },
     ]
 }
 
@@ -784,6 +962,61 @@ pub fn routing_preset(name: &str) -> Option<(Vec<RoutingRule>, RuleAction)> {
     }
 }
 
+/// Whether `rules` + `final_action` are exactly what `preset` would install.
+pub fn preset_matches(
+    preset: RoutingPreset,
+    rules: &[RoutingRule],
+    final_action: RuleAction,
+) -> bool {
+    let Some((canonical, action)) = routing_preset(preset.id()) else {
+        return false;
+    };
+    action == final_action && same_rules(rules, &canonical)
+}
+
+/// Best guess for a config that does not record its preset (older profiles).
+pub fn detect_preset(rules: &[RoutingRule], final_action: RuleAction) -> RoutingPreset {
+    [
+        RoutingPreset::Direct,
+        RoutingPreset::Global,
+        RoutingPreset::Bypass,
+    ]
+    .into_iter()
+    .find(|preset| preset_matches(*preset, rules, final_action))
+    .unwrap_or(RoutingPreset::Custom)
+}
+
+/// Forces every process rule off. Used when TUN is not active.
+fn disable_process_rules(rules: &mut [RoutingRule]) {
+    for rule in rules.iter_mut() {
+        if rule.kind == RuleKind::ProcessName {
+            rule.enabled = false;
+        }
+    }
+}
+
+/// The bypass ruleset as shipped before process rules were added.
+fn is_legacy_bypass(rules: &[RoutingRule]) -> bool {
+    let legacy: Vec<RoutingRule> = default_rules()
+        .into_iter()
+        .filter(|rule| rule.kind != RuleKind::ProcessName)
+        .collect();
+    same_rules(rules, &legacy)
+}
+
+/// Ids and names are cosmetic, so only the parts that change routing count.
+/// Process rules follow the TUN switch instead of being edited by hand, so
+/// their `enabled` flag is not part of the identity.
+fn same_rules(left: &[RoutingRule], right: &[RoutingRule]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            (a.enabled == b.enabled || a.kind == RuleKind::ProcessName)
+                && a.action == b.action
+                && a.kind == b.kind
+                && a.value.trim() == b.value.trim()
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +1029,185 @@ mod tests {
         assert_eq!(routing_preset("bypass").unwrap().1, RuleAction::Proxy);
         assert_eq!(routing_preset("direct").unwrap().0.len(), 0);
         assert!(routing_preset("unknown").is_none());
+        assert!(RoutingPreset::Bypass.is_builtin());
+        assert!(!RoutingPreset::Custom.is_builtin());
+        for id in ["bypass", "global", "direct", "custom"] {
+            assert_eq!(RoutingPreset::from_id(id).map(RoutingPreset::id), Some(id));
+        }
+    }
+
+    #[test]
+    fn detect_preset_matches_installed_rules() {
+        let rules = default_rules();
+        assert_eq!(
+            detect_preset(&rules, RuleAction::Proxy),
+            RoutingPreset::Bypass
+        );
+        let (global, action) = routing_preset("global").unwrap();
+        assert_eq!(detect_preset(&global, action), RoutingPreset::Global);
+        assert_eq!(
+            detect_preset(&[], RuleAction::Direct),
+            RoutingPreset::Direct
+        );
+        assert_eq!(
+            detect_preset(&rules, RuleAction::Direct),
+            RoutingPreset::Custom
+        );
+    }
+
+    #[test]
+    fn edited_rules_drop_the_stored_preset() {
+        let (global_rules, action) = routing_preset("global").unwrap();
+        let mut config = AppConfig::default();
+        config.rules = global_rules;
+        config.settings.final_action = action;
+        config.settings.routing_preset = Some(RoutingPreset::Global);
+        config.normalize();
+        assert_eq!(config.settings.routing_preset, Some(RoutingPreset::Global));
+
+        config.rules.pop();
+        config.normalize();
+        assert_eq!(
+            config.settings.routing_preset,
+            Some(RoutingPreset::Custom),
+            "rules that no longer match a preset must not keep its name"
+        );
+
+        config.settings.routing_preset = Some(RoutingPreset::Custom);
+        config.normalize();
+        assert_eq!(
+            config.settings.routing_preset,
+            Some(RoutingPreset::Custom),
+            "an explicit custom choice must survive normalization"
+        );
+    }
+
+    #[test]
+    fn old_bypass_profile_is_upgraded() {
+        let mut config = AppConfig::default();
+        config
+            .rules
+            .retain(|rule| rule.kind != RuleKind::ProcessName);
+        config.settings.routing_preset = Some(RoutingPreset::Bypass);
+        config.normalize();
+        assert_eq!(
+            config.settings.routing_preset,
+            Some(RoutingPreset::Bypass),
+            "an old bypass config must not look like a custom profile"
+        );
+        assert_eq!(config.rules.len(), default_rules().len());
+    }
+
+    #[test]
+    fn process_rules_require_tun() {
+        let mut config = AppConfig::default();
+        // TUN is off by default, so the shipped process rules are off.
+        config.normalize();
+        assert_eq!(config.settings.routing_preset, Some(RoutingPreset::Bypass));
+        assert!(config
+            .rules
+            .iter()
+            .filter(|rule| rule.kind == RuleKind::ProcessName)
+            .all(|rule| !rule.enabled));
+
+        // With TUN on (sing-box-like core) the built-in profile enables them.
+        config.settings.tun_enabled = true;
+        config.normalize();
+        assert!(config
+            .rules
+            .iter()
+            .filter(|rule| rule.kind == RuleKind::ProcessName)
+            .all(|rule| rule.enabled));
+
+        // And forces them off again when TUN is unavailable.
+        config.settings.tun_enabled = false;
+        config.normalize();
+        assert!(config
+            .rules
+            .iter()
+            .filter(|rule| rule.kind == RuleKind::ProcessName)
+            .all(|rule| !rule.enabled));
+
+        // A custom profile keeps the user's own choice.
+        config.settings.tun_enabled = true;
+        config.settings.routing_preset = Some(RoutingPreset::Custom);
+        config.normalize();
+        assert!(config
+            .rules
+            .iter()
+            .filter(|rule| rule.kind == RuleKind::ProcessName)
+            .all(|rule| !rule.enabled));
+    }
+
+    #[test]
+    fn tun_needs_singbox_core() {
+        let mut settings = Settings::default();
+        settings.tun_enabled = true;
+        assert!(settings.tun_active());
+        settings.core = CoreKind::Xray;
+        assert!(!settings.tun_active());
+    }
+
+    #[test]
+    fn custom_profile_survives_serialization() {
+        let mut config = AppConfig::default();
+        config.custom_profile = Some(CustomProfile {
+            rules: default_rules(),
+            final_action: RuleAction::Proxy,
+        });
+        config.settings.routing_preset = Some(RoutingPreset::Global);
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.settings.routing_preset,
+            Some(RoutingPreset::Global)
+        );
+        assert_eq!(
+            restored.custom_profile.unwrap().rules.len(),
+            default_rules().len()
+        );
+    }
+
+    #[test]
+    fn own_profile_survives_preset_switches() {
+        // A legacy config whose rules no longer match a preset: the own profile
+        // must be captured so the user can return to it.
+        let mut config = AppConfig::default();
+        config.rules.pop();
+        config.normalize();
+        assert_eq!(config.settings.routing_preset, Some(RoutingPreset::Custom));
+        let saved = config.custom_profile.clone().expect("own profile is kept");
+        assert_eq!(saved.rules.len(), default_rules().len() - 1);
+
+        // A built-in preset never overwrites the saved own profile.
+        config.settings.routing_preset = Some(RoutingPreset::Global);
+        config.rules = routing_preset("global").unwrap().0;
+        config.normalize();
+        assert_eq!(config.settings.routing_preset, Some(RoutingPreset::Global));
+        assert_eq!(
+            config.custom_profile.unwrap().rules.len(),
+            default_rules().len() - 1
+        );
+    }
+
+    #[test]
+    fn legacy_config_gets_preset_from_its_rules() {
+        let mut config = AppConfig::default();
+        config.rules.clear();
+        config.settings.final_action = RuleAction::Direct;
+        // What an old config.json looks like: no `routing_preset` field at all.
+        let json = serde_json::to_value(&config).unwrap();
+        let mut json = json;
+        json["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("routing_preset");
+        let mut restored: AppConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.settings.routing_preset, None);
+        restored.normalize();
+        assert_eq!(
+            restored.settings.routing_preset,
+            Some(RoutingPreset::Direct)
+        );
     }
 }

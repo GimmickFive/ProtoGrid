@@ -371,6 +371,8 @@ fn from_clash_proxy(map: &Mapping) -> Result<Option<Server>, String> {
                 .or_else(|| str_at(map, "remote_dns"))
                 .unwrap_or_default();
         }
+        // Clash has no OpenVPN proxy type; it never produces this protocol.
+        Protocol::OpenVpn => {}
     }
 
     if server.name.is_empty() {

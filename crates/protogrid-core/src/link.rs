@@ -131,6 +131,7 @@ pub fn parse_link(input: &str) -> Result<Server, String> {
         "hysteria2" | "hy2" | "hysteria" => parse_hysteria2(link),
         "tuic" => parse_tuic(link),
         "masque" => parse_masque(link),
+        "ovpn" | "openvpn" => parse_openvpn_link(link),
         "ssr" => Err("ShadowsocksR (ssr://) не поддерживается".into()),
         other => Err(format!("схема «{other}» не поддерживается")),
     }
@@ -542,6 +543,26 @@ fn parse_tuic(link: &str) -> Result<Server, String> {
     Ok(server)
 }
 
+fn parse_openvpn_link(link: &str) -> Result<Server, String> {
+    let body = link
+        .split_once("://")
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+    // `ovpn://<base64>#Name` — the fragment is not part of the payload.
+    let (payload, fragment) = match body.split_once('#') {
+        Some((payload, fragment)) => (payload, decode_uri_component(fragment).trim().to_string()),
+        None => (body, String::new()),
+    };
+    let decoded = b64_decode_string(payload.trim()).ok_or_else(|| {
+        "не удалось декодировать профиль OpenVPN из ссылки (ожидается base64)".to_string()
+    })?;
+    let mut server = crate::openvpn::import_profile(&decoded, None)?;
+    if !fragment.is_empty() {
+        server.name = fragment;
+    }
+    Ok(server)
+}
+
 /// Parse a text blob that contains one or more share links.
 pub fn parse_links(text: &str) -> ParseOutcome {
     let mut outcome = ParseOutcome::default();
@@ -569,7 +590,10 @@ pub fn parse_links(text: &str) -> ParseOutcome {
     let mut source = trimmed.to_string();
     if !trimmed.contains("://") {
         if let Some(decoded) = b64_decode_string(trimmed) {
-            if decoded.contains("://") || decoded.contains("proxies:") {
+            if decoded.contains("://")
+                || decoded.contains("proxies:")
+                || crate::openvpn::looks_like_profile(&decoded)
+            {
                 source = decoded;
             }
         }
@@ -578,6 +602,20 @@ pub fn parse_links(text: &str) -> ParseOutcome {
         return match crate::clash::parse_clash_yaml(&source) {
             Ok(servers) => ParseOutcome {
                 servers,
+                errors: Vec::new(),
+            },
+            Err(error) => ParseOutcome {
+                servers: Vec::new(),
+                errors: vec![error],
+            },
+        };
+    }
+
+    // A raw `.ovpn` profile is a single server, not a list of share links.
+    if crate::openvpn::looks_like_profile(&source) {
+        return match crate::openvpn::import_profile(&source, None) {
+            Ok(server) => ParseOutcome {
+                servers: vec![server],
                 errors: Vec::new(),
             },
             Err(error) => ParseOutcome {
@@ -786,6 +824,20 @@ mod tests {
         assert_eq!(server.host, "cdn.example.com");
         assert_eq!(server.path, "/masque");
         assert_eq!(server.pinned_peer_cert_sha256, "abcd");
+    }
+
+    #[test]
+    fn openvpn_link_ignores_fragment_and_uses_it_as_name() {
+        use base64::Engine;
+        let profile = "client\ndev tun\nproto udp\nremote vpn.example.com 1194\n";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(profile);
+        let server = parse_link(&format!("ovpn://{encoded}#%D0%9E%D1%84%D0%B8%D1%81")).unwrap();
+        assert_eq!(server.protocol, Protocol::OpenVpn);
+        assert_eq!(server.port, 1194);
+        assert_eq!(server.name, "Офис");
+
+        let server = parse_link(&format!("ovpn://{encoded}")).unwrap();
+        assert_eq!(server.name, "OpenVPN vpn.example.com");
     }
 
     #[test]
