@@ -8,3 +8,6 @@ dist
 
 # Local UI reference, not published.
 /docs/ref/
+
+# Local agent instructions, not published.
+.opencode/
