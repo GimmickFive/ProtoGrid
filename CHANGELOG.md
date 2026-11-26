@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-11-26
+
+Публичная бета: безопасность, экспорт и импорт настроек, обновлённый бренд.
+
 ### Добавлено
 
 - **Журнал**: у строк ядра появились метки `DIRECT`, `PROXY`, `BLOCK` и `TUN`
@@ -120,7 +124,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.2.0...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.2.1...dev
+[0.2.1]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.2.1
 [0.2.0]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.2.0
 [0.1.3]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.3
 [0.1.2]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.2
