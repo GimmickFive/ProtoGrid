@@ -17,7 +17,12 @@ object CoreBridge {
 
     /** Returns a ProtoGrid-core configuration or `{ "error": "..." }`. */
     @JvmStatic
-    external fun buildConfig(serversJson: String, activeId: String, routingJson: String): String
+    external fun buildConfig(
+        serversJson: String,
+        activeId: String,
+        routingJson: String,
+        apiSecret: String,
+    ): String
 
     /** Downloads/caches GeoIP/GeoSite `.srs` files; returns a JSON status. */
     @JvmStatic

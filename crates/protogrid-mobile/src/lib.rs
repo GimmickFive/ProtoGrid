@@ -138,6 +138,7 @@ fn build_config_json(
     servers_json: &str,
     active_id: &str,
     routing_json: &str,
+    clash_api_secret: &str,
 ) -> Result<String, String> {
     let servers: Vec<Server> =
         serde_json::from_str(servers_json).map_err(|error| format!("профили: {error}"))?;
@@ -159,6 +160,7 @@ fn build_config_json(
     let settings = Settings {
         final_action,
         routing_preset: Some(preset),
+        clash_api_secret: clash_api_secret.to_string(),
         ..android_settings()
     };
     let rule_set_dir = if routing.rule_set_dir.trim().is_empty() {
@@ -240,7 +242,7 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_parseLinks<'loc
     new_string(&mut env, result)
 }
 
-/// Kotlin: `CoreBridge.buildConfig(serversJson: String, activeId: String, routingJson: String): String`
+/// Kotlin: `CoreBridge.buildConfig(serversJson: String, activeId: String, routingJson: String, apiSecret: String): String`
 #[no_mangle]
 pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_buildConfig<'local>(
     mut env: JNIEnv<'local>,
@@ -248,6 +250,7 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_buildConfig<'lo
     servers_json: JString<'local>,
     active_id: JString<'local>,
     routing_json: JString<'local>,
+    api_secret: JString<'local>,
 ) -> jstring {
     let servers_json: String = match env.get_string(&servers_json) {
         Ok(value) => value.into(),
@@ -261,8 +264,12 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_buildConfig<'lo
         Ok(value) => value.into(),
         Err(error) => return new_string(&mut env, error_json(format!("JNI: {error}"))),
     };
+    let api_secret: String = match env.get_string(&api_secret) {
+        Ok(value) => value.into(),
+        Err(error) => return new_string(&mut env, error_json(format!("JNI: {error}"))),
+    };
     let result = catch_unwind(AssertUnwindSafe(|| {
-        build_config_json(&servers_json, &active_id, &routing_json)
+        build_config_json(&servers_json, &active_id, &routing_json, &api_secret)
     }))
     .unwrap_or_else(|_| Err("внутренняя ошибка сборки конфигурации".into()));
     new_string(
@@ -323,7 +330,8 @@ mod tests {
         let active = serde_json::from_str::<Vec<Server>>(&servers).unwrap()[0]
             .id
             .clone();
-        let config = build_config_json(&servers, &active, r#"{"preset":"global"}"#).unwrap();
+        let config =
+            build_config_json(&servers, &active, r#"{"preset":"global"}"#, "test-secret").unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
         let inbounds = config["inbounds"].as_array().unwrap();
         assert!(inbounds.iter().all(|inbound| inbound["tag"] != "mixed-in"));
@@ -334,6 +342,7 @@ mod tests {
         assert_eq!(tun["stack"], "gvisor");
         assert_eq!(tun["strict_route"], false);
         assert_eq!(config["route"]["auto_detect_interface"], true);
+        assert_eq!(config["experimental"]["clash_api"]["secret"], "test-secret");
     }
 
     #[test]
@@ -343,7 +352,7 @@ mod tests {
             .id
             .clone();
         let routing = r#"{"preset":"custom","final_action":"proxy","rules":[{"id":"r1","name":"RU","enabled":true,"action":"direct","kind":"domain_suffix","value":".ru"}]}"#;
-        let config = build_config_json(&servers, &active, routing).unwrap();
+        let config = build_config_json(&servers, &active, routing, "test-secret").unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
         let rules = config["route"]["rules"].as_array().unwrap();
         assert!(rules
@@ -371,7 +380,7 @@ mod tests {
             ]
         })
         .to_string();
-        let config = build_config_json(&servers, &active, &routing).unwrap();
+        let config = build_config_json(&servers, &active, &routing, "test-secret").unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
         let sets = config["route"]["rule_set"].as_array().unwrap();
         assert!(sets.iter().any(|set| {
@@ -422,7 +431,8 @@ mod tests {
         let active = serde_json::from_str::<Vec<Server>>(&servers).unwrap()[0]
             .id
             .clone();
-        let config = build_config_json(&servers, &active, r#"{"preset":"bypass"}"#).unwrap();
+        let config =
+            build_config_json(&servers, &active, r#"{"preset":"bypass"}"#, "test-secret").unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
         assert!(config["route"]["rule_set"].is_null());
         assert!(config["route"]["rules"]

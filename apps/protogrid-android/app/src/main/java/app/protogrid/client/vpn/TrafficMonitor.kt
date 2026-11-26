@@ -33,7 +33,7 @@ object TrafficMonitor {
 
     private var job: Job? = null
 
-    fun start(scope: CoroutineScope) {
+    fun start(scope: CoroutineScope, apiSecret: String) {
         stop()
         startedAt.value = System.currentTimeMillis()
         job = scope.launch(Dispatchers.IO) {
@@ -41,7 +41,7 @@ object TrafficMonitor {
             var previousUp = 0L
             var hasBaseline = false
             while (currentCoroutineContext().isActive) {
-                val snapshot = fetch()
+                val snapshot = fetch(apiSecret)
                 if (snapshot == null) {
                     available.value = false
                 } else {
@@ -86,12 +86,15 @@ object TrafficMonitor {
         available.value = false
     }
 
-    private fun fetch(): JSONObject? = try {
+    private fun fetch(apiSecret: String): JSONObject? = try {
         val connection = URL(CLASH_API).openConnection() as HttpURLConnection
         connection.connectTimeout = CONNECT_TIMEOUT_MS
         connection.readTimeout = READ_TIMEOUT_MS
         connection.requestMethod = "GET"
         connection.useCaches = false
+        if (apiSecret.isNotEmpty()) {
+            connection.setRequestProperty("Authorization", "Bearer $apiSecret")
+        }
         try {
             if (connection.responseCode == HttpURLConnection.HTTP_OK) {
                 val body = connection.inputStream.bufferedReader().use { it.readText() }

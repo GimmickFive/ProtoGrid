@@ -625,7 +625,7 @@ pub fn parse_links(text: &str) -> ParseOutcome {
         };
     }
 
-    for line in source.lines() {
+    for (index, line) in source.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
             continue;
@@ -633,8 +633,11 @@ pub fn parse_links(text: &str) -> ParseOutcome {
         match parse_link(line) {
             Ok(server) => outcome.servers.push(server),
             Err(error) => {
-                let preview: String = line.chars().take(80).collect();
-                outcome.errors.push(format!("{preview} — {error}"));
+                // Never echo the raw line: share links carry UUIDs, passwords
+                // and subscription tokens. The line number is enough to find it.
+                outcome
+                    .errors
+                    .push(format!("строка {} — {error}", index + 1));
             }
         }
     }
@@ -842,9 +845,12 @@ mod tests {
 
     #[test]
     fn parse_multiple_with_errors() {
-        let outcome = parse_links("vless://id@example.com:443#A\nssr://bad");
+        let outcome = parse_links("vless://id@example.com:443#A\nssr://secret-token");
         assert_eq!(outcome.servers.len(), 1);
         assert_eq!(outcome.errors.len(), 1);
+        // Errors go to config.json and the journal: never echo the raw link.
+        assert!(!outcome.errors[0].contains("secret-token"));
+        assert!(outcome.errors[0].contains("строка 2"));
     }
 
     #[test]

@@ -82,7 +82,7 @@ pub enum CoreKind {
     Singbox,
     #[serde(rename = "xray")]
     Xray,
-    /// The ProtoGrid sing-box fork: a separate core with its own binary,
+    /// ProtoGrid-core: a separate core based on sing-box with its own binary,
     /// path and capabilities (XHTTP, mKCP, XDRIVE, MASQUE).
     #[default]
     #[serde(rename = "protogrid")]
@@ -94,7 +94,7 @@ impl CoreKind {
         match self {
             CoreKind::Singbox => "sing-box",
             CoreKind::Xray => "Xray",
-            CoreKind::Protogrid => "ProtoGrid",
+            CoreKind::Protogrid => "ProtoGrid-core",
         }
     }
 
@@ -105,7 +105,7 @@ impl CoreKind {
         }
     }
 
-    /// The ProtoGrid fork speaks the sing-box config language. Everything that
+    /// ProtoGrid-core speaks the sing-box config language. Everything that
     /// is true for sing-box (ports, TUN, config generation) is true for it too.
     pub fn is_singbox_like(self) -> bool {
         matches!(self, CoreKind::Singbox | CoreKind::Protogrid)
@@ -114,22 +114,22 @@ impl CoreKind {
 
 /// Optional features exposed by a specific core build.
 ///
-/// Stock sing-box does not implement XHTTP; the ProtoGrid fork does. Keeping this
+/// Stock sing-box does not implement XHTTP; ProtoGrid-core does. Keeping this
 /// in a separate struct lets the config generator stay compatible with both.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CoreCapabilities {
     pub xhttp: bool,
     pub kcp: bool,
     pub xdrive: bool,
-    /// REALITY ML-DSA-65 server verification (Xray 26 / ProtoGrid fork).
+    /// REALITY ML-DSA-65 server verification (Xray 26 / ProtoGrid-core).
     /// Stock sing-box rejects the `mldsa65_verify` option.
     pub mldsa65: bool,
-    /// MASQUE outbound (Xray / ProtoGrid fork). Stock sing-box has no such protocol.
+    /// MASQUE outbound (Xray / ProtoGrid-core). Stock sing-box has no such protocol.
     pub masque: bool,
-    /// Xray-compatible UDP finalmask noise (ProtoGrid fork / Xray).
+    /// Xray-compatible UDP finalmask noise (ProtoGrid-core / Xray).
     pub noise: bool,
     /// OpenVPN client endpoint (`openvpn-client`). Requires sing-box 1.14+
-    /// built with `with_openvpn` or the ProtoGrid fork.
+    /// built with `with_openvpn` or ProtoGrid-core.
     pub openvpn: bool,
 }
 
@@ -492,33 +492,33 @@ impl Server {
         }
         if self.transport == Transport::Xhttp && core.is_singbox_like() && !capabilities.xhttp {
             return Err(
-                "транспорт XHTTP требует sing-box с поддержкой XHTTP (ProtoGrid fork)".into(),
+                "транспорт XHTTP требует sing-box с поддержкой XHTTP (ProtoGrid-core)".into(),
             );
         }
         if self.transport == Transport::Kcp && core.is_singbox_like() && !capabilities.kcp {
             return Err(
-                "транспорт mKCP требует sing-box с поддержкой mKCP (ProtoGrid fork)".into(),
+                "транспорт mKCP требует sing-box с поддержкой mKCP (ProtoGrid-core)".into(),
             );
         }
         if self.transport == Transport::XDrive && core.is_singbox_like() && !capabilities.xdrive {
             return Err(
-                "транспорт XDRIVE требует sing-box с поддержкой XDRIVE (ProtoGrid fork)".into(),
+                "транспорт XDRIVE требует sing-box с поддержкой XDRIVE (ProtoGrid-core)".into(),
             );
         }
         if self.protocol == Protocol::Masque && core.is_singbox_like() && !capabilities.masque {
             return Err(
-                "протокол MASQUE требует sing-box с поддержкой MASQUE (ProtoGrid fork) или Xray"
+                "протокол MASQUE требует sing-box с поддержкой MASQUE (ProtoGrid-core) или Xray"
                     .into(),
             );
         }
         if self.protocol == Protocol::OpenVpn && core.is_singbox_like() && !capabilities.openvpn {
             return Err(
-                "протокол OpenVPN требует sing-box 1.14+ с with_openvpn или форк ProtoGrid".into(),
+                "протокол OpenVPN требует sing-box 1.14+ с with_openvpn или ProtoGrid-core".into(),
             );
         }
         if self.noise_enabled && core.is_singbox_like() && !capabilities.noise {
             return Err(
-                "UDP noise требует sing-box с поддержкой finalmask (ProtoGrid fork) или Xray"
+                "UDP noise требует sing-box с поддержкой finalmask (ProtoGrid-core) или Xray"
                     .into(),
             );
         }
@@ -599,6 +599,11 @@ pub struct Settings {
     pub ipv6: bool,
     pub dns_remote: String,
     pub clash_api_port: u16,
+    /// Random per-run password for the local Clash API. Never serialized:
+    /// regenerated when the app starts, so other local processes cannot use
+    /// the API without knowing it.
+    #[serde(skip)]
+    pub clash_api_secret: String,
     pub log_level: String,
     pub test_url: String,
     pub final_action: RuleAction,
@@ -615,7 +620,7 @@ pub struct Settings {
     pub fake_dns: bool,
     pub singbox_path: String,
     pub xray_path: String,
-    /// Path to the ProtoGrid sing-box fork. Kept separate from `singbox_path`.
+    /// Path to ProtoGrid-core. Kept separate from `singbox_path`.
     pub protogrid_path: String,
 }
 
@@ -632,6 +637,7 @@ impl Default for Settings {
             ipv6: false,
             dns_remote: "https://1.1.1.1/dns-query".into(),
             clash_api_port: 9090,
+            clash_api_secret: String::new(),
             log_level: "info".into(),
             test_url: "https://www.gstatic.com/generate_204".into(),
             final_action: RuleAction::Proxy,
@@ -773,6 +779,56 @@ pub struct AppConfig {
     pub active_server_id: Option<String>,
 }
 
+/// Portable, credential-free settings snapshot used by "Экспорт настроек".
+///
+/// It intentionally holds no servers or subscriptions: those contain UUIDs,
+/// passwords and subscription tokens. Import replaces only the local
+/// preferences and routing profiles, never the user's saved servers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SettingsBackup {
+    pub version: u32,
+    pub settings: Settings,
+    pub rules: Vec<RoutingRule>,
+    pub custom_profile: Option<CustomProfile>,
+    pub custom_profiles: Vec<CustomProfile>,
+}
+
+impl Default for SettingsBackup {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            settings: Settings::default(),
+            rules: default_rules(),
+            custom_profile: None,
+            custom_profiles: Vec::new(),
+        }
+    }
+}
+
+impl SettingsBackup {
+    pub fn from_config(config: &AppConfig) -> Self {
+        Self {
+            version: 1,
+            settings: config.settings.clone(),
+            rules: config.rules.clone(),
+            custom_profile: config.custom_profile.clone(),
+            custom_profiles: config.custom_profiles.clone(),
+        }
+    }
+
+    pub fn apply_to(&self, config: &mut AppConfig) {
+        // The Clash API secret is per-run and must never come from a file.
+        let secret = std::mem::take(&mut config.settings.clash_api_secret);
+        config.settings = self.settings.clone();
+        config.settings.clash_api_secret = secret;
+        config.rules = self.rules.clone();
+        config.custom_profile = self.custom_profile.clone();
+        config.custom_profiles = self.custom_profiles.clone();
+        config.normalize();
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -860,6 +916,32 @@ impl AppConfig {
             Some(id) if self.servers.iter().any(|s| &s.id == id) => {}
             _ => self.active_server_id = self.servers.first().map(|s| s.id.clone()),
         }
+    }
+
+    /// Serialize the portable settings snapshot (no servers, no secrets).
+    pub fn export_settings_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(&SettingsBackup::from_config(self))
+            .map_err(|error| format!("не удалось сериализовать настройки: {error}"))
+    }
+
+    /// Parse a settings snapshot without applying it. The version check keeps
+    /// future/foreign files from silently replacing the profile.
+    pub fn parse_settings_backup(text: &str) -> Result<SettingsBackup, String> {
+        let backup: SettingsBackup = serde_json::from_str(text)
+            .map_err(|error| format!("это не файл настроек ProtoGrid: {error}"))?;
+        if backup.version != 1 {
+            return Err(format!(
+                "неподдерживаемая версия файла настроек: {}",
+                backup.version
+            ));
+        }
+        Ok(backup)
+    }
+
+    /// Replace settings and routing profiles. Servers and subscriptions stay
+    /// untouched, so importing a settings file cannot overwrite credentials.
+    pub fn apply_settings_backup(&mut self, backup: SettingsBackup) {
+        backup.apply_to(self);
     }
 
     pub fn server(&self, id: &str) -> Option<&Server> {
@@ -1338,6 +1420,47 @@ mod tests {
             config.settings.custom_profile_id.as_deref(),
             Some(profile.id.as_str())
         );
+    }
+
+    #[test]
+    fn settings_backup_omits_secrets_and_keeps_servers() {
+        let mut config = AppConfig::default();
+        config.settings.mixed_port = 3456;
+        config.settings.clash_api_secret = "per-run-secret".into();
+        config.servers.push(Server {
+            uuid: "credential-uuid".into(),
+            password: "credential-password".into(),
+            ..Default::default()
+        });
+
+        let json = config.export_settings_json().unwrap();
+        assert!(!json.contains("per-run-secret"));
+        assert!(!json.contains("credential-uuid"));
+        assert!(!json.contains("credential-password"));
+
+        let backup = AppConfig::parse_settings_backup(&json).unwrap();
+        let mut restored = AppConfig {
+            servers: config.servers.clone(),
+            settings: Settings {
+                clash_api_secret: "runtime-secret".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        restored.apply_settings_backup(backup);
+
+        assert_eq!(restored.settings.mixed_port, 3456);
+        assert_eq!(restored.settings.clash_api_secret, "runtime-secret");
+        assert_eq!(restored.servers.len(), 1);
+        assert_eq!(restored.servers[0].uuid, "credential-uuid");
+    }
+
+    #[test]
+    fn settings_backup_rejects_other_versions() {
+        let mut value = serde_json::to_value(SettingsBackup::default()).unwrap();
+        value["version"] = serde_json::json!(2);
+        let error = AppConfig::parse_settings_backup(&value.to_string()).unwrap_err();
+        assert!(error.contains('2'), "unexpected error: {error}");
     }
 
     #[test]

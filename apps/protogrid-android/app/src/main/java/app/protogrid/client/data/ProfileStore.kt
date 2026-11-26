@@ -23,8 +23,9 @@ data class ImportResult(
 
 class ProfileStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val secure = SecureStore(context)
 
-    fun serversJson(): String = prefs.getString(KEY_SERVERS, "[]") ?: "[]"
+    fun serversJson(): String = secure.read(KEY_SERVERS) ?: "[]"
 
     private fun storedServers(): JSONArray =
         runCatching { JSONArray(serversJson()) }.getOrDefault(JSONArray())
@@ -64,12 +65,13 @@ class ProfileStore(context: Context) {
                 remaining.put(item)
             }
         }
-        val editor = prefs.edit().putString(KEY_SERVERS, remaining.toString())
+        secure.write(KEY_SERVERS, remaining.toString())
         if (activeId() == id) {
             val next = remaining.optJSONObject(0)?.optString("id").orEmpty()
+            val editor = prefs.edit()
             if (next.isNotBlank()) editor.putString(KEY_ACTIVE, next) else editor.remove(KEY_ACTIVE)
+            editor.apply()
         }
-        editor.apply()
     }
 
     fun importText(text: String): ImportResult {
@@ -105,13 +107,12 @@ class ProfileStore(context: Context) {
         }
 
         if (added > 0) {
-            val editor = prefs.edit().putString(KEY_SERVERS, existing.toString())
+            secure.write(KEY_SERVERS, existing.toString())
             if (activeId() == null) {
                 existing.optJSONObject(0)?.optString("id")?.takeIf { it.isNotBlank() }?.let {
-                    editor.putString(KEY_ACTIVE, it)
+                    prefs.edit().putString(KEY_ACTIVE, it).apply()
                 }
             }
-            editor.apply()
         }
         return ImportResult(added, errors)
     }

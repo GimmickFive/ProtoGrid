@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui::{
+    text::{LayoutJob, TextFormat},
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Id, Layout, Margin, Modal,
     Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, Vec2,
 };
@@ -1572,21 +1573,29 @@ fn level_color(p: &Palette, level: &str) -> Color32 {
 /* Sidebar & topbar                                                           */
 /* -------------------------------------------------------------------------- */
 
-fn logo(ui: &mut Ui, p: &Palette, size: f32) {
+fn brand_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("protogrid-brand-icon");
+    if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return texture;
+    }
+    let texture = ctx.load_texture(
+        "protogrid-brand-icon",
+        crate::brand::color_image(),
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+    texture
+}
+
+fn logo(ui: &mut Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same((size * 0.3) as u8), p.accent);
-    let triangle = vec![
-        egui::pos2(rect.center().x - 1.0, rect.top() + size * 0.2),
-        egui::pos2(rect.center().x + size * 0.18, rect.center().y),
-        egui::pos2(rect.center().x - 1.0, rect.bottom() - size * 0.2),
-        egui::pos2(rect.center().x - size * 0.18, rect.center().y),
-    ];
-    ui.painter().add(egui::Shape::convex_polygon(
-        triangle,
+    let texture = brand_texture(ui.ctx());
+    ui.painter().image(
+        texture.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
         Color32::WHITE,
-        Stroke::NONE,
-    ));
+    );
 }
 
 fn nav_item(
@@ -1677,7 +1686,7 @@ fn nav_item(
 fn sidebar(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, collapsed: bool) {
     ui.set_width(ui.available_width());
     ui.horizontal(|ui| {
-        logo(ui, p, 30.0);
+        logo(ui, 30.0);
         if !collapsed {
             ui.add_space(2.0);
             ui.label(theme::bold("ProtoGrid", 19.0));
@@ -3637,7 +3646,7 @@ fn subscription_card(
                     );
                     ui.add(
                         egui::Label::new(
-                            RichText::new(&sub.url)
+                            RichText::new(protogrid_core::subscription::display_url(&sub.url))
                                 .size(10.5)
                                 .color(p.faint)
                                 .family(FontFamily::Monospace),
@@ -4914,10 +4923,9 @@ fn range_label(range: u64) -> &'static str {
 /* -------------------------------------------------------------------------- */
 
 fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
-    let mut logs = view
-        .frozen_logs
-        .clone()
-        .unwrap_or_else(|| snapshot.logs.clone());
+    // Shared, lazily materialized journal. Cloning this `Arc` per frame is
+    // free; the 2000-entry vector itself is only rebuilt after a new line.
+    let logs_owned = engine.logs();
     page_head(
         ui,
         p,
@@ -4969,7 +4977,9 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             )
             .clicked()
             {
-                let text = logs
+                let source: &[LogEntry] =
+                    view.frozen_logs.as_deref().unwrap_or(logs_owned.as_slice());
+                let text = source
                     .iter()
                     .map(|entry| {
                         format!(
@@ -5013,7 +5023,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             {
                 view.logs_paused = !view.logs_paused;
                 if view.logs_paused {
-                    view.frozen_logs = Some(snapshot.logs.clone());
+                    view.frozen_logs = Some(logs_owned.as_ref().clone());
                 } else {
                     view.frozen_logs = None;
                 }
@@ -5021,6 +5031,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
         },
     );
 
+    let logs: &[LogEntry] = view.frozen_logs.as_deref().unwrap_or(logs_owned.as_slice());
     let query = view.logs_filter.to_lowercase();
     let filtered: Vec<&LogEntry> = logs
         .iter()
@@ -5053,6 +5064,10 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
         .iter()
         .filter(|entry| entry.route == Some(LogRoute::Tun))
         .count();
+
+    // One measured character cell drives every journal column, so the header
+    // and all rows stay on the same monospace grid regardless of text length.
+    let grid = LogGrid::new(ui);
 
     Frame::new()
         .fill(p.panel)
@@ -5097,28 +5112,37 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                 .inner_margin(Margin::symmetric(0, 6))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ScrollArea::vertical()
+                    log_header(ui, p, &grid);
+                    let area = ScrollArea::vertical()
                         .id_salt("log-scroll")
                         .auto_shrink([false, false])
                         .stick_to_bottom(view.auto_scroll)
-                        .max_height((ui.available_height() - 70.0).max(300.0))
-                        .show(ui, |ui| {
+                        .max_height((ui.available_height() - 70.0).max(300.0));
+                    if filtered.is_empty() {
+                        area.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            if filtered.is_empty() {
-                                ui.add_space(28.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        RichText::new("Нет записей по текущему фильтру")
-                                            .size(12.5)
-                                            .color(p.faint),
-                                    );
-                                });
-                                ui.add_space(28.0);
-                            }
-                            for entry in &filtered {
-                                log_line(ui, p, entry);
+                            ui.add_space(28.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("Нет записей по текущему фильтру")
+                                        .size(12.5)
+                                        .color(p.faint),
+                                );
+                            });
+                            ui.add_space(28.0);
+                        });
+                    } else {
+                        // `log_line` is a fixed 20 px row. Lay out only the
+                        // visible ones: the journal holds up to 2000 entries,
+                        // and tessellating all of them allocated tens of
+                        // megabytes each time the page was opened.
+                        area.show_rows(ui, LOG_ROW_HEIGHT, filtered.len(), |ui, rows| {
+                            ui.set_min_width(ui.available_width());
+                            for index in rows {
+                                log_line(ui, p, filtered[index], &grid, index);
                             }
                         });
+                    }
                 });
             let (line, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
@@ -5168,7 +5192,6 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                     });
                 });
         });
-    logs.clear();
 }
 
 fn log_chip(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Response {
@@ -5191,9 +5214,107 @@ fn log_chip(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Respo
     response
 }
 
-fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry) {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+/// Fixed height of one journal row. `log_line` truncates the message, so rows
+/// never wrap and the list can be virtualized by `ScrollArea::show_rows`.
+const LOG_ROW_HEIGHT: f32 = 21.0;
+const LOG_HEADER_HEIGHT: f32 = 22.0;
+const LOG_H_PAD: f32 = 14.0;
+
+/// Horizontal grid shared by the journal header and every log row.
+///
+/// All columns are derived from one measured monospace cell, so metadata never
+/// drifts when a timestamp, level or source changes width.
+struct LogGrid {
+    char_w: f32,
+    gap: f32,
+}
+
+impl LogGrid {
+    fn new(ui: &Ui) -> Self {
+        let char_w = measure(ui, "0", FontId::monospace(11.0)).max(5.0);
+        Self {
+            char_w,
+            gap: (char_w * 1.5).max(10.0),
+        }
+    }
+
+    fn time_w(&self) -> f32 {
+        self.char_w * 8.0
+    }
+
+    fn level_w(&self) -> f32 {
+        self.char_w * 7.0
+    }
+
+    fn source_w(&self) -> f32 {
+        self.char_w * 7.0
+    }
+
+    fn route_w(&self) -> f32 {
+        self.char_w * 7.0
+    }
+}
+
+fn log_header(ui: &mut Ui, p: &Palette, grid: &LogGrid) {
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), LOG_HEADER_HEIGHT),
+        Sense::hover(),
+    );
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 0, p.panel_2);
+    painter.rect_filled(
+        Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 1.0),
+            egui::pos2(rect.right(), rect.bottom()),
+        ),
+        0,
+        p.line,
+    );
+
+    let x_time = rect.left() + LOG_H_PAD;
+    let x_level = x_time + grid.time_w() + grid.gap;
+    let x_source = x_level + grid.level_w() + grid.gap;
+    let x_route = x_source + grid.source_w() + grid.gap;
+    let x_message = x_route + grid.route_w() + grid.gap;
+    let font = FontId::new(9.0, FontFamily::Monospace);
+    let y = rect.center().y;
+    for (x, label) in [
+        (x_time, "ВРЕМЯ"),
+        (x_level, "УРОВЕНЬ"),
+        (x_source, "ИСТОЧНИК"),
+        (x_route, "МАРШРУТ"),
+        (x_message, "СООБЩЕНИЕ"),
+    ] {
+        painter.text(
+            egui::pos2(x, y),
+            Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            p.faint,
+        );
+    }
+}
+
+fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry, grid: &LogGrid, index: usize) {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), LOG_ROW_HEIGHT),
+        Sense::hover(),
+    );
+    let painter = ui.painter().clone();
+
+    // Faint zebra striping: enough to follow a line across the journal, not
+    // enough to compete with the route tint or the coloured tokens.
+    if index % 2 == 1 {
+        painter.rect_filled(
+            rect,
+            0,
+            if p.dark {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 4)
+            } else {
+                Color32::from_rgba_unmultiplied(15, 23, 42, 3)
+            },
+        );
+    }
     let tint = match entry.route {
         Some(LogRoute::Direct) => Some(p.amber_soft),
         Some(LogRoute::Block) => Some(p.red_soft),
@@ -5201,94 +5322,385 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry) {
         _ => None,
     };
     if let Some(color) = tint {
-        ui.painter().rect_filled(rect, 0, color);
+        painter.rect_filled(rect, 0, color);
     }
     if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, 0, Color32::from_rgba_unmultiplied(127, 127, 127, 12));
+        painter.rect_filled(rect, 0, Color32::from_rgba_unmultiplied(127, 127, 127, 12));
     }
-    let inner = Rect::from_min_max(
-        egui::pos2(rect.left() + 16.0, rect.top()),
-        egui::pos2(rect.right() - 16.0, rect.bottom()),
+
+    let x_time = rect.left() + LOG_H_PAD;
+    let x_level = x_time + grid.time_w() + grid.gap;
+    let x_source = x_level + grid.level_w() + grid.gap;
+    let x_route = x_source + grid.source_w() + grid.gap;
+    let x_message = x_route + grid.route_w() + grid.gap;
+    let y = rect.center().y;
+    let mono = FontId::monospace(10.5);
+
+    painter.text(
+        egui::pos2(x_time, y),
+        Align2::LEFT_CENTER,
+        hhmmss(entry.ts),
+        mono.clone(),
+        p.faint,
+    );
+
+    let level_rect = Rect::from_center_size(
+        egui::pos2(x_level + grid.level_w() * 0.5, y),
+        Vec2::new(grid.level_w() - 4.0, 16.0),
+    );
+    painter.rect_filled(
+        level_rect,
+        CornerRadius::same(4),
+        level_soft_color(p, &entry.level),
+    );
+    painter.text(
+        level_rect.center(),
+        Align2::CENTER_CENTER,
+        log_level_label(&entry.level),
+        FontId::new(9.0, FontFamily::Name("MonoMedium".into())),
+        level_color(p, &entry.level),
+    );
+
+    painter.text(
+        egui::pos2(x_source, y),
+        Align2::LEFT_CENTER,
+        &entry.source,
+        mono,
+        p.faint,
+    );
+
+    if let Some((tag, fg, bg)) = log_route_badge(p, entry.route) {
+        let route_rect = Rect::from_center_size(
+            egui::pos2(x_route + grid.route_w() * 0.5, y),
+            Vec2::new(grid.route_w() - 4.0, 16.0),
+        );
+        painter.rect_filled(route_rect, CornerRadius::same(4), bg);
+        painter.text(
+            route_rect.center(),
+            Align2::CENTER_CENTER,
+            tag,
+            FontId::new(9.0, FontFamily::Name("MonoMedium".into())),
+            fg,
+        );
+    }
+
+    let message_left =
+        x_message.min((rect.right() - LOG_H_PAD - 48.0).max(x_message - grid.char_w * 4.0));
+    let message = Rect::from_min_max(
+        egui::pos2(message_left, rect.top() + 1.0),
+        egui::pos2(rect.right() - LOG_H_PAD, rect.bottom() - 1.0),
     );
     let mut child = ui.new_child(
         UiBuilder::new()
-            .max_rect(inner)
+            .max_rect(message)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    child.spacing_mut().item_spacing.x = 12.0;
-    child.label(
-        RichText::new(hhmmss(entry.ts))
-            .size(10.5)
-            .color(p.faint)
-            .family(FontFamily::Monospace),
-    );
-    child.allocate_ui_with_layout(
-        Vec2::new(42.0, 20.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(42.0);
-            ui.label(
-                RichText::new(entry.level.to_uppercase())
-                    .size(9.0)
-                    .color(level_color(p, &entry.level))
-                    .family(FontFamily::Name("Medium".into())),
-            );
-        },
-    );
-    child.allocate_ui_with_layout(
-        Vec2::new(52.0, 20.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(52.0);
-            ui.label(
-                RichText::new(&entry.source)
-                    .size(10.5)
-                    .color(p.faint)
-                    .family(FontFamily::Monospace),
-            );
-        },
-    );
-    child.allocate_ui_with_layout(
-        Vec2::new(54.0, 20.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(54.0);
-            if let Some((tag, color)) = log_route_badge(p, entry.route) {
-                ui.label(
-                    RichText::new(tag)
-                        .size(9.0)
-                        .color(color)
-                        .family(FontFamily::Name("Medium".into())),
-                );
-            }
-        },
-    );
     child.add(
-        egui::Label::new(
-            RichText::new(&entry.line)
-                .size(11.5)
-                .color(if entry.level == "error" {
-                    p.red
-                } else if entry.level == "warn" || entry.level == "warning" {
-                    p.amber
-                } else {
-                    p.muted
-                })
-                .family(FontFamily::Monospace),
-        )
-        .truncate()
-        .selectable(false),
+        egui::Label::new(log_message_job(p, entry))
+            .truncate()
+            .selectable(false),
     );
 }
 
-fn log_route_badge(p: &Palette, route: Option<LogRoute>) -> Option<(&'static str, Color32)> {
-    match route? {
-        LogRoute::Direct => Some(("DIRECT", p.amber)),
-        LogRoute::Proxy => Some(("PROXY", p.green)),
-        LogRoute::Block => Some(("BLOCK", p.red)),
-        LogRoute::Tun => Some(("TUN", p.cyan)),
+fn log_level_label(level: &str) -> &'static str {
+    match level {
+        "error" => "ERROR",
+        "warn" | "warning" => "WARN",
+        "debug" => "DEBUG",
+        "trace" => "TRACE",
+        _ => "INFO",
     }
+}
+
+fn level_soft_color(p: &Palette, level: &str) -> Color32 {
+    match level {
+        "error" => p.red_soft,
+        "warn" | "warning" => p.amber_soft,
+        "debug" | "trace" => p.panel_3,
+        _ => p.accent_soft,
+    }
+}
+
+/// The route chip uses the same accent colours as the routing pages.
+fn log_route_badge(
+    p: &Palette,
+    route: Option<LogRoute>,
+) -> Option<(&'static str, Color32, Color32)> {
+    match route? {
+        LogRoute::Direct => Some(("DIRECT", p.amber, p.amber_soft)),
+        LogRoute::Proxy => Some(("PROXY", p.green, p.green_soft)),
+        LogRoute::Block => Some(("BLOCK", p.red, p.red_soft)),
+        LogRoute::Tun => Some(("TUN", p.cyan, p.cyan_soft)),
+    }
+}
+
+/// Builds the message line with lightweight syntax highlighting: addresses,
+/// ports and numbers in cyan, keys in blue, status verbs in green/amber/red,
+/// bracketed core tags in violet and profile names in green. The base text
+/// stays muted so the coloured tokens are what the eye catches first.
+fn log_message_job(p: &Palette, entry: &LogEntry) -> LayoutJob {
+    let base = if entry.level == "error" {
+        p.red
+    } else if entry.level == "warn" || entry.level == "warning" {
+        p.amber
+    } else {
+        p.muted
+    };
+    let font = FontId::monospace(11.5);
+    let mut job = LayoutJob::default();
+    let line = entry.line.as_str();
+    let mut pos = 0;
+
+    while pos < line.len() {
+        let rest = &line[pos..];
+        let ch = rest.chars().next().unwrap_or(' ');
+
+        if ch.is_whitespace() {
+            let end = rest
+                .find(|c: char| !c.is_whitespace())
+                .map(|offset| pos + offset)
+                .unwrap_or(line.len());
+            append_log_span(&mut job, &line[pos..end], &font, base, Color32::TRANSPARENT);
+            pos = end;
+            continue;
+        }
+
+        // Core tags such as `[mixed-in]` or `[1082773346_0ms]`.
+        if ch == '[' {
+            if let Some(offset) = rest.find(']') {
+                let end = pos + offset + 1;
+                append_log_span(&mut job, &line[pos..end], &font, p.violet, p.violet_soft);
+                pos = end;
+                continue;
+            }
+        }
+
+        // Quoted values (config paths, error detail) get a green chip.
+        if ch == '"' {
+            if let Some(offset) = rest[1..].find('"') {
+                let end = pos + 1 + offset + 1;
+                append_log_span(&mut job, &line[pos..end], &font, p.green, p.green_soft);
+                pos = end;
+                continue;
+            }
+        }
+
+        let skip = ch.len_utf8();
+        let tail = &rest[skip..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == '[' || c == '"')
+            .map(|offset| pos + skip + offset)
+            .unwrap_or(line.len());
+        let token = &line[pos..end];
+        let (color, background) = log_token_style(p, token, base);
+        append_log_span(&mut job, token, &font, color, background);
+        pos = end;
+    }
+
+    job
+}
+
+fn append_log_span(
+    job: &mut LayoutJob,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+    background: Color32,
+) {
+    if text.is_empty() {
+        return;
+    }
+    job.append(
+        text,
+        0.0,
+        TextFormat {
+            font_id: font.clone(),
+            color,
+            background,
+            ..Default::default()
+        },
+    );
+}
+
+fn log_token_style(p: &Palette, token: &str, base: Color32) -> (Color32, Color32) {
+    let cleaned = token
+        .trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | '!' | '?' | '·' | '"' | '\''));
+    if cleaned.is_empty() {
+        return (base, Color32::TRANSPARENT);
+    }
+
+    if let Some((_, rest)) = cleaned.split_once("://") {
+        if !rest.is_empty() {
+            return (p.accent_2, Color32::TRANSPARENT);
+        }
+    }
+
+    // `127.0.0.1:2280` — address plus port.
+    if let Some((host, port)) = cleaned.rsplit_once(':') {
+        if is_ipv4(host) && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return (p.cyan, Color32::TRANSPARENT);
+        }
+    }
+
+    if is_ipv4(cleaned) || is_mac(cleaned) || is_ipv6(cleaned) {
+        return (p.cyan, Color32::TRANSPARENT);
+    }
+
+    let word = cleaned.trim_matches(':').to_lowercase();
+    if let Some(color) = log_keyword_color(p, &word) {
+        return (color, Color32::TRANSPARENT);
+    }
+
+    // `network:` / `gateway_mac:` field names.
+    if cleaned.ends_with(':') && word.chars().any(|c| c.is_alphanumeric()) {
+        return (p.accent_2, Color32::TRANSPARENT);
+    }
+
+    if is_number_like(cleaned) {
+        return (p.cyan, Color32::TRANSPARENT);
+    }
+    if looks_like_path(cleaned) {
+        return (p.amber, Color32::TRANSPARENT);
+    }
+    if looks_like_domain(cleaned) {
+        return (p.accent_2, Color32::TRANSPARENT);
+    }
+    // Protocol/profile identifiers such as `vless-Nip4Fun-PC|...`.
+    if cleaned.contains('|') {
+        return (p.green, Color32::TRANSPARENT);
+    }
+
+    (base, Color32::TRANSPARENT)
+}
+
+fn log_keyword_color(p: &Palette, word: &str) -> Option<Color32> {
+    match word {
+        "error"
+        | "err"
+        | "failed"
+        | "fail"
+        | "failure"
+        | "blocked"
+        | "block"
+        | "timeout"
+        | "ошибка"
+        | "ошибки"
+        | "недоступен"
+        | "недоступно" => Some(p.red),
+        "warn" | "warning" | "retry" | "предупреждение" | "найден" | "найдено" => {
+            Some(p.amber)
+        }
+        "started"
+        | "start"
+        | "listening"
+        | "connected"
+        | "ready"
+        | "ok"
+        | "success"
+        | "подключено"
+        | "запущен"
+        | "запущено"
+        | "готово"
+        | "включено"
+        | "успешно" => Some(p.green),
+        "updated" | "update" | "loaded" | "запуск" | "обновлено" | "загружено" | "конфиг" => {
+            Some(p.accent_2)
+        }
+        "direct" | "напрямую" => Some(p.amber),
+        "proxy" | "прокси" => Some(p.green),
+        "tun" => Some(p.cyan),
+        "sing-box" | "xray" | "clash" => Some(p.violet),
+        _ if word.starts_with("protogrid") => Some(p.accent_2),
+        _ if word.starts_with("vless")
+            || word.starts_with("vmess")
+            || word.starts_with("trojan")
+            || word.starts_with("shadowsocks") =>
+        {
+            Some(p.green)
+        }
+        _ => None,
+    }
+}
+
+fn is_ipv4(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.parse::<u8>().is_ok())
+}
+
+fn is_mac(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(':').collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn is_ipv6(text: &str) -> bool {
+    text.contains(':')
+        && text.matches(':').count() >= 2
+        && text.chars().all(|c| c.is_ascii_hexdigit() || c == ':')
+}
+
+fn is_number_like(text: &str) -> bool {
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    text.chars().all(|c| {
+        c.is_ascii_digit()
+            || c.is_ascii_alphabetic()
+            || matches!(c, '.' | ',' | '_' | '-' | '/' | '%' | '+' | '~' | ':')
+    })
+}
+
+fn looks_like_path(text: &str) -> bool {
+    if text.starts_with('/')
+        || text.starts_with('\\')
+        || text.starts_with("~/")
+        || text.starts_with("./")
+    {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    if text.contains('\\') {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    [
+        ".exe", ".dll", ".json", ".yaml", ".yml", ".toml", ".log", ".conf", ".db", ".txt",
+    ]
+    .iter()
+    .any(|extension| lower.ends_with(extension))
+}
+
+fn looks_like_domain(text: &str) -> bool {
+    if text.contains(':') || text.contains('|') || text.contains('@') {
+        return false;
+    }
+    let Some((name, tld)) = text.rsplit_once('.') else {
+        return false;
+    };
+    if name.is_empty() || name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    tld.len() >= 2
+        && tld.len() <= 24
+        && tld.chars().all(|c| c.is_ascii_alphabetic())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -5406,6 +5818,8 @@ fn settings_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
     });
     ui.add_space(14.0);
     settings_dns(ui, p, view, snapshot, &mut draft);
+    ui.add_space(14.0);
+    settings_backup(ui, p, view, engine);
     ui.add_space(14.0);
     settings_about(ui, p, snapshot, engine);
 
@@ -5667,6 +6081,16 @@ fn settings_connection(
                     switch(ui, p, &mut draft.allow_lan);
                 },
             );
+            if draft.allow_lan {
+                ui.label(
+                    RichText::new(
+                        "Прокси будет доступен всем устройствам в сети без пароля. \
+                         Включайте только в доверенной локальной сети.",
+                    )
+                    .size(10.0)
+                    .color(p.amber),
+                );
+            }
             set_row(
                 ui,
                 p,
@@ -6031,7 +6455,7 @@ fn core_option(
                 ui.vertical(|ui| {
                     ui.label(theme::medium(
                         match kind {
-                            CoreKind::Protogrid => "ProtoGrid",
+                            CoreKind::Protogrid => "ProtoGrid-core",
                             CoreKind::Singbox => "sing-box",
                             CoreKind::Xray => "Xray-core",
                         },
@@ -6087,6 +6511,73 @@ fn core_option(
             draft.tun_enabled = false;
         }
     }
+}
+
+fn settings_backup(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
+    settings_card(
+        ui,
+        p,
+        "Экспорт и импорт",
+        "Перенос настроек и профилей маршрутизации между устройствами",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if action_button(
+                            ui,
+                            p,
+                            egui_phosphor::regular::FLOPPY_DISK,
+                            "Экспорт настроек",
+                            BtnKind::Outline,
+                        )
+                        .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Экспорт настроек ProtoGrid")
+                                .set_file_name("protogrid-settings.json")
+                                .add_filter("JSON", &["json"])
+                                .save_file()
+                            {
+                                engine.export_settings_to(&path);
+                            }
+                        }
+                        if action_button(
+                            ui,
+                            p,
+                            egui_phosphor::regular::ARROWS_DOWN_UP,
+                            "Импорт настроек",
+                            BtnKind::Ghost,
+                        )
+                        .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Импорт настроек ProtoGrid")
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                if engine.import_settings_from(&path) {
+                                    // Re-read from the next snapshot instead of
+                                    // keeping the pre-import draft on screen.
+                                    view.settings_draft = None;
+                                    view.settings_dirty = false;
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Файл содержит только настройки, правила и профили маршрутизации. \
+                             Серверы, UUID, пароли и подписки в него не попадают.",
+                        )
+                        .size(10.5)
+                        .color(p.faint),
+                    );
+                });
+        },
+    );
 }
 
 fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
@@ -6430,8 +6921,8 @@ fn info_cores_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
                         0 => info_core_tile(
                             ui,
                             p,
-                            "ProtoGrid",
-                            "Форк sing-box · всё в одном",
+                            "ProtoGrid-core",
+                            "ProtoGrid-core · всё в одном",
                             egui_phosphor::regular::ROCKET,
                             p.accent,
                             "Рекомендуется",
@@ -6623,7 +7114,7 @@ fn info_why_cores(ui: &mut Ui, p: &Palette) {
                     ui.set_min_width(ui.available_width());
                     ui.label(
                         RichText::new(
-                            "Форк ProtoGrid = sing-box + недостающие Xray-транспорты. \
+                            "ProtoGrid-core = sing-box + недостающие Xray-транспорты. \
                              Одно ядро, которое понимает почти все серверы.",
                         )
                         .size(10.5)
@@ -7160,7 +7651,7 @@ fn info_os_tile(ui: &mut Ui, p: &Palette, icon: &str, title: &str, text: &str, c
 
 fn info_choice_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
     let selected = match snapshot.config.settings.core {
-        CoreKind::Protogrid => "ProtoGrid",
+        CoreKind::Protogrid => "ProtoGrid-core",
         CoreKind::Singbox => "sing-box",
         CoreKind::Xray => "Xray-core",
     };
@@ -7576,14 +8067,18 @@ fn subscription_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine
         p,
         "Ссылка на подписку",
         TextEdit::singleline(&mut view.subscription_url)
+            .password(true)
             .hint_text("https://example.com/sub?token=...")
             .desired_width(f32::INFINITY),
     );
     ui.add_space(4.0);
     ui.label(
-        RichText::new("Ссылка должна начинаться с http:// или https://.")
-            .size(9.5)
-            .color(p.faint),
+        RichText::new(
+            "Поддерживается только https:// — токен подписки не должен \
+             передаваться открытым текстом.",
+        )
+        .size(9.5)
+        .color(p.faint),
     );
     ui.add_space(14.0);
     ui.horizontal(|ui| {
@@ -7846,7 +8341,7 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             } else if protocol == Protocol::Masque && !features.masque {
                 "MASQUE доступен только в ядре ProtoGrid"
             } else if protocol == Protocol::OpenVpn && !features.openvpn {
-                "OpenVPN доступен в sing-box 1.14+ с with_openvpn (форк ProtoGrid)"
+                "OpenVPN доступен в sing-box 1.14+ с with_openvpn (ProtoGrid-core)"
             } else {
                 "Протокол не поддерживается выбранным ядром"
             };
@@ -7916,7 +8411,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "UUID",
-                    TextEdit::singleline(&mut server.uuid).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.uuid)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Trojan | Protocol::Hysteria2 => {
@@ -7924,7 +8421,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "Пароль",
-                    TextEdit::singleline(&mut server.password).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Shadowsocks => {
@@ -7932,7 +8431,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "Пароль",
-                    TextEdit::singleline(&mut server.password).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Tuic => {
@@ -7940,7 +8441,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "UUID",
-                    TextEdit::singleline(&mut server.uuid).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.uuid)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Masque => {}
@@ -7952,7 +8455,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             ui,
             p,
             "Пароль",
-            TextEdit::singleline(&mut server.password).desired_width(f32::INFINITY),
+            TextEdit::singleline(&mut server.password)
+                .password(true)
+                .desired_width(f32::INFINITY),
         );
     }
     if server.protocol == Protocol::Shadowsocks {
@@ -8211,6 +8716,16 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             &mut server.allow_insecure,
             "Разрешить недействительный сертификат",
         );
+        if server.allow_insecure {
+            ui.label(
+                RichText::new(
+                    "Проверка TLS-сертификата отключена: соединение можно перехватить. \
+                     Оставьте выключенным, если сервер не использует самоподписанный сертификат.",
+                )
+                .size(9.5)
+                .color(p.amber),
+            );
+        }
         if server.security == Security::Reality {
             ui.columns(3, |columns| {
                 field(
@@ -8405,7 +8920,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                 ui,
                 p,
                 "Secrets (через запятую)",
-                TextEdit::singleline(&mut server.xdrive_secrets).desired_width(f32::INFINITY),
+                TextEdit::singleline(&mut server.xdrive_secrets)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
             );
             if server.xdrive_service == "s3" {
                 ui.columns(2, |columns| {
@@ -8577,7 +9094,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "Пароль obfs",
-                    TextEdit::singleline(&mut server.obfs_password).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.obfs_password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             });
         }
@@ -8842,6 +9361,9 @@ pub fn toasts(ctx: &egui::Context, p: &Palette, view: &mut View) {
 pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
     let p = Palette::from_ctx(ui.ctx());
     view.tick(snapshot);
+    if view.page != Page::Logs {
+        engine.release_logs();
+    }
 
     let width = ui.ctx().input(|input| input.viewport_rect().width());
     let collapsed = width < 1040.0;

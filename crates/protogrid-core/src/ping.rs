@@ -52,6 +52,7 @@ pub async fn http_proxy_test(http_port: u16, url: &str, timeout_ms: u64) -> Resu
 /// the server id because `singbox::build_config` uses ids as tags.
 pub async fn clash_delay(
     api_port: u16,
+    secret: &str,
     tag: &str,
     url: &str,
     timeout_ms: u64,
@@ -62,12 +63,13 @@ pub async fn clash_delay(
         .build()
         .map_err(|e| format!("клиент: {e}"))?;
     let endpoint = format!("http://127.0.0.1:{api_port}/proxies/{tag}/delay");
-    let response = client
+    let mut request = client
         .get(endpoint)
-        .query(&[("url", url), ("timeout", &timeout_ms.to_string())])
-        .send()
-        .await
-        .map_err(|e| format!("{e}"))?;
+        .query(&[("url", url), ("timeout", &timeout_ms.to_string())]);
+    if !secret.is_empty() {
+        request = request.bearer_auth(secret);
+    }
+    let response = request.send().await.map_err(|e| format!("{e}"))?;
     let status = response.status();
     let value: serde_json::Value = response
         .json()

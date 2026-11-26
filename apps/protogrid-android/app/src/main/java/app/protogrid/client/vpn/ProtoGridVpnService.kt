@@ -54,6 +54,7 @@ import org.json.JSONObject
 import java.net.Inet6Address
 import java.net.InterfaceAddress
 import java.net.NetworkInterface as JavaNetworkInterface
+import java.util.UUID
 
 class ProtoGridVpnService :
     VpnService(),
@@ -68,6 +69,7 @@ class ProtoGridVpnService :
 
     private var commandServer: CommandServer? = null
     private var tunFd: ParcelFileDescriptor? = null
+    private var clashApiSecret: String = ""
 
     override fun onCreate() {
         super.onCreate()
@@ -137,10 +139,12 @@ class ProtoGridVpnService :
                     RULE_SET_MAX_AGE_SECONDS,
                 )
             }.onFailure { Log.w(TAG, "GeoIP/GeoSite cache prepare failed", it) }
+            clashApiSecret = UUID.randomUUID().toString().replace("-", "")
             val config = CoreBridge.buildConfig(
                 store.serversJson(),
                 activeId,
                 settings.routingJson(),
+                clashApiSecret,
             )
             val error = JSONObject(config).optString("error")
             if (error.isNotBlank()) {
@@ -152,7 +156,7 @@ class ProtoGridVpnService :
             server.startOrReloadService(config, perAppOptions(settings))
 
             VpnState.update(VpnStatus.Connected)
-            TrafficMonitor.start(scope)
+            TrafficMonitor.start(scope, clashApiSecret)
             updateNotification(getString(R.string.notification_connected))
         } catch (error: Throwable) {
             fail(error.message ?: error.toString())

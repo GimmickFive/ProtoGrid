@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use protogrid_core::link::{display_error_list, parse_links};
 use protogrid_core::model::{
@@ -19,6 +22,127 @@ use crate::autostart;
 use crate::installer::{self, CoreInfo};
 
 pub const MAX_LOG_LINES: usize = 2000;
+
+/// Make the profile directory private. On Unix the default umask often leaves
+/// it at 0755, which lets other local users walk into config.json and logs.
+fn harden_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+fn harden_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    harden_dir(path);
+    Ok(())
+}
+
+/// Open a file with 0600 from the moment it is created. `std::fs::write`
+/// creates 0666 (minus umask), which is how proxy credentials ended up
+/// world-readable.
+fn open_private_file(path: &Path, append: bool) -> io::Result<std::fs::File> {
+    if path.exists() {
+        // An older build may have created the file with 0644.
+        harden_file(path);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true);
+    if append {
+        options.append(true);
+    } else {
+        options.write(true).truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = open_private_file(path, false)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    harden_file(path);
+    Ok(())
+}
+
+const RUNTIME_CONFIGS: [&str; 3] = ["singbox.json", "xray.json", "protogrid.json"];
+
+/// Generated runtime configs duplicate every credential. Keep only the file
+/// for the core that is about to start; remove the rest (after disconnect or
+/// crash) so deleted servers do not linger on disk.
+fn clear_runtime_configs(runtime_dir: &Path, keep: Option<&str>) {
+    for name in RUNTIME_CONFIGS {
+        if Some(name) == keep {
+            continue;
+        }
+        let _ = std::fs::remove_file(runtime_dir.join(name));
+    }
+}
+
+fn harden_existing_logs(log_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            harden_file(&entry.path());
+        }
+    }
+}
+
+fn new_clash_secret() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(test)]
+mod permissions_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_and_dirs_get_restrictive_modes() {
+        let dir = std::env::temp_dir().join(format!("protogrid-perm-{}", new_clash_secret()));
+        ensure_private_dir(&dir).unwrap();
+        let file = dir.join("config.json");
+        write_private_file(&file, b"{\"password\":\"secret\"}").unwrap();
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_cleanup_keeps_only_target() {
+        let dir = std::env::temp_dir().join(format!("protogrid-runtime-{}", new_clash_secret()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in RUNTIME_CONFIGS {
+            std::fs::write(dir.join(name), b"{}").unwrap();
+        }
+        clear_runtime_configs(&dir, Some("protogrid.json"));
+        assert!(dir.join("protogrid.json").exists());
+        assert!(!dir.join("singbox.json").exists());
+        assert!(!dir.join("xray.json").exists());
+        clear_runtime_configs(&dir, None);
+        assert!(!dir.join("protogrid.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnStatus {
@@ -73,6 +197,57 @@ pub enum LogRoute {
     Tun,
 }
 
+/// Bounded journal with a lazily materialized, shared view for the UI.
+///
+/// The Logs page used to receive a deep copy of all 2000 entries on every
+/// frame, and every new core line forced a full `Snapshot` clone. Keeping the
+/// cache here makes both operations O(1) while the journal is unchanged.
+#[derive(Default)]
+struct Journal {
+    entries: VecDeque<LogEntry>,
+    cache: Option<Arc<Vec<LogEntry>>>,
+}
+
+impl Journal {
+    fn push(&mut self, entry: LogEntry) {
+        self.entries.push_back(entry);
+        while self.entries.len() > MAX_LOG_LINES {
+            self.entries.pop_front();
+        }
+        self.cache = None;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.cache = None;
+    }
+
+    fn iter(&self) -> std::collections::vec_deque::Iter<'_, LogEntry> {
+        self.entries.iter()
+    }
+
+    fn entries(&self) -> &VecDeque<LogEntry> {
+        &self.entries
+    }
+
+    /// Release the materialized copy when the journal page is not visible.
+    fn release(&mut self) {
+        self.cache = None;
+    }
+
+    /// Shared view for rendering. `Arc::clone` is free while the journal is
+    /// unchanged; the vector is rebuilt once after the next line arrives.
+    fn shared(&mut self) -> Arc<Vec<LogEntry>> {
+        if self.cache.is_none() {
+            self.cache = Some(Arc::new(self.entries.iter().cloned().collect()));
+        }
+        self.cache
+            .as_ref()
+            .expect("journal cache was just populated")
+            .clone()
+    }
+}
+
 fn detect_log_route(line: &str) -> Option<LogRoute> {
     if let Some((_, rest)) = line.split_once("outbound/") {
         let proto = rest
@@ -123,7 +298,7 @@ pub struct Inner {
     pub status: ConnStatus,
     pub error: Option<String>,
     pub warning: Option<String>,
-    pub logs: VecDeque<LogEntry>,
+    logs: Journal,
     pub pings: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
     /// Server ids with a country lookup in flight, so add + refresh + bootstrap
@@ -163,7 +338,7 @@ impl Inner {
                 .map_err(|error| format!("не удалось создать папку настроек: {error}"))?;
         }
         let tmp = self.config_path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
+        write_private_file(&tmp, json.as_bytes())
             .map_err(|error| format!("не удалось записать настройки: {error}"))?;
         #[cfg(windows)]
         {
@@ -173,6 +348,7 @@ impl Inner {
         }
         std::fs::rename(&tmp, &self.config_path)
             .map_err(|error| format!("не удалось сохранить настройки: {error}"))?;
+        harden_file(&self.config_path);
         Ok(())
     }
 
@@ -182,7 +358,6 @@ impl Inner {
             status: self.status,
             error: self.error.clone(),
             warning: self.warning.clone(),
-            logs: self.logs.iter().cloned().collect(),
             pings: self.pings.clone(),
             loading_pings: self.loading_pings.clone(),
             busy: self.busy.clone(),
@@ -206,7 +381,6 @@ pub struct Snapshot {
     pub status: ConnStatus,
     pub error: Option<String>,
     pub warning: Option<String>,
-    pub logs: Vec<LogEntry>,
     pub pings: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
     pub busy: HashSet<String>,
@@ -395,8 +569,10 @@ fn detect_elevation() -> bool {
 pub fn init_profile() -> Result<PathBuf, String> {
     let data_root = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     let data_dir = profile_data_dir(&data_root);
+    ensure_private_dir(&data_dir)
+        .map_err(|error| format!("не удалось создать {}: {error}", data_dir.display()))?;
     for sub in ["runtime", "cores", "rulesets", "logs"] {
-        std::fs::create_dir_all(data_dir.join(sub))
+        ensure_private_dir(&data_dir.join(sub))
             .map_err(|error| format!("не удалось создать {}: {error}", data_dir.display()))?;
     }
     let config_path = data_dir.join("config.json");
@@ -405,8 +581,10 @@ pub fn init_profile() -> Result<PathBuf, String> {
         config.normalize();
         let text = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("не удалось создать конфиг: {error}"))?;
-        std::fs::write(&config_path, text)
+        write_private_file(&config_path, text.as_bytes())
             .map_err(|error| format!("не удалось записать {}: {error}", config_path.display()))?;
+    } else {
+        harden_file(&config_path);
     }
     Ok(data_dir)
 }
@@ -447,13 +625,20 @@ impl Engine {
         if !is_portable() {
             migrate_legacy_profile(&data_root, &data_dir);
         }
-        let _ = std::fs::create_dir_all(data_dir.join("runtime"));
-        let _ = std::fs::create_dir_all(data_dir.join("cores"));
-        let _ = std::fs::create_dir_all(data_dir.join("rulesets"));
-        let _ = std::fs::create_dir_all(data_dir.join("logs"));
+        let _ = ensure_private_dir(&data_dir);
+        for sub in ["runtime", "cores", "rulesets", "logs"] {
+            let _ = ensure_private_dir(&data_dir.join(sub));
+        }
+        let runtime_dir = data_dir.join("runtime");
+        // A previous run may have crashed before removing them.
+        clear_runtime_configs(&runtime_dir, None);
         let log_dir = data_dir.join("logs");
         cleanup_logs(&log_dir, 14);
+        harden_existing_logs(&log_dir);
         let config_path = data_dir.join("config.json");
+        if config_path.exists() {
+            harden_file(&config_path);
+        }
 
         let mut config = if config_path.exists() {
             std::fs::read_to_string(&config_path)
@@ -468,6 +653,8 @@ impl Engine {
         if config.settings.tun_enabled && !is_elevated() {
             config.settings.tun_enabled = false;
         }
+        // The Clash API password is ephemeral: config.json never stores it.
+        config.settings.clash_api_secret = new_clash_secret();
         config.normalize();
 
         let inner = Arc::new(Mutex::new(Inner {
@@ -475,7 +662,7 @@ impl Engine {
             status: ConnStatus::Disconnected,
             error: None,
             warning: None,
-            logs: VecDeque::new(),
+            logs: Journal::default(),
             pings: HashMap::new(),
             loading_pings: HashSet::new(),
             country_lookups: HashSet::new(),
@@ -530,6 +717,19 @@ impl Engine {
         }
         *last_revision = guard.revision;
         Some(guard.snapshot())
+    }
+
+    /// Journal for the Logs page, shared by reference so scrolling and
+    /// repainting re-use one allocation. The vector is materialized only when
+    /// the journal changed, and is dropped as soon as a new line invalidates
+    /// it, so it never adds steady-state memory while the page is closed.
+    pub fn logs(&self) -> Arc<Vec<LogEntry>> {
+        self.lock().logs.shared()
+    }
+
+    /// Free the materialized journal copy while the Logs page is closed.
+    pub fn release_logs(&self) {
+        self.lock().logs.release();
     }
 
     pub fn drain_toasts(&self) -> Vec<ToastEvent> {
@@ -744,10 +944,20 @@ impl Engine {
             (connected, old)
         };
         self.ctx.request_repaint();
+        self.after_settings_change(old_settings, settings, was_connected, false);
+    }
+
+    fn after_settings_change(
+        &self,
+        old_settings: Settings,
+        new_settings: Settings,
+        was_connected: bool,
+        force_restart: bool,
+    ) {
         if was_connected {
-            if old_settings.network_eq(&settings) {
-                if old_settings.system_proxy != settings.system_proxy {
-                    self.apply_proxy(settings.system_proxy);
+            if !force_restart && old_settings.network_eq(&new_settings) {
+                if old_settings.system_proxy != new_settings.system_proxy {
+                    self.apply_proxy(new_settings.system_proxy);
                 }
                 push_toast(
                     &self.inner,
@@ -771,6 +981,73 @@ impl Engine {
                 "Настройки сохранены",
                 ToastKind::Success,
             );
+        }
+    }
+
+    /// Write a credential-free settings snapshot (settings, routing rules and
+    /// custom profiles) to the chosen path. The file itself is created 0600.
+    pub fn export_settings_to(&self, path: &Path) {
+        let text = {
+            let guard = self.lock();
+            guard.config.export_settings_json()
+        };
+        let result = match text {
+            Ok(text) => write_private_file(path, text.as_bytes())
+                .map_err(|error| format!("не удалось записать настройки: {error}")),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => push_toast(
+                &self.inner,
+                &self.ctx,
+                "Настройки экспортированы",
+                ToastKind::Success,
+            ),
+            Err(error) => push_toast(&self.inner, &self.ctx, error, ToastKind::Error),
+        }
+    }
+
+    /// Import settings and routing profiles. Saved servers and subscriptions
+    /// are deliberately left untouched, and the file cannot set runtime
+    /// secrets such as the Clash API password.
+    pub fn import_settings_from(&self, path: &Path) -> bool {
+        let result = (|| {
+            let metadata = std::fs::metadata(path)
+                .map_err(|error| format!("не удалось открыть файл: {error}"))?;
+            if metadata.len() > 4 * 1024 * 1024 {
+                return Err("файл настроек слишком большой (больше 4 МБ)".to_string());
+            }
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("не удалось прочитать файл: {error}"))?;
+            let backup = AppConfig::parse_settings_backup(&text)?;
+            let (was_connected, old_settings, new_settings) = {
+                let mut guard = self.lock();
+                let old = guard.config.settings.clone();
+                let connected =
+                    matches!(guard.status, ConnStatus::Connected | ConnStatus::Connecting);
+                guard.config.apply_settings_backup(backup);
+                if guard.config.settings.tun_enabled && !is_elevated() {
+                    guard.config.settings.tun_enabled = false;
+                }
+                guard.config.enforce_tun_process_rules();
+                guard.config.sync_custom_profile();
+                guard
+                    .persist()
+                    .map_err(|error| format!("не удалось сохранить настройки: {error}"))?;
+                guard.touch();
+                let new = guard.config.settings.clone();
+                (connected, old, new)
+            };
+            self.ctx.request_repaint();
+            self.after_settings_change(old_settings, new_settings, was_connected, true);
+            Ok(())
+        })();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                push_toast(&self.inner, &self.ctx, error, ToastKind::Error);
+                false
+            }
         }
     }
 
@@ -1152,7 +1429,7 @@ impl Engine {
             .join("\n");
         let name = chrono::Local::now().format("export-%Y%m%d-%H%M%S.log");
         let path = guard.log_dir.join(name.to_string());
-        std::fs::write(&path, text)
+        write_private_file(&path, text.as_bytes())
             .map_err(|error| format!("не удалось сохранить логи: {error}"))?;
         Ok(path.to_string_lossy().to_string())
     }
@@ -1563,7 +1840,6 @@ impl Engine {
     pub fn clear_logs(&self) {
         let mut guard = self.lock();
         guard.logs.clear();
-        guard.touch();
         drop(guard);
         self.ctx.request_repaint();
     }
@@ -1815,11 +2091,7 @@ fn write_log_file(guard: &mut Inner, ts: i64, level: &str, source: &str, line: &
         .unwrap_or(true);
     if rotate {
         let path = guard.log_dir.join(format!("protogrid-{date}.log"));
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        if let Ok(file) = open_private_file(&path, true) {
             guard.log_file = Some((date, file));
         }
     }
@@ -1860,17 +2132,17 @@ pub fn push_log(
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let ts = now_ms();
         write_log_file(&mut guard, ts, &level, source, &line);
-        guard.logs.push_back(LogEntry {
+        // Do not bump `revision`: a log line only affects the journal page,
+        // which pulls the journal through `logs()`. Touching here made every
+        // line clone the whole `Snapshot` (config, pings, and all 2000
+        // entries) just to throw the previous copy away.
+        guard.logs.push(LogEntry {
             ts,
             source: source.to_string(),
             level,
             line,
             route,
         });
-        while guard.logs.len() > MAX_LOG_LINES {
-            guard.logs.pop_front();
-        }
-        guard.touch();
     }
     ctx.request_repaint();
 }
@@ -2331,6 +2603,14 @@ async fn stop_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, silent: bool)
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
     }
+    // The core has read its config; do not leave a second copy of UUIDs and
+    // passwords on disk while the app is disconnected.
+    let runtime_dir = inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .data_dir
+        .join("runtime");
+    clear_runtime_configs(&runtime_dir, None);
     #[cfg(target_os = "windows")]
     if tun_on && !wait_for_tun_adapter_gone(singbox::TUN_INTERFACE_NAME).await {
         push_log(
@@ -2468,13 +2748,17 @@ fn system_totals(networks: &sysinfo::Networks) -> (u64, u64) {
     (rx, tx)
 }
 
-async fn clash_traffic(client: &reqwest::Client, port: u16) -> Result<ClashTraffic, String> {
+async fn clash_traffic(
+    client: &reqwest::Client,
+    port: u16,
+    secret: &str,
+) -> Result<ClashTraffic, String> {
     let endpoint = format!("http://127.0.0.1:{port}/connections");
-    let response = client
-        .get(endpoint)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut request = client.get(endpoint);
+    if !secret.is_empty() {
+        request = request.bearer_auth(secret);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
@@ -2557,15 +2841,16 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
                 (
                     guard.config.settings.core,
                     guard.config.settings.clash_api_port,
+                    guard.config.settings.clash_api_secret.clone(),
                 )
             };
-            let (core, port) = snapshot;
+            let (core, port, secret) = snapshot;
             let (sys_down, sys_up) = system.sample();
             let mut stats = TrafficStats::default();
             let mut have_stats = false;
             if core.is_singbox_like() {
                 if let Some(client) = client.as_ref() {
-                    if let Ok(data) = clash_traffic(client, port).await {
+                    if let Ok(data) = clash_traffic(client, port, &secret).await {
                         let now = Instant::now();
                         let (delta_down, delta_up, secs) = match prev_clash {
                             Some((prev_down, prev_up, at)) => {
@@ -2734,21 +3019,22 @@ fn spawn_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
                         .code()
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "неизвестен".into());
-                    let (proxy_set, message) = {
+                    let (proxy_set, message, runtime_dir) = {
                         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                         guard.child = None;
                         guard.pid = None;
                         guard.connected_at = None;
                         guard.active_core = None;
                         guard.status = ConnStatus::Error;
-                        let message = unexpected_exit_message(&code, &guard.logs);
+                        let message = unexpected_exit_message(&code, guard.logs.entries());
                         guard.error = Some(message.clone());
                         guard.warning = None;
                         let proxy = guard.proxy_set;
                         guard.proxy_set = false;
                         guard.touch();
-                        (proxy, message)
+                        (proxy, message, guard.data_dir.join("runtime"))
                     };
+                    clear_runtime_configs(&runtime_dir, None);
                     if proxy_set {
                         let _ = sysproxy::disable();
                     }
@@ -2777,16 +3063,20 @@ fn write_runtime_config(
     value: &serde_json::Value,
 ) -> Result<PathBuf, String> {
     let runtime_dir = guard.data_dir.join("runtime");
-    std::fs::create_dir_all(&runtime_dir)
+    ensure_private_dir(&runtime_dir)
         .map_err(|error| format!("не удалось создать {}: {error}", runtime_dir.display()))?;
-    let file = runtime_dir.join(match core {
+    let name = match core {
         CoreKind::Singbox => "singbox.json",
         CoreKind::Xray => "xray.json",
         CoreKind::Protogrid => "protogrid.json",
-    });
+    };
+    // Runtime configs mirror every credential. Old cores must not keep a copy
+    // of a server the user has since deleted.
+    clear_runtime_configs(&runtime_dir, Some(name));
+    let file = runtime_dir.join(name);
     let text = serde_json::to_string_pretty(value)
         .map_err(|error| format!("не удалось сериализовать конфиг: {error}"))?;
-    std::fs::write(&file, text)
+    write_private_file(&file, text.as_bytes())
         .map_err(|error| format!("не удалось записать {}: {error}", file.display()))?;
     Ok(file)
 }
@@ -2958,9 +3248,15 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         command.as_std_mut().creation_flags(0x08000000);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| set_error(inner, ctx, format!("Не удалось запустить ядро: {error}")))?;
+    let mut child = command.spawn().map_err(|error| {
+        let runtime_dir = inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data_dir
+            .join("runtime");
+        clear_runtime_configs(&runtime_dir, None);
+        set_error(inner, ctx, format!("Не удалось запустить ядро: {error}"))
+    })?;
     let pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -3063,9 +3359,15 @@ async fn ping_one(
             .await
             .ok();
     } else if connected && settings.core.is_singbox_like() {
-        latency = ping::clash_delay(settings.clash_api_port, &id, &settings.test_url, 5000)
-            .await
-            .ok();
+        latency = ping::clash_delay(
+            settings.clash_api_port,
+            &settings.clash_api_secret,
+            &id,
+            &settings.test_url,
+            5000,
+        )
+        .await
+        .ok();
     }
     if latency.is_none() {
         latency = ping::tcp_ping(&server, 4000).await.ok();
@@ -3176,5 +3478,42 @@ mod tests {
             detect_log_route("inbound/mixed[mixed-in]: inbound connection to x:443"),
             None
         );
+    }
+
+    #[test]
+    fn journal_shares_until_next_line() {
+        let mut journal = Journal::default();
+        for i in 0..MAX_LOG_LINES {
+            journal.push(LogEntry {
+                ts: i as i64,
+                source: "core".into(),
+                level: "info".into(),
+                line: format!("line-{i}"),
+                route: None,
+            });
+        }
+
+        // Repainting the page re-uses the same vector, no deep copy.
+        let first = journal.shared();
+        let second = journal.shared();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.len(), MAX_LOG_LINES);
+
+        // A new line replaces the cache and keeps the ring bounded.
+        journal.push(LogEntry {
+            ts: 0,
+            source: "core".into(),
+            level: "info".into(),
+            line: "newest".into(),
+            route: None,
+        });
+        let third = journal.shared();
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(third.len(), MAX_LOG_LINES);
+        assert_eq!(third.first().unwrap().line, "line-1");
+        assert_eq!(third.last().unwrap().line, "newest");
+
+        journal.clear();
+        assert!(journal.shared().is_empty());
     }
 }
