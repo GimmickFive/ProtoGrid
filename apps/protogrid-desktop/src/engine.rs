@@ -26,6 +26,8 @@ pub const MAX_LOG_LINES: usize = 2000;
 /// Make the profile directory private. On Unix the default umask often leaves
 /// it at 0755, which lets other local users walk into config.json and logs.
 fn harden_dir(path: &Path) {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
@@ -33,6 +35,8 @@ fn harden_dir(path: &Path) {
 }
 
 fn harden_file(path: &Path) {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
