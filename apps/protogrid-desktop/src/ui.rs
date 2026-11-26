@@ -4184,7 +4184,7 @@ fn custom_profile_card(
         format!("{count} сохранено — нажмите, чтобы вернуть")
     };
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 70.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 76.0), Sense::click());
     let radius = CornerRadius::same(12);
     if active {
         paint_vertical_fade(ui.painter(), rect, p.accent_soft, 0.8, 12.0);

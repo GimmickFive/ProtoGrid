@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-11-26
+
+### Исправлено
+
+- Карточка «Свой профиль» в маршрутизации обрезала подпись при большом числе
+  правил.
+
+### Изменено
+
+- Скриншоты интерфейса пересняты на актуальной сборке.
+
 ## [0.1.2] — 2026-11-26
 
 Первая публичная бета. Windows-сборка, Linux проверен на реальном подключении.
@@ -40,5 +51,6 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.1.2...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.1.3...dev
+[0.1.3]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.3
 [0.1.2]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.1.2
