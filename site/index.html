@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProtoGrid — нативный прокси-клиент на Rust</title>
+  <meta name="description" content="ProtoGrid — нативный кроссплатформенный клиент для прокси на Rust. Без WebView и Node.js: sing-box, Xray-core, TUN, подписки, маршрутизация и OpenVPN в одном окне." />
+  <link rel="canonical" href="https://gimmickfive.github.io/ProtoGrid/" />
+  <link rel="icon" href="favicon.ico" sizes="any" />
+  <link rel="icon" href="assets/icon.png" type="image/png" />
+  <link rel="apple-touch-icon" href="assets/icon.png" />
+  <meta name="theme-color" content="#0b0d12" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="ProtoGrid" />
+  <meta property="og:title" content="ProtoGrid — нативный прокси-клиент на Rust" />
+  <meta property="og:description" content="Без WebView, HTML и Node.js. Три ядра, TUN, подписки, маршрутизация и OpenVPN в одном нативном окне." />
+  <meta property="og:url" content="https://gimmickfive.github.io/ProtoGrid/" />
+  <meta property="og:image" content="https://gimmickfive.github.io/ProtoGrid/assets/og-brand.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Логотип ProtoGrid" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:image" content="https://gimmickfive.github.io/ProtoGrid/assets/og-brand.png" />
+
+  <link rel="stylesheet" href="styles.css" />
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "ProtoGrid",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "Windows, Linux, macOS, Android",
+      "description": "Нативный кроссплатформенный клиент для прокси на Rust с ядрами sing-box и Xray-core.",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "RUB" },
+      "license": "https://github.com/GimmickFive/ProtoGrid/blob/main/LICENSE",
+      "url": "https://gimmickfive.github.io/ProtoGrid/",
+      "logo": "https://gimmickfive.github.io/ProtoGrid/assets/logo.png",
+      "image": "https://gimmickfive.github.io/ProtoGrid/assets/og-brand.png"
+    }
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">К содержанию</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#top" aria-label="ProtoGrid — на главную">
+        <img src="assets/icon.png" width="40" height="40" alt="" />
+        <span>ProtoGrid</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Основная навигация">
+        <a href="#features">Возможности</a>
+        <a href="#cores">Ядра</a>
+        <a href="#platforms">Платформы</a>
+        <a href="#screenshots">Скриншоты</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <a class="icon-link" href="https://github.com/GimmickFive/ProtoGrid" aria-label="ProtoGrid на GitHub">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.93.58.1.79-.25.79-.55v-2.15c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .96-.31 3.15 1.18a10.9 10.9 0 0 1 5.74 0c2.18-1.49 3.14-1.18 3.14-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .3.21.66.8.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+        </a>
+        <a class="btn btn-small btn-primary" href="#download">Скачать</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="hero-glow hero-glow-a" aria-hidden="true"></div>
+      <div class="hero-glow hero-glow-b" aria-hidden="true"></div>
+
+      <div class="container hero-inner">
+        <div class="hero-copy">
+          <div class="hero-logo">
+            <img src="assets/logo.png" width="188" height="164" alt="ProtoGrid" />
+          </div>
+          <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Публичная бета · открытый код</p>
+          <h1>Прокси-клиент, который не притворяется браузером</h1>
+          <p class="lead">
+            <strong>ProtoGrid</strong> — нативный клиент для прокси на Rust и egui.
+            Никакого WebView, HTML, JavaScript и Node.js: интерфейс рисуется кодом,
+            а сетью занимается отдельный движок на sing-box и Xray-core.
+          </p>
+
+          <div class="cta-row">
+            <a class="btn btn-primary" data-download="windows" href="https://github.com/GimmickFive/ProtoGrid/releases">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 5.6 10.4 4.5v7.1H3V5.6Zm0 12.8 7.4 1.1v-7H3v5.9Zm8.4 1.3L21 21V12.7h-9.6v7Zm0-15.5v7.2H21V3l-9.6 1.2Z"/></svg>
+              Скачать для Windows
+            </a>
+            <a class="btn btn-ghost" data-download="android" href="https://github.com/GimmickFive/ProtoGrid/releases">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M7.2 8.2h9.6c.6 0 1 .4 1 1v7.5a1 1 0 0 1-1 1h-1v2.2a1.1 1.1 0 0 1-2.2 0v-2.2h-3.2v2.2a1.1 1.1 0 0 1-2.2 0v-2.2h-1a1 1 0 0 1-1-1V9.2c0-.6.4-1 1-1Zm-2.7.3c.6 0 1.1.5 1.1 1.1v4.6a1.1 1.1 0 0 1-2.2 0V9.6c0-.6.5-1.1 1.1-1.1Zm15 0c.6 0 1.1.5 1.1 1.1v4.6a1.1 1.1 0 0 1-2.2 0V9.6c0-.6.5-1.1 1.1-1.1ZM7.5 7l-.8-1.4a.35.35 0 0 1 .6-.35l.85 1.48a5.7 5.7 0 0 1 3.85 0l.85-1.48a.35.35 0 0 1 .6.35L13.5 7a4.7 4.7 0 0 1 2.6 4.1H5.9A4.7 4.7 0 0 1 7.5 7Zm2.1 2.2a.6.6 0 1 0 0-1.2.6.6 0 0 0 0 1.2Zm4.8 0a.6.6 0 1 0 0-1.2.6.6 0 0 0 0 1.2Z"/></svg>
+              Android APK
+            </a>
+          </div>
+
+          <p class="cta-note">
+            <span data-release-label hidden></span>
+            Windows 10/11 · Linux · macOS · сборка из исходников
+          </p>
+        </div>
+
+        <div class="hero-visual">
+          <div class="window-frame">
+            <div class="window-bar" aria-hidden="true">
+              <span></span><span></span><span></span>
+              <div class="window-title">ProtoGrid — обзор</div>
+            </div>
+            <img src="assets/home.png" width="1200" height="800" alt="Главное окно ProtoGrid: обзор с графиками скорости, маршрутами и списком серверов" />
+          </div>
+          <div class="floating-card">
+            <span class="floating-dot" aria-hidden="true"></span>
+            <div>
+              <strong>Подключено</strong>
+              <span>Amsterdam · Reality</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats" aria-label="Коротко о проекте">
+      <div class="container stats-grid">
+        <div class="stat">
+          <strong>3</strong>
+          <span>ядра на выбор</span>
+        </div>
+        <div class="stat">
+          <strong>0</strong>
+          <span>WebView и Node.js</span>
+        </div>
+        <div class="stat">
+          <strong>7</strong>
+          <span>протоколов</span>
+        </div>
+        <div class="stat">
+          <strong>MIT</strong>
+          <span>открытый код</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">Возможности</p>
+          <h2>Всё управление — в одном нативном окне</h2>
+          <p class="section-lead">
+            Серверы, подписки, правила и статистика собраны в одном интерфейсе.
+            Настройки хранятся локально, телеметрии нет.
+          </p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="feature-icon tone-blue">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H4zM2 20h20M9 8h6M9 11h4" /></svg>
+            </div>
+            <h3>Нативный интерфейс</h3>
+            <p>Окно и весь UI рисуются Rust-кодом через egui/OpenGL. Нет WebView2, WebKitGTK и webview-процессов.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-violet">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 7.5 12 12l9-4.5L12 3ZM3 12l9 4.5 9-4.5M3 16.5 12 21l9-4.5" /></svg>
+            </div>
+            <h3>Три ядра</h3>
+            <p>ProtoGrid-core с XHTTP, MASQUE и XDRIVE, стоковый sing-box и Xray-core. Переключение без переустановки.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-teal">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5" /></svg>
+            </div>
+            <h3>Импорт и подписки</h3>
+            <p>VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC и OpenVPN. Base64-ссылки, Clash YAML, автообновление раз в 12 часов.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-amber">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4M8 3v6M16 9v6" /></svg>
+            </div>
+            <h3>Маршрутизация</h3>
+            <p>Пресеты «Жизнь в РФ», «Глобальный прокси», «Прямой» и собственные профили: домены, IP/CIDR, GeoIP, GeoSite, процессы.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-blue">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17V7m5 10V4m5 13v-7m5 7V9M2 21h20" /></svg>
+            </div>
+            <h3>Живые графики и журнал</h3>
+            <p>Скорость, трафик через прокси и напрямую, реальная задержка через Clash API, журнал с метками DIRECT, PROXY и TUN.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-violet">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 3 8.4 7 10 4-1.6 7-5.6 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></svg>
+            </div>
+            <h3>Без телеметрии</h3>
+            <p>Конфиги, подписки и ключи остаются на устройстве. Приложение не отправляет статистику и не требует аккаунта.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-teal">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0v5a3 3 0 0 1-3 3h-2M4 17v-5m16 0v5" /></svg>
+            </div>
+            <h3>Системный прокси и TUN</h3>
+            <p>Windows, GNOME, KDE и macOS — системный прокси. TUN на sing-box, локальные HTTP/SOCKS-порты, трей и автозапуск.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon tone-amber">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 4h10M11 17h2" /></svg>
+            </div>
+            <h3>Android MVP</h3>
+            <p>Отдельный клиент на Kotlin/Compose с VpnService и ProtoGrid-core. Импорт ссылок, список серверов и подключение в один тап.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="cores">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">Движки</p>
+          <h2>Одно приложение — три ядра</h2>
+          <p class="section-lead">
+            ProtoGrid-core — форк sing-box с XHTTP, MASQUE, XDRIVE и mKCP.
+            Стоковые sing-box и Xray-core можно скачать прямо из настроек.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table class="compare-table">
+            <caption class="visually-hidden">Сравнение возможностей ядер ProtoGrid-core, sing-box и Xray-core</caption>
+            <thead>
+              <tr>
+                <th scope="col">Возможность</th>
+                <th scope="col">ProtoGrid-core</th>
+                <th scope="col">sing-box</th>
+                <th scope="col">Xray-core</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">XHTTP</th>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="no">Нет</span></td>
+                <td><span class="yes">Есть</span></td>
+              </tr>
+              <tr>
+                <th scope="row">mKCP и VLESS Encryption</th>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="no">Нет</span></td>
+                <td><span class="yes">Есть</span></td>
+              </tr>
+              <tr>
+                <th scope="row">Hysteria2 и TUIC</th>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="no">Нет</span></td>
+              </tr>
+              <tr>
+                <th scope="row">OpenVPN</th>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="yes">1.14+</span></td>
+                <td><span class="no">Нет</span></td>
+              </tr>
+              <tr>
+                <th scope="row">TUN-режим</th>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="no">Нет</span></td>
+              </tr>
+              <tr>
+                <th scope="row">HTTP/2-транспорт</th>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="yes">Есть</span></td>
+                <td><span class="no">Удалён в 26</span></td>
+              </tr>
+              <tr>
+                <th scope="row">Задержка всех узлов</th>
+                <td><span class="yes">Clash API</span></td>
+                <td><span class="yes">Clash API</span></td>
+                <td><span class="partial">Только активный</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="table-hint">Прокрутите таблицу вбок →</p>
+        <p class="table-note">
+          ProtoGrid-core — сборка на базе sing-box с тегом <code>with_openvpn</code>.
+          Xray-core не поддерживает OpenVPN, TUN, Hysteria2 и TUIC — для них переключите ядро.
+        </p>
+      </div>
+    </section>
+
+    <section class="section" id="platforms">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">Платформы</p>
+          <h2>Работает там, где вы работаете</h2>
+          <p class="section-lead">Готовые сборки для Windows и Android. Linux и macOS собираются из исходников одной командой.</p>
+        </div>
+
+        <div class="platform-grid">
+          <article class="platform-card">
+            <div class="platform-head">
+              <span class="os-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 5.6 10.4 4.5v7.1H3V5.6Zm0 12.8 7.4 1.1v-7H3v5.9Zm8.4 1.3L21 21V12.7h-9.6v7Zm0-15.5v7.2H21V3l-9.6 1.2Z"/></svg>
+              </span>
+              <div>
+                <h3>Windows 10/11</h3>
+                <p>Готовый установщик и портативная сборка</p>
+              </div>
+            </div>
+            <ul class="check-list">
+              <li>Системный прокси: реестр и WinINet</li>
+              <li>TUN через sing-box и <code>wintun.dll</code></li>
+              <li>Трей и автозапуск через HKCU Run</li>
+            </ul>
+            <a class="text-link" data-download="windows" href="https://github.com/GimmickFive/ProtoGrid/releases">Скачать для Windows <span aria-hidden="true">→</span></a>
+          </article>
+
+          <article class="platform-card">
+            <div class="platform-head">
+              <span class="os-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2c2.1 0 3.6 1.5 3.6 3.5 0 1.3-.6 2.3-1.6 3 .8.5 1.3 1.4 1.3 2.4 0 1.9-1.5 3.4-3.3 3.4-2 0-3.6-1.5-3.6-3.5 0-1 .4-1.9 1.2-2.4A3.2 3.2 0 0 1 8.4 5.5C8.4 3.5 9.9 2 12 2Zm-8.5 5.2c1.5 0 2.7 1.2 2.7 2.7s-1.2 2.7-2.7 2.7S.8 11.4.8 9.9s1.2-2.7 2.7-2.7Zm17 0c1.5 0 2.7 1.2 2.7 2.7s-1.2 2.7-2.7 2.7-2.7-1.2-2.7-2.7 1.2-2.7 2.7-2.7ZM12 15.2c2.9 0 5.3 1.3 5.3 2.9 0 .9-.8 1.7-2 2.2l.9 1.2a.5.5 0 0 1-.8.6l-1-1.4c-.8.2-1.6.3-2.4.3s-1.7-.1-2.4-.3l-1 1.4a.5.5 0 0 1-.8-.6l.9-1.2c-1.2-.5-2-1.3-2-2.2 0-1.6 2.4-2.9 5.3-2.9Z"/></svg>
+              </span>
+              <div>
+                <h3>Linux</h3>
+                <p>GNOME, KDE и другие окружения</p>
+              </div>
+            </div>
+            <ul class="check-list">
+              <li>Системный прокси: gsettings / kwriteconfig</li>
+              <li>TUN с root или <code>CAP_NET_ADMIN</code></li>
+              <li>Автозапуск через XDG autostart</li>
+            </ul>
+            <a class="text-link" href="https://github.com/GimmickFive/ProtoGrid#сборка-и-запуск">Собрать из исходников <span aria-hidden="true">→</span></a>
+          </article>
+
+          <article class="platform-card">
+            <div class="platform-head">
+              <span class="os-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.4 12.7c0-2.3 1.9-3.4 2-3.5a4.3 4.3 0 0 0-3.4-1.8c-1.4-.2-2.8.9-3.5.9-.7 0-1.8-.9-3-.9a4.5 4.5 0 0 0-3.8 2.3c-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.3 2.9 2.3 1.2 0 1.6-.8 3.1-.8s1.9.8 3.1.7c1.3 0 2.1-1.1 2.9-2.2a9.6 9.6 0 0 0 1.3-2.7 4.1 4.1 0 0 1-2.8-3.6ZM14.2 5.8a4.1 4.1 0 0 0 .9-2.9 4.1 4.1 0 0 0-2.7 1.4 3.9 3.9 0 0 0-1 2.8 3.4 3.4 0 0 0 2.8-1.3Z"/></svg>
+              </span>
+              <div>
+                <h3>macOS</h3>
+                <p>Нативная сборка для Apple Silicon и Intel</p>
+              </div>
+            </div>
+            <ul class="check-list">
+              <li>Системный прокси через networksetup</li>
+              <li>TUN с правами администратора</li>
+              <li>Автозапуск через LaunchAgent</li>
+            </ul>
+            <a class="text-link" href="https://github.com/GimmickFive/ProtoGrid#сборка-и-запуск">Собрать из исходников <span aria-hidden="true">→</span></a>
+          </article>
+
+          <article class="platform-card">
+            <div class="platform-head">
+              <span class="os-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7.2 8.2h9.6c.6 0 1 .4 1 1v7.5a1 1 0 0 1-1 1h-1v2.2a1.1 1.1 0 0 1-2.2 0v-2.2h-3.2v2.2a1.1 1.1 0 0 1-2.2 0v-2.2h-1a1 1 0 0 1-1-1V9.2c0-.6.4-1 1-1Zm-2.7.3c.6 0 1.1.5 1.1 1.1v4.6a1.1 1.1 0 0 1-2.2 0V9.6c0-.6.5-1.1 1.1-1.1Zm15 0c.6 0 1.1.5 1.1 1.1v4.6a1.1 1.1 0 0 1-2.2 0V9.6c0-.6.5-1.1 1.1-1.1ZM7.5 7l-.8-1.4a.35.35 0 0 1 .6-.35l.85 1.48a5.7 5.7 0 0 1 3.85 0l.85-1.48a.35.35 0 0 1 .6.35L13.5 7a4.7 4.7 0 0 1 2.6 4.1H5.9A4.7 4.7 0 0 1 7.5 7Zm2.1 2.2a.6.6 0 1 0 0-1.2.6.6 0 0 0 0 1.2Zm4.8 0a.6.6 0 1 0 0-1.2.6.6 0 0 0 0 1.2Z"/></svg>
+              </span>
+              <div>
+                <h3>Android</h3>
+                <p>MVP для arm64-v8a</p>
+              </div>
+            </div>
+            <ul class="check-list">
+              <li>Kotlin/Compose и <code>VpnService</code></li>
+              <li>ProtoGrid-core через JNI-мост</li>
+              <li>Импорт ссылок и foreground-уведомление</li>
+            </ul>
+            <a class="text-link" data-download="android" href="https://github.com/GimmickFive/ProtoGrid/releases">Скачать APK <span aria-hidden="true">→</span></a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="screenshots">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">Скриншоты</p>
+          <h2>Интерфейс, который показывает главное</h2>
+          <p class="section-lead">Единый нативный лейаут: обзор, серверы, подписки, маршрутизация, графики, журнал и настройки.</p>
+        </div>
+
+        <div class="gallery">
+          <figure class="shot">
+            <img src="assets/home.png" width="1200" height="800" loading="lazy" alt="Обзор ProtoGrid с карточками входящего и исходящего трафика, задержки и графиком скорости" />
+            <figcaption>Обзор: трафик, задержка и маршруты в реальном времени</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/home-light.png" width="1200" height="800" loading="lazy" alt="ProtoGrid в светлой теме" />
+            <figcaption>Светлая тема</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/servers.png" width="1200" height="800" loading="lazy" alt="Таблица серверов с флагами, протоколами и задержкой" />
+            <figcaption>Серверы и задержка</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/subscriptions.png" width="1200" height="800" loading="lazy" alt="Раздел подписок с трафиком и сроком действия" />
+            <figcaption>Подписки и остаток трафика</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/routing.png" width="1200" height="800" loading="lazy" alt="Настройка маршрутизации: пресеты и собственные правила" />
+            <figcaption>Маршрутизация по доменам, IP и процессам</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/charts.png" width="1200" height="800" loading="lazy" alt="Графики скорости и распределения трафика" />
+            <figcaption>Графики трафика</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/logs.png" width="1200" height="800" loading="lazy" alt="Журнал соединений с метками DIRECT, PROXY и TUN" />
+            <figcaption>Журнал с метками маршрутов</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="assets/settings.png" width="1200" height="800" loading="lazy" alt="Настройки подключения, ядра и интерфейса" />
+            <figcaption>Настройки ядра и подключения</figcaption>
+          </figure>
+          <figure class="shot shot-wide">
+            <img src="assets/modal.png" width="1200" height="800" loading="lazy" alt="Импорт серверов из ссылки или буфера обмена" />
+            <figcaption>Импорт ссылок и профилей</figcaption>
+          </figure>
+        </div>
+
+        <p class="gallery-note">Скриншоты сделаны в Linux-сборке ProtoGrid.</p>
+      </div>
+    </section>
+
+    <section class="section" id="download">
+      <div class="container">
+        <div class="download-panel">
+          <div class="download-copy">
+            <p class="eyebrow">Загрузка</p>
+            <h2>Попробуйте ProtoGrid</h2>
+            <p class="section-lead">
+              Windows-сборка не требует WebView2: только системные библиотеки.
+              Ядро <code>protogrid-core</code> и <code>wintun.dll</code> лежат рядом с приложением.
+            </p>
+
+            <div class="cta-row">
+              <a class="btn btn-primary" data-download="windows" href="https://github.com/GimmickFive/ProtoGrid/releases">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 5.6 10.4 4.5v7.1H3V5.6Zm0 12.8 7.4 1.1v-7H3v5.9Zm8.4 1.3L21 21V12.7h-9.6v7Zm0-15.5v7.2H21V3l-9.6 1.2Z"/></svg>
+                Установщик для Windows
+              </a>
+              <a class="btn btn-ghost" data-download="windows-portable" href="https://github.com/GimmickFive/ProtoGrid/releases">
+                Портативная версия
+              </a>
+            </div>
+
+            <p class="release-line">
+              <span data-release-label>Все сборки и исходники — на <a href="https://github.com/GimmickFive/ProtoGrid/releases">GitHub Releases</a></span>
+            </p>
+            <p class="fine-print">
+              Установщик может быть неподписан сертификатом, поэтому Windows SmartScreen
+              способен показать предупреждение. Сборки создаются публично в GitHub Actions.
+            </p>
+          </div>
+
+          <aside class="download-aside">
+            <h3>Из исходников</h3>
+            <pre><code>git clone https://github.com/GimmickFive/ProtoGrid.git
+cd ProtoGrid
+cargo run -p protogrid-desktop</code></pre>
+            <p>Нужен Rust 1.95+. Зависимости для Linux перечислены в README.</p>
+            <a class="text-link" href="https://github.com/GimmickFive/ProtoGrid#сборка-и-запуск">Инструкция по сборке <span aria-hidden="true">→</span></a>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="faq">
+      <div class="container">
+        <div class="section-head">
+          <p class="eyebrow">FAQ</p>
+          <h2>Коротко о важном</h2>
+        </div>
+
+        <div class="faq-grid">
+          <details>
+            <summary>Нужен ли WebView2?</summary>
+            <p>Нет. Интерфейс ProtoGrid рисуется нативно через egui/eframe и OpenGL. Приложение не использует WebView, HTML, CSS, JavaScript и Node.js.</p>
+          </details>
+          <details>
+            <summary>Откуда берутся ядра?</summary>
+            <p>ProtoGrid-core поставляется рядом с приложением. Стоковые sing-box и Xray-core можно скачать в разделе «Настройки → Подключение» или указать путь к своему бинарнику.</p>
+          </details>
+          <details>
+            <summary>Куда уходят мои данные?</summary>
+            <p>Серверы, подписки, ключи и правила хранятся локально в <code>config.json</code>. Телеметрии и обязательного аккаунта нет. Сайт не содержит аналитики и трекеров.</p>
+          </details>
+          <details>
+            <summary>Почему Xray не поддерживает Hysteria2 и TUN?</summary>
+            <p>Это ограничения самого Xray-core. Для Hysteria2, TUIC, OpenVPN и TUN-режима переключите ядро на sing-box или ProtoGrid-core.</p>
+          </details>
+          <details>
+            <summary>Под какой лицензией распространяется проект?</summary>
+            <p>Desktop-приложение и общий Rust-код — MIT. Android-клиент линкует <code>libbox</code> (sing-box, GPLv3) и поэтому распространяется под GPL-3.0.</p>
+          </details>
+          <details>
+            <summary>Есть ли сборки для macOS и Linux?</summary>
+            <p>Готовые пакеты сейчас публикуются для Windows и Android. Linux и macOS собираются из исходников: <code>cargo build --release -p protogrid-desktop</code>.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/icon.png" width="32" height="32" alt="" />
+        <div>
+          <strong>ProtoGrid</strong>
+          <span>Нативный прокси-клиент на Rust</span>
+        </div>
+      </div>
+
+      <nav class="footer-links" aria-label="Ссылки в подвале">
+        <a href="https://github.com/GimmickFive/ProtoGrid">GitHub</a>
+        <a href="https://github.com/GimmickFive/ProtoGrid/releases">Релизы</a>
+        <a href="https://github.com/GimmickFive/ProtoGrid/issues">Issues</a>
+        <a href="https://github.com/GimmickFive/ProtoGrid/blob/main/LICENSE">Лицензия</a>
+        <a href="https://github.com/GimmickFive/ProtoGrid/blob/main/SECURITY.md">Безопасность</a>
+      </nav>
+
+      <p class="footer-note">© 2026 ProtoGrid · MIT / GPL-3.0 · Сделано на Rust и egui</p>
+    </div>
+  </footer>
+
+  <script>
+    // Подставляет актуальную версию и прямые ссылки на ассеты релиза.
+    // Без JavaScript страница остаётся рабочей: все кнопки ведут на /releases.
+    (function () {
+      var REPO = "GimmickFive/ProtoGrid";
+
+      fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=20", {
+        headers: { Accept: "application/vnd.github+json" }
+      })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (releases) {
+          if (!Array.isArray(releases)) return;
+          var published = releases.filter(function (r) { return !r.draft; });
+          if (!published.length) return;
+
+          var setupRe = /windows-x64-setup\.exe$/i;
+          var portableRe = /windows-x64-portable\.zip$/i;
+          var apkRe = /\.apk$/i;
+
+          function findAsset(re) {
+            for (var i = 0; i < published.length; i++) {
+              var match = (published[i].assets || []).find(function (a) { return re.test(a.name); });
+              if (match) return match;
+            }
+            return null;
+          }
+
+          var setup = findAsset(setupRe);
+          var portable = findAsset(portableRe);
+          var apk = findAsset(apkRe);
+
+          if (setup) document.querySelectorAll('[data-download="windows"]').forEach(function (el) {
+            el.href = setup.browser_download_url;
+          });
+          if (portable) document.querySelectorAll('[data-download="windows-portable"]').forEach(function (el) {
+            el.href = portable.browser_download_url;
+          });
+          if (apk) document.querySelectorAll('[data-download="android"]').forEach(function (el) {
+            el.href = apk.browser_download_url;
+          });
+
+          var latest = published[0];
+          var label = "Актуальный релиз: " + latest.tag_name +
+            (latest.prerelease ? " (beta)" : "") + " · " +
+            new Date(latest.published_at).toLocaleDateString("ru-RU");
+          document.querySelectorAll("[data-release-label]").forEach(function (el) {
+            el.textContent = label;
+            el.hidden = false;
+          });
+        })
+        .catch(function () { /* офлайн или лимит API — остаются ссылки на релизы */ });
+    })();
+  </script>
+</body>
+</html>

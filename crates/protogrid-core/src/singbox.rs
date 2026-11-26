@@ -12,6 +12,11 @@ use crate::model::{
 use crate::ruleset::{self, sanitize_code};
 use crate::util::{split_list, version_at_least};
 
+/// TUN adapter name used on Windows. Other sing-box clients default to
+/// `singbox_tun`, so a distinct name lets both run without fighting over the
+/// adapter.
+pub const TUN_INTERFACE_NAME: &str = "protogrid_tun";
+
 /// Build a complete sing-box configuration (targets sing-box 1.12+).
 ///
 /// All valid servers are included as outbounds, so the Clash API can measure
@@ -240,6 +245,9 @@ pub fn build_config_with_capabilities(
             }));
         }
     }
+    if !settings.clash_api_secret.is_empty() {
+        config["experimental"]["clash_api"]["secret"] = json!(settings.clash_api_secret);
+    }
     if use_http_client {
         config["http_clients"] = json!([
             {"tag": "direct-http", "detour": "direct-http-out"}
@@ -274,6 +282,12 @@ fn build_inbounds(settings: &Settings, modern_tun: bool) -> Vec<Value> {
             "auto_route": true,
             "strict_route": true,
         });
+        if cfg!(target_os = "windows") {
+            // Other sing-box based clients default to "singbox_tun" too, so keep
+            // our own name: two TUN adapters with one name fail to start with
+            // "Cannot create a file when that file already exists".
+            tun["interface_name"] = json!(TUN_INTERFACE_NAME);
+        }
         if !modern_tun {
             tun["stack"] = json!("mixed");
         }
@@ -900,6 +914,30 @@ mod tests {
         assert_eq!(config["dns"]["servers"][0]["type"], "local");
         let json = serde_json::to_string_pretty(&config).unwrap();
         assert!(json.contains("dns-remote"));
+    }
+
+    #[test]
+    fn clash_api_uses_per_run_secret() {
+        let settings = Settings {
+            clash_api_secret: "local-secret".into(),
+            ..Default::default()
+        };
+        let config = build_config(&[sample_server()], "srv-1", &settings, &[], None, None).unwrap();
+        assert_eq!(
+            config["experimental"]["clash_api"]["secret"],
+            "local-secret"
+        );
+
+        let config = build_config(
+            &[sample_server()],
+            "srv-1",
+            &Settings::default(),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(config["experimental"]["clash_api"]["secret"].is_null());
     }
 
     #[test]

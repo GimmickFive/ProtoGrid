@@ -7,11 +7,12 @@
 
 1. Поднять версию один раз — в `Cargo.toml`, `[workspace.package].version`.
    Крейты наследуют её через `version.workspace = true`.
-2. Если менялся форк — поднять `VERSION` в `scripts/build-fork.sh` и `ldflags`
+2. Обновить `APP_VERSION` и `VIProductVersion` в `installer/protogrid.nsi`.
+3. Если менялся форк — поднять `VERSION` в `scripts/build-fork.sh` и `ldflags`
    в `.github/workflows/ci.yml` (`1.14.4-protogrid.N`).
-3. Добавить запись в `CHANGELOG.md`: секция `## [X.Y.Z] — YYYY-MM-DD`, ссылки
+4. Добавить запись в `CHANGELOG.md`: секция `## [X.Y.Z] — YYYY-MM-DD`, ссылки
    внизу файла.
-4. Обновить README, если изменились возможности, требования или ограничения.
+5. Обновить README, если изменились возможности, требования или ограничения.
 
 ## 2. Проверки
 
@@ -19,6 +20,7 @@
 cargo fmt --all -- --check
 cargo test -p protogrid-core
 cargo check -p protogrid-desktop
+cargo check -p protogrid-mobile
 ```
 
 Плюс то же, что делает CI для форка: применить `docs/patches/*.patch` к
@@ -52,6 +54,21 @@ rustup target add x86_64-pc-windows-gnu
 
 Артефакты складываются в `dist/` и в git не попадают — они прикрепляются к
 релизу на GitHub.
+
+### Android APK
+
+Android-клиент собирается отдельным workflow `.github/workflows/android.yml`
+по тегу `android-vX.Y.Z` (например, `android-v0.2.0`). Локально можно проверить
+сборку командой:
+
+```bash
+ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh
+```
+
+Для подписанного релиза в GitHub Actions должны быть заданы секреты
+`PROTOGRID_KEYSTORE_BASE64`, `PROTOGRID_KEYSTORE_PASSWORD`,
+`PROTOGRID_KEY_ALIAS` и `PROTOGRID_KEY_PASSWORD`. Без них тег `android-v*`
+завершится ошибкой.
 
 ## 5. Тег и публикация
 

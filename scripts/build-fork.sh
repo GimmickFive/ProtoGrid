@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build ProtoGrid sing-box fork binaries.
+# Build ProtoGrid-core binaries (sing-box fork).
 #
 # Usage:
 #   ./scripts/build-fork.sh [output-dir]

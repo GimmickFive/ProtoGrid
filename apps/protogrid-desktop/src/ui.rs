@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui::{
+    text::{LayoutJob, TextFormat},
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Id, Layout, Margin, Modal,
     Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, Vec2,
 };
@@ -12,7 +13,7 @@ use protogrid_core::model::{
 };
 
 use crate::engine::{
-    now_ms, ConnStatus, Engine, LogEntry, Snapshot, ToastEvent, ToastKind, TrafficStats,
+    now_ms, ConnStatus, Engine, LogEntry, LogRoute, Snapshot, ToastEvent, ToastKind, TrafficStats,
 };
 use crate::installer::CoreFeatures;
 use crate::theme::{self, Palette};
@@ -30,10 +31,11 @@ pub enum Page {
     Charts,
     Logs,
     Settings,
+    Info,
 }
 
 impl Page {
-    const ALL: [Page; 7] = [
+    const ALL: [Page; 8] = [
         Page::Overview,
         Page::Servers,
         Page::Subscriptions,
@@ -41,6 +43,7 @@ impl Page {
         Page::Charts,
         Page::Logs,
         Page::Settings,
+        Page::Info,
     ];
 
     fn label(self) -> &'static str {
@@ -52,6 +55,7 @@ impl Page {
             Page::Charts => "Графики",
             Page::Logs => "Журнал",
             Page::Settings => "Настройки",
+            Page::Info => "Информация",
         }
     }
 
@@ -64,6 +68,7 @@ impl Page {
             Page::Charts => egui_phosphor::regular::CHART_BAR,
             Page::Logs => egui_phosphor::regular::TERMINAL_WINDOW,
             Page::Settings => egui_phosphor::regular::GEAR_SIX,
+            Page::Info => egui_phosphor::regular::BOOK_OPEN,
         }
     }
 }
@@ -127,16 +132,18 @@ pub enum ModalState {
     Rule,
     Import,
     Subscription,
+    ProfileName,
     Confirm,
     Help,
 }
 
 #[derive(Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ConfirmAction {
     DeleteServer(String),
     DeleteSubscription(String),
     DeleteRule(String),
-    ForkRoutingProfile,
+    DeleteRoutingProfile(String),
 }
 
 #[derive(Clone)]
@@ -167,6 +174,8 @@ pub struct View {
     pub subscription_url: String,
     pub subscription_edit: Option<String>,
     pub confirm: Option<Confirm>,
+    /// Id and current name of the routing profile being renamed.
+    pub profile_draft: Option<(String, String)>,
     pub settings_draft: Option<Settings>,
     pub settings_dirty: bool,
     pub toasts: Vec<UiToast>,
@@ -206,6 +215,7 @@ impl View {
             subscription_url: String::new(),
             subscription_edit: None,
             confirm: None,
+            profile_draft: None,
             settings_draft: None,
             settings_dirty: false,
             toasts: Vec::new(),
@@ -256,6 +266,11 @@ impl View {
         if !due {
             return;
         }
+        let elapsed = self
+            .last_sample
+            .map(|at| now.duration_since(at).as_secs_f64())
+            .unwrap_or(1.0)
+            .clamp(0.0, 5.0);
         self.last_sample = Some(now);
         let stats: TrafficStats = snapshot.traffic;
         let ping = snapshot
@@ -272,12 +287,24 @@ impl View {
             direct_up: stats.direct_up_bps as f32,
             ping,
         };
-        self.totals.down += point.down as f64;
-        self.totals.up += point.up as f64;
-        self.totals.proxy_down += point.proxy_down as f64;
-        self.totals.proxy_up += point.proxy_up as f64;
-        self.totals.direct_down += point.direct_down as f64;
-        self.totals.direct_up += point.direct_up as f64;
+        // Prefer the core's own byte counters: integrating sampled rates drifts
+        // as soon as one frame is late, and double-counts when the UI samples
+        // twice between two core updates.
+        if stats.totals_known {
+            self.totals.down = stats.total_down as f64;
+            self.totals.up = stats.total_up as f64;
+            self.totals.proxy_down = stats.proxy_down_total as f64;
+            self.totals.proxy_up = stats.proxy_up_total as f64;
+            self.totals.direct_down = stats.direct_down_total as f64;
+            self.totals.direct_up = stats.direct_up_total as f64;
+        } else {
+            self.totals.down += point.down as f64 * elapsed;
+            self.totals.up += point.up as f64 * elapsed;
+            self.totals.proxy_down += point.proxy_down as f64 * elapsed;
+            self.totals.proxy_up += point.proxy_up as f64 * elapsed;
+            self.totals.direct_down += point.direct_down as f64 * elapsed;
+            self.totals.direct_up += point.direct_up as f64 * elapsed;
+        }
         self.series.push_back(point);
         while self.series.len() > 900 {
             self.series.pop_front();
@@ -1546,21 +1573,29 @@ fn level_color(p: &Palette, level: &str) -> Color32 {
 /* Sidebar & topbar                                                           */
 /* -------------------------------------------------------------------------- */
 
-fn logo(ui: &mut Ui, p: &Palette, size: f32) {
+fn brand_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("protogrid-brand-icon");
+    if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return texture;
+    }
+    let texture = ctx.load_texture(
+        "protogrid-brand-icon",
+        crate::brand::color_image(),
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+    texture
+}
+
+fn logo(ui: &mut Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same((size * 0.3) as u8), p.accent);
-    let triangle = vec![
-        egui::pos2(rect.center().x - 1.0, rect.top() + size * 0.2),
-        egui::pos2(rect.center().x + size * 0.18, rect.center().y),
-        egui::pos2(rect.center().x - 1.0, rect.bottom() - size * 0.2),
-        egui::pos2(rect.center().x - size * 0.18, rect.center().y),
-    ];
-    ui.painter().add(egui::Shape::convex_polygon(
-        triangle,
+    let texture = brand_texture(ui.ctx());
+    ui.painter().image(
+        texture.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
         Color32::WHITE,
-        Stroke::NONE,
-    ));
+    );
 }
 
 fn nav_item(
@@ -1651,7 +1686,7 @@ fn nav_item(
 fn sidebar(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, collapsed: bool) {
     ui.set_width(ui.available_width());
     ui.horizontal(|ui| {
-        logo(ui, p, 30.0);
+        logo(ui, 30.0);
         if !collapsed {
             ui.add_space(2.0);
             ui.label(theme::bold("ProtoGrid", 19.0));
@@ -2174,9 +2209,8 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
     let (down_value, down_unit) = rate(down.down);
     let (up_value, up_unit) = rate(down.up);
     let active = snapshot.active_server();
-    let latency = active
-        .and_then(|server| snapshot.pings.get(&server.id).copied().flatten())
-        .unwrap_or(0);
+    let latency = active.and_then(|server| snapshot.pings.get(&server.id).copied().flatten());
+    let api_core = snapshot.config.settings.core.is_singbox_like();
 
     card_grid(ui, 4, 14.0, |ui, index| match index {
         0 => stat_card(
@@ -2210,12 +2244,14 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             p,
             egui_phosphor::regular::ACTIVITY,
             "Задержка",
-            &latency.to_string(),
+            &latency
+                .map(|ms| ms.to_string())
+                .unwrap_or_else(|| "—".into()),
             "мс",
             active
                 .map(|server| truncate(&server.display_name(), 18))
                 .unwrap_or_else(|| "нет сервера".into()),
-            "потери 0%".into(),
+            "потери —".into(),
             &ping_values,
             p.green,
             p.green_soft,
@@ -2225,9 +2261,17 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             p,
             egui_phosphor::regular::WIFI_HIGH,
             "Соединения",
-            &format!("{:.0}", down.conns),
-            "шт",
-            "TCP + UDP".into(),
+            &if api_core {
+                format!("{:.0}", down.conns)
+            } else {
+                "—".into()
+            },
+            if api_core { "шт" } else { "" },
+            if api_core {
+                "TCP + UDP".into()
+            } else {
+                "нет API у ядра".into()
+            },
             if snapshot.is_connected() {
                 "активно".into()
             } else {
@@ -2337,8 +2381,13 @@ fn speed_card(
                         .iter()
                         .map(|point| point.down.max(point.up))
                         .fold(0.0_f32, f32::max);
+                    let source = if snapshot.config.settings.core.is_singbox_like() {
+                        "ядро"
+                    } else {
+                        "интерфейс"
+                    };
                     ui.label(
-                        RichText::new(format!("интерфейс · пик {}", rate_plain(peak)))
+                        RichText::new(format!("{source} · пик {}", rate_plain(peak)))
                             .size(11.0)
                             .color(p.faint),
                     );
@@ -2436,9 +2485,9 @@ fn route_card(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
         + view.totals.direct_up;
     let proxy = view.totals.proxy_down + view.totals.proxy_up;
     let share = if total > 0.0 {
-        (proxy / total * 100.0).round() as u32
+        Some((proxy / total * 100.0).round() as u32)
     } else {
-        0
+        None
     };
     let current = view.series.back().copied().unwrap_or_default();
     Frame::new()
@@ -2474,7 +2523,12 @@ fn route_card(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(theme::semibold(format!("{share}%"), 40.0));
+                ui.label(theme::semibold(
+                    share
+                        .map(|value| format!("{value}%"))
+                        .unwrap_or_else(|| "—".into()),
+                    40.0,
+                ));
                 ui.label(RichText::new("через прокси").size(11.5).color(p.faint));
             });
             ui.add_space(4.0);
@@ -3592,7 +3646,7 @@ fn subscription_card(
                     );
                     ui.add(
                         egui::Label::new(
-                            RichText::new(&sub.url)
+                            RichText::new(protogrid_core::subscription::display_url(&sub.url))
                                 .size(10.5)
                                 .color(p.faint)
                                 .family(FontFamily::Monospace),
@@ -3852,13 +3906,18 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
     );
 
     let cards = routing_cards();
-    card_grid(ui, 3, 12.0, |ui, index| {
-        preset_card(ui, p, &cards[index], snapshot, engine);
+    let profiles = snapshot.config.custom_profiles.as_slice();
+    let total = cards.len() + profiles.len() + 1;
+    cards_grid(ui, 3, 12.0, total, |ui, index| {
+        if index < cards.len() {
+            preset_card(ui, p, &cards[index], snapshot, engine);
+        } else if index < cards.len() + profiles.len() {
+            let profile = &profiles[index - cards.len()];
+            custom_profile_card(ui, p, profile, snapshot, engine);
+        } else {
+            new_profile_card(ui, p, engine);
+        }
     });
-    if let Some(profile) = snapshot.config.custom_profile.as_ref() {
-        ui.add_space(12.0);
-        custom_profile_card(ui, p, profile, preset == RoutingPreset::Custom, engine);
-    }
     ui.add_space(14.0);
     let tun_on = tun_active(snapshot);
 
@@ -3885,6 +3944,39 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                             );
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if let Some(profile) = snapshot.config.active_custom_profile() {
+                                badge(ui, p, &profile.name, p.amber, p.amber_soft, true);
+                                if small_ghost(
+                                    ui,
+                                    p,
+                                    egui_phosphor::regular::PENCIL_SIMPLE,
+                                    "Переименовать",
+                                )
+                                .clicked()
+                                {
+                                    view.profile_draft =
+                                        Some((profile.id.clone(), profile.name.clone()));
+                                    view.modal = Some(ModalState::ProfileName);
+                                }
+                                if small_ghost(ui, p, egui_phosphor::regular::TRASH, "Удалить")
+                                    .clicked()
+                                {
+                                    view.confirm = Some(Confirm {
+                                        title: "Удалить профиль?".into(),
+                                        message: format!(
+                                            "«{}» и его правила будут удалены. Остальные профили \
+                                             останутся.",
+                                            profile.name
+                                        ),
+                                        label: "Удалить".into(),
+                                        danger: true,
+                                        action: ConfirmAction::DeleteRoutingProfile(
+                                            profile.id.clone(),
+                                        ),
+                                    });
+                                    view.modal = Some(ModalState::Confirm);
+                                }
+                            }
                             badge(
                                 ui,
                                 p,
@@ -3902,16 +3994,6 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                 p.accent_soft,
                                 false,
                             );
-                            if preset == RoutingPreset::Custom {
-                                badge(
-                                    ui,
-                                    p,
-                                    RoutingPreset::Custom.label(),
-                                    p.amber,
-                                    p.amber_soft,
-                                    true,
-                                );
-                            }
                         });
                     });
                 });
@@ -3944,25 +4026,12 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                     BtnKind::Outline,
                                 )
                                 .on_hover_text(
-                                    "Скопирует правила пресета в свой профиль — дальше их можно \
-                                     менять, сохранения пойдут уже в него",
+                                    "Скопирует правила пресета в новый свой профиль — дальше их \
+                                     можно менять, не трогая пресет",
                                 )
                                 .clicked()
                                 {
-                                    if snapshot.config.custom_profile.is_some() {
-                                        view.confirm = Some(Confirm {
-                                            title: "Заменить свой профиль?".into(),
-                                            message: "Правила пресета станут вашим профилем, \
-                                                      а сохранённые ранее правила пропадут."
-                                                .into(),
-                                            label: "Создать".into(),
-                                            danger: false,
-                                            action: ConfirmAction::ForkRoutingProfile,
-                                        });
-                                        view.modal = Some(ModalState::Confirm);
-                                    } else {
-                                        engine.fork_routing_profile();
-                                    }
+                                    engine.create_custom_profile();
                                 }
                             });
                         });
@@ -4135,7 +4204,7 @@ fn routing_cards() -> [PresetCard; 3] {
     [
         PresetCard {
             id: "bypass",
-            title: "Обход РФ",
+            title: "Жизнь в РФ",
             text: "Сайты РФ и локальная сеть — напрямую, реклама — блок, остальное — через прокси"
                 .into(),
             hint: "7 правил, первое совпадение выигрывает:\n\
@@ -4161,30 +4230,71 @@ fn routing_cards() -> [PresetCard; 3] {
             title: "Прямой",
             text: "Прокси выключен: весь трафик идёт напрямую".into(),
             hint: "Прокси не используется, маршрутизация не применяется.\n\
-                   Список активных правил очищается, но свои правила остаются \
-                   в «Свой профиль»."
+                   Список активных правил очищается, но свои профили остаются \
+                   и к ним можно вернуться."
                 .into(),
         },
     ]
 }
 
-/// Wide card for the user's own profile: keeps their rules reachable after a
-/// built-in preset is applied.
+/// Grid that lays `count` cards in rows of `columns`, unlike [`card_grid`]
+/// which only accepts a fixed cell count.
+fn cards_grid(
+    ui: &mut Ui,
+    columns: usize,
+    gap: f32,
+    count: usize,
+    mut add: impl FnMut(&mut Ui, usize),
+) {
+    if columns == 0 || count == 0 {
+        return;
+    }
+    let available = ui.available_width();
+    let width = ((available - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
+    let inherited_spacing = ui.spacing().item_spacing;
+    let mut index = 0;
+    while index < count {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for column in 0..columns {
+                if index >= count {
+                    break;
+                }
+                if column > 0 {
+                    ui.add_space(gap);
+                }
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing = inherited_spacing;
+                        ui.set_min_width(width);
+                        ui.set_max_width(width);
+                        add(ui, index);
+                    },
+                );
+                index += 1;
+            }
+        });
+        if index < count {
+            ui.add_space(gap);
+        }
+    }
+}
+
+/// Card for a user-created profile. Same size as the built-in preset cards.
 fn custom_profile_card(
     ui: &mut Ui,
     p: &Palette,
     profile: &CustomProfile,
-    active: bool,
+    snapshot: &Snapshot,
     engine: &Engine,
 ) {
+    let active = snapshot.config.settings.routing_preset == Some(RoutingPreset::Custom)
+        && snapshot.config.settings.custom_profile_id.as_deref() == Some(profile.id.as_str());
     let count = rules_count_label(profile.rules.len());
-    let text = if active {
-        format!("Ваши правила · {count}")
-    } else {
-        format!("{count} сохранено — нажмите, чтобы вернуть")
-    };
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 76.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 82.0), Sense::click());
     let radius = CornerRadius::same(12);
     if active {
         paint_vertical_fade(ui.painter(), rect, p.accent_soft, 0.8, 12.0);
@@ -4203,11 +4313,11 @@ fn custom_profile_card(
             egui::StrokeKind::Inside,
         );
     }
-    let inner = rect.shrink2(Vec2::new(15.0, 12.0));
+    let inner = rect.shrink(15.0);
     let mut child = ui.new_child(
         UiBuilder::new()
             .max_rect(inner)
-            .layout(Layout::left_to_right(Align::Center)),
+            .layout(Layout::left_to_right(Align::Min)),
     );
     child.spacing_mut().item_spacing.x = 12.0;
     let (radio, _) = child.allocate_exact_size(Vec2::splat(19.0), Sense::hover());
@@ -4225,33 +4335,91 @@ fn custom_profile_card(
             .painter()
             .circle_stroke(radio.center(), 9.0, Stroke::new(1.5, p.line_strong));
     }
-    let remaining = (child.available_width() - 120.0).max(120.0);
+    let remaining = child.available_width();
     child.allocate_ui_with_layout(
         Vec2::new(remaining, 0.0),
         Layout::top_down(Align::Min),
         |ui| {
             ui.set_max_width(remaining);
-            ui.label(theme::semibold(RoutingPreset::Custom.label(), 13.0));
-            ui.label(RichText::new(&text).size(11.0).color(p.faint));
+            ui.add(
+                egui::Label::new(theme::semibold(&profile.name, 13.0))
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add(egui::Label::new(RichText::new(count).size(11.0).color(p.faint)).truncate());
         },
     );
-    child.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        if active {
-            badge(ui, p, "Активен", p.accent_2, p.accent_soft, true);
-        } else {
-            badge(ui, p, "Вернуть", p.text, p.panel_2, false);
-        }
-    });
-    let tip = if active {
-        "Свои правила применяются сейчас. Правки сохраняются в этом профиле."
-    } else {
-        "Вернёт правила, которые были активны до перехода на пресет. \
-         Пресеты при этом останутся доступны."
-    };
     if response.clicked() && !active {
-        engine.restore_custom_profile();
+        engine.activate_custom_profile(&profile.id);
     }
-    response.on_hover_text(tip);
+    response.on_hover_text(if active {
+        "Профиль применяется сейчас. Название и удаление — в строке «Правила» ниже."
+    } else {
+        "Применит правила этого профиля."
+    });
+}
+
+/// Dashed-looking "create profile" card, sized like the preset cards.
+fn new_profile_card(ui: &mut Ui, p: &Palette, engine: &Engine) {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 82.0), Sense::click());
+    let radius = CornerRadius::same(12);
+    let fill = if response.hovered() {
+        p.panel_2
+    } else {
+        p.panel
+    };
+    ui.painter().rect(
+        rect,
+        radius,
+        fill,
+        Stroke::new(1.0, p.line),
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink(15.0);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = 12.0;
+    let (icon, _) = child.allocate_exact_size(Vec2::splat(19.0), Sense::hover());
+    child.painter().circle_filled(icon.center(), 9.5, p.panel_2);
+    child.painter().text(
+        icon.center(),
+        Align2::CENTER_CENTER,
+        egui_phosphor::regular::PLUS,
+        FontId::new(11.0, FontFamily::Proportional),
+        p.text,
+    );
+    let remaining = child.available_width();
+    child.allocate_ui_with_layout(
+        Vec2::new(remaining, 0.0),
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.set_max_width(remaining);
+            ui.add(
+                egui::Label::new(theme::semibold("Новый профиль", 13.0))
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Копия текущих правил")
+                        .size(11.0)
+                        .color(p.faint),
+                )
+                .truncate()
+                .selectable(false),
+            );
+        },
+    );
+    if response.clicked() {
+        engine.create_custom_profile();
+    }
+    response.on_hover_text(
+        "Создаст ещё один профиль с копией текущих правил. Название можно изменить.",
+    );
 }
 
 fn rules_count_label(count: usize) -> String {
@@ -4313,14 +4481,17 @@ fn preset_card(ui: &mut Ui, p: &Palette, card: &PresetCard, snapshot: &Snapshot,
         Layout::top_down(Align::Min),
         |ui| {
             ui.set_max_width(remaining);
-            ui.label(theme::semibold(card.title, 13.0));
-            ui.label(RichText::new(&card.text).size(11.0).color(p.faint));
+            ui.add(egui::Label::new(theme::semibold(card.title, 13.0)).selectable(false));
+            ui.add(
+                egui::Label::new(RichText::new(&card.text).size(11.0).color(p.faint))
+                    .selectable(false),
+            );
         },
     );
     let clicked = response.clicked();
     let tip = format!(
-        "{}\n\nПравила профиля заменят активные. Свой профиль, если он уже \
-         создан, останется — к нему можно вернуться.",
+        "{}\n\nПравила профиля заменят активные. Свои профили остаются — к ним \
+         можно вернуться.",
         card.hint
     );
     response.on_hover_text(tip);
@@ -4752,10 +4923,9 @@ fn range_label(range: u64) -> &'static str {
 /* -------------------------------------------------------------------------- */
 
 fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
-    let mut logs = view
-        .frozen_logs
-        .clone()
-        .unwrap_or_else(|| snapshot.logs.clone());
+    // Shared, lazily materialized journal. Cloning this `Arc` per frame is
+    // free; the 2000-entry vector itself is only rebuilt after a new line.
+    let logs_owned = engine.logs();
     page_head(
         ui,
         p,
@@ -4807,7 +4977,9 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             )
             .clicked()
             {
-                let text = logs
+                let source: &[LogEntry] =
+                    view.frozen_logs.as_deref().unwrap_or(logs_owned.as_slice());
+                let text = source
                     .iter()
                     .map(|entry| {
                         format!(
@@ -4851,7 +5023,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             {
                 view.logs_paused = !view.logs_paused;
                 if view.logs_paused {
-                    view.frozen_logs = Some(snapshot.logs.clone());
+                    view.frozen_logs = Some(logs_owned.as_ref().clone());
                 } else {
                     view.frozen_logs = None;
                 }
@@ -4859,6 +5031,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
         },
     );
 
+    let logs: &[LogEntry] = view.frozen_logs.as_deref().unwrap_or(logs_owned.as_slice());
     let query = view.logs_filter.to_lowercase();
     let filtered: Vec<&LogEntry> = logs
         .iter()
@@ -4879,6 +5052,22 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                 || entry.source.to_lowercase().contains(&query)
         })
         .collect();
+    let direct = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Direct))
+        .count();
+    let proxied = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Proxy))
+        .count();
+    let tun = filtered
+        .iter()
+        .filter(|entry| entry.route == Some(LogRoute::Tun))
+        .count();
+
+    // One measured character cell drives every journal column, so the header
+    // and all rows stay on the same monospace grid regardless of text length.
+    let grid = LogGrid::new(ui);
 
     Frame::new()
         .fill(p.panel)
@@ -4923,46 +5112,65 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                 .inner_margin(Margin::symmetric(0, 6))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ScrollArea::vertical()
+                    log_header(ui, p, &grid);
+                    let area = ScrollArea::vertical()
                         .id_salt("log-scroll")
                         .auto_shrink([false, false])
                         .stick_to_bottom(view.auto_scroll)
-                        .max_height((ui.available_height() - 70.0).max(300.0))
-                        .show(ui, |ui| {
+                        .max_height((ui.available_height() - 70.0).max(300.0));
+                    if filtered.is_empty() {
+                        area.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            if filtered.is_empty() {
-                                ui.add_space(28.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        RichText::new("Нет записей по текущему фильтру")
-                                            .size(12.5)
-                                            .color(p.faint),
-                                    );
-                                });
-                                ui.add_space(28.0);
-                            }
-                            for entry in &filtered {
-                                log_line(ui, p, entry);
+                            ui.add_space(28.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("Нет записей по текущему фильтру")
+                                        .size(12.5)
+                                        .color(p.faint),
+                                );
+                            });
+                            ui.add_space(28.0);
+                        });
+                    } else {
+                        // `log_line` is a fixed 20 px row. Lay out only the
+                        // visible ones: the journal holds up to 2000 entries,
+                        // and tessellating all of them allocated tens of
+                        // megabytes each time the page was opened.
+                        area.show_rows(ui, LOG_ROW_HEIGHT, filtered.len(), |ui, rows| {
+                            ui.set_min_width(ui.available_width());
+                            for index in rows {
+                                log_line(ui, p, filtered[index], &grid, index);
                             }
                         });
+                    }
                 });
             let (line, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0, p.line);
+            let mut summary = format!(
+                "{} {}",
+                filtered.len(),
+                plural(filtered.len(), "запись", "записи", "записей")
+            );
+            if proxied > 0 {
+                summary.push_str(&format!(" · прокси {proxied}"));
+            }
+            if direct > 0 {
+                summary.push_str(&format!(" · напрямую {direct}"));
+            }
+            if tun > 0 {
+                summary.push_str(&format!(" · tun {tun}"));
+            }
             Frame::new()
                 .inner_margin(Margin::symmetric(16, 8))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!(
-                                "{} {}",
-                                filtered.len(),
-                                plural(filtered.len(), "запись", "записи", "записей")
-                            ))
-                            .size(10.0)
-                            .color(p.faint)
-                            .family(FontFamily::Monospace),
+                            RichText::new(&summary)
+                                .size(10.0)
+                                .color(p.faint)
+                                .family(FontFamily::Monospace),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
@@ -4984,7 +5192,6 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                     });
                 });
         });
-    logs.clear();
 }
 
 fn log_chip(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Response {
@@ -5007,71 +5214,493 @@ fn log_chip(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Respo
     response
 }
 
-fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry) {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, 0, Color32::from_rgba_unmultiplied(127, 127, 127, 12));
+/// Fixed height of one journal row. `log_line` truncates the message, so rows
+/// never wrap and the list can be virtualized by `ScrollArea::show_rows`.
+const LOG_ROW_HEIGHT: f32 = 21.0;
+const LOG_HEADER_HEIGHT: f32 = 22.0;
+const LOG_H_PAD: f32 = 14.0;
+
+/// Horizontal grid shared by the journal header and every log row.
+///
+/// All columns are derived from one measured monospace cell, so metadata never
+/// drifts when a timestamp, level or source changes width.
+struct LogGrid {
+    char_w: f32,
+    gap: f32,
+}
+
+impl LogGrid {
+    fn new(ui: &Ui) -> Self {
+        let char_w = measure(ui, "0", FontId::monospace(11.0)).max(5.0);
+        Self {
+            char_w,
+            gap: (char_w * 1.5).max(10.0),
+        }
     }
-    let inner = Rect::from_min_max(
-        egui::pos2(rect.left() + 16.0, rect.top()),
-        egui::pos2(rect.right() - 16.0, rect.bottom()),
+
+    fn time_w(&self) -> f32 {
+        self.char_w * 8.0
+    }
+
+    fn level_w(&self) -> f32 {
+        self.char_w * 7.0
+    }
+
+    fn source_w(&self) -> f32 {
+        self.char_w * 7.0
+    }
+
+    fn route_w(&self) -> f32 {
+        self.char_w * 7.0
+    }
+}
+
+fn log_header(ui: &mut Ui, p: &Palette, grid: &LogGrid) {
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), LOG_HEADER_HEIGHT),
+        Sense::hover(),
+    );
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 0, p.panel_2);
+    painter.rect_filled(
+        Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 1.0),
+            egui::pos2(rect.right(), rect.bottom()),
+        ),
+        0,
+        p.line,
+    );
+
+    let x_time = rect.left() + LOG_H_PAD;
+    let x_level = x_time + grid.time_w() + grid.gap;
+    let x_source = x_level + grid.level_w() + grid.gap;
+    let x_route = x_source + grid.source_w() + grid.gap;
+    let x_message = x_route + grid.route_w() + grid.gap;
+    let font = FontId::new(9.0, FontFamily::Monospace);
+    let y = rect.center().y;
+    for (x, label) in [
+        (x_time, "ВРЕМЯ"),
+        (x_level, "УРОВЕНЬ"),
+        (x_source, "ИСТОЧНИК"),
+        (x_route, "МАРШРУТ"),
+        (x_message, "СООБЩЕНИЕ"),
+    ] {
+        painter.text(
+            egui::pos2(x, y),
+            Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            p.faint,
+        );
+    }
+}
+
+fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry, grid: &LogGrid, index: usize) {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), LOG_ROW_HEIGHT),
+        Sense::hover(),
+    );
+    let painter = ui.painter().clone();
+
+    // Faint zebra striping: enough to follow a line across the journal, not
+    // enough to compete with the route tint or the coloured tokens.
+    if index % 2 == 1 {
+        painter.rect_filled(
+            rect,
+            0,
+            if p.dark {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 4)
+            } else {
+                Color32::from_rgba_unmultiplied(15, 23, 42, 3)
+            },
+        );
+    }
+    let tint = match entry.route {
+        Some(LogRoute::Direct) => Some(p.amber_soft),
+        Some(LogRoute::Block) => Some(p.red_soft),
+        Some(LogRoute::Tun) => Some(p.cyan_soft),
+        _ => None,
+    };
+    if let Some(color) = tint {
+        painter.rect_filled(rect, 0, color);
+    }
+    if response.hovered() {
+        painter.rect_filled(rect, 0, Color32::from_rgba_unmultiplied(127, 127, 127, 12));
+    }
+
+    let x_time = rect.left() + LOG_H_PAD;
+    let x_level = x_time + grid.time_w() + grid.gap;
+    let x_source = x_level + grid.level_w() + grid.gap;
+    let x_route = x_source + grid.source_w() + grid.gap;
+    let x_message = x_route + grid.route_w() + grid.gap;
+    let y = rect.center().y;
+    let mono = FontId::monospace(10.5);
+
+    painter.text(
+        egui::pos2(x_time, y),
+        Align2::LEFT_CENTER,
+        hhmmss(entry.ts),
+        mono.clone(),
+        p.faint,
+    );
+
+    let level_rect = Rect::from_center_size(
+        egui::pos2(x_level + grid.level_w() * 0.5, y),
+        Vec2::new(grid.level_w() - 4.0, 16.0),
+    );
+    painter.rect_filled(
+        level_rect,
+        CornerRadius::same(4),
+        level_soft_color(p, &entry.level),
+    );
+    painter.text(
+        level_rect.center(),
+        Align2::CENTER_CENTER,
+        log_level_label(&entry.level),
+        FontId::new(9.0, FontFamily::Name("MonoMedium".into())),
+        level_color(p, &entry.level),
+    );
+
+    painter.text(
+        egui::pos2(x_source, y),
+        Align2::LEFT_CENTER,
+        &entry.source,
+        mono,
+        p.faint,
+    );
+
+    if let Some((tag, fg, bg)) = log_route_badge(p, entry.route) {
+        let route_rect = Rect::from_center_size(
+            egui::pos2(x_route + grid.route_w() * 0.5, y),
+            Vec2::new(grid.route_w() - 4.0, 16.0),
+        );
+        painter.rect_filled(route_rect, CornerRadius::same(4), bg);
+        painter.text(
+            route_rect.center(),
+            Align2::CENTER_CENTER,
+            tag,
+            FontId::new(9.0, FontFamily::Name("MonoMedium".into())),
+            fg,
+        );
+    }
+
+    let message_left =
+        x_message.min((rect.right() - LOG_H_PAD - 48.0).max(x_message - grid.char_w * 4.0));
+    let message = Rect::from_min_max(
+        egui::pos2(message_left, rect.top() + 1.0),
+        egui::pos2(rect.right() - LOG_H_PAD, rect.bottom() - 1.0),
     );
     let mut child = ui.new_child(
         UiBuilder::new()
-            .max_rect(inner)
+            .max_rect(message)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    child.spacing_mut().item_spacing.x = 12.0;
-    child.label(
-        RichText::new(hhmmss(entry.ts))
-            .size(10.5)
-            .color(p.faint)
-            .family(FontFamily::Monospace),
-    );
-    child.allocate_ui_with_layout(
-        Vec2::new(42.0, 20.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(42.0);
-            ui.label(
-                RichText::new(entry.level.to_uppercase())
-                    .size(9.0)
-                    .color(level_color(p, &entry.level))
-                    .family(FontFamily::Name("Medium".into())),
-            );
-        },
-    );
-    child.allocate_ui_with_layout(
-        Vec2::new(52.0, 20.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(52.0);
-            ui.label(
-                RichText::new(&entry.source)
-                    .size(10.5)
-                    .color(p.faint)
-                    .family(FontFamily::Monospace),
-            );
-        },
-    );
     child.add(
-        egui::Label::new(
-            RichText::new(&entry.line)
-                .size(11.5)
-                .color(if entry.level == "error" {
-                    p.red
-                } else if entry.level == "warn" || entry.level == "warning" {
-                    p.amber
-                } else {
-                    p.muted
-                })
-                .family(FontFamily::Monospace),
-        )
-        .truncate()
-        .selectable(false),
+        egui::Label::new(log_message_job(p, entry))
+            .truncate()
+            .selectable(false),
     );
+}
+
+fn log_level_label(level: &str) -> &'static str {
+    match level {
+        "error" => "ERROR",
+        "warn" | "warning" => "WARN",
+        "debug" => "DEBUG",
+        "trace" => "TRACE",
+        _ => "INFO",
+    }
+}
+
+fn level_soft_color(p: &Palette, level: &str) -> Color32 {
+    match level {
+        "error" => p.red_soft,
+        "warn" | "warning" => p.amber_soft,
+        "debug" | "trace" => p.panel_3,
+        _ => p.accent_soft,
+    }
+}
+
+/// The route chip uses the same accent colours as the routing pages.
+fn log_route_badge(
+    p: &Palette,
+    route: Option<LogRoute>,
+) -> Option<(&'static str, Color32, Color32)> {
+    match route? {
+        LogRoute::Direct => Some(("DIRECT", p.amber, p.amber_soft)),
+        LogRoute::Proxy => Some(("PROXY", p.green, p.green_soft)),
+        LogRoute::Block => Some(("BLOCK", p.red, p.red_soft)),
+        LogRoute::Tun => Some(("TUN", p.cyan, p.cyan_soft)),
+    }
+}
+
+/// Builds the message line with lightweight syntax highlighting: addresses,
+/// ports and numbers in cyan, keys in blue, status verbs in green/amber/red,
+/// bracketed core tags in violet and profile names in green. The base text
+/// stays muted so the coloured tokens are what the eye catches first.
+fn log_message_job(p: &Palette, entry: &LogEntry) -> LayoutJob {
+    let base = if entry.level == "error" {
+        p.red
+    } else if entry.level == "warn" || entry.level == "warning" {
+        p.amber
+    } else {
+        p.muted
+    };
+    let font = FontId::monospace(11.5);
+    let mut job = LayoutJob::default();
+    let line = entry.line.as_str();
+    let mut pos = 0;
+
+    while pos < line.len() {
+        let rest = &line[pos..];
+        let ch = rest.chars().next().unwrap_or(' ');
+
+        if ch.is_whitespace() {
+            let end = rest
+                .find(|c: char| !c.is_whitespace())
+                .map(|offset| pos + offset)
+                .unwrap_or(line.len());
+            append_log_span(&mut job, &line[pos..end], &font, base, Color32::TRANSPARENT);
+            pos = end;
+            continue;
+        }
+
+        // Core tags such as `[mixed-in]` or `[1082773346_0ms]`.
+        if ch == '[' {
+            if let Some(offset) = rest.find(']') {
+                let end = pos + offset + 1;
+                append_log_span(&mut job, &line[pos..end], &font, p.violet, p.violet_soft);
+                pos = end;
+                continue;
+            }
+        }
+
+        // Quoted values (config paths, error detail) get a green chip.
+        if ch == '"' {
+            if let Some(offset) = rest[1..].find('"') {
+                let end = pos + 1 + offset + 1;
+                append_log_span(&mut job, &line[pos..end], &font, p.green, p.green_soft);
+                pos = end;
+                continue;
+            }
+        }
+
+        let skip = ch.len_utf8();
+        let tail = &rest[skip..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == '[' || c == '"')
+            .map(|offset| pos + skip + offset)
+            .unwrap_or(line.len());
+        let token = &line[pos..end];
+        let (color, background) = log_token_style(p, token, base);
+        append_log_span(&mut job, token, &font, color, background);
+        pos = end;
+    }
+
+    job
+}
+
+fn append_log_span(
+    job: &mut LayoutJob,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+    background: Color32,
+) {
+    if text.is_empty() {
+        return;
+    }
+    job.append(
+        text,
+        0.0,
+        TextFormat {
+            font_id: font.clone(),
+            color,
+            background,
+            ..Default::default()
+        },
+    );
+}
+
+fn log_token_style(p: &Palette, token: &str, base: Color32) -> (Color32, Color32) {
+    let cleaned = token
+        .trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | '!' | '?' | '·' | '"' | '\''));
+    if cleaned.is_empty() {
+        return (base, Color32::TRANSPARENT);
+    }
+
+    if let Some((_, rest)) = cleaned.split_once("://") {
+        if !rest.is_empty() {
+            return (p.accent_2, Color32::TRANSPARENT);
+        }
+    }
+
+    // `127.0.0.1:2280` — address plus port.
+    if let Some((host, port)) = cleaned.rsplit_once(':') {
+        if is_ipv4(host) && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return (p.cyan, Color32::TRANSPARENT);
+        }
+    }
+
+    if is_ipv4(cleaned) || is_mac(cleaned) || is_ipv6(cleaned) {
+        return (p.cyan, Color32::TRANSPARENT);
+    }
+
+    let word = cleaned.trim_matches(':').to_lowercase();
+    if let Some(color) = log_keyword_color(p, &word) {
+        return (color, Color32::TRANSPARENT);
+    }
+
+    // `network:` / `gateway_mac:` field names.
+    if cleaned.ends_with(':') && word.chars().any(|c| c.is_alphanumeric()) {
+        return (p.accent_2, Color32::TRANSPARENT);
+    }
+
+    if is_number_like(cleaned) {
+        return (p.cyan, Color32::TRANSPARENT);
+    }
+    if looks_like_path(cleaned) {
+        return (p.amber, Color32::TRANSPARENT);
+    }
+    if looks_like_domain(cleaned) {
+        return (p.accent_2, Color32::TRANSPARENT);
+    }
+    // Protocol/profile identifiers such as `vless-Nip4Fun-PC|...`.
+    if cleaned.contains('|') {
+        return (p.green, Color32::TRANSPARENT);
+    }
+
+    (base, Color32::TRANSPARENT)
+}
+
+fn log_keyword_color(p: &Palette, word: &str) -> Option<Color32> {
+    match word {
+        "error"
+        | "err"
+        | "failed"
+        | "fail"
+        | "failure"
+        | "blocked"
+        | "block"
+        | "timeout"
+        | "ошибка"
+        | "ошибки"
+        | "недоступен"
+        | "недоступно" => Some(p.red),
+        "warn" | "warning" | "retry" | "предупреждение" | "найден" | "найдено" => {
+            Some(p.amber)
+        }
+        "started"
+        | "start"
+        | "listening"
+        | "connected"
+        | "ready"
+        | "ok"
+        | "success"
+        | "подключено"
+        | "запущен"
+        | "запущено"
+        | "готово"
+        | "включено"
+        | "успешно" => Some(p.green),
+        "updated" | "update" | "loaded" | "запуск" | "обновлено" | "загружено" | "конфиг" => {
+            Some(p.accent_2)
+        }
+        "direct" | "напрямую" => Some(p.amber),
+        "proxy" | "прокси" => Some(p.green),
+        "tun" => Some(p.cyan),
+        "sing-box" | "xray" | "clash" => Some(p.violet),
+        _ if word.starts_with("protogrid") => Some(p.accent_2),
+        _ if word.starts_with("vless")
+            || word.starts_with("vmess")
+            || word.starts_with("trojan")
+            || word.starts_with("shadowsocks") =>
+        {
+            Some(p.green)
+        }
+        _ => None,
+    }
+}
+
+fn is_ipv4(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.parse::<u8>().is_ok())
+}
+
+fn is_mac(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(':').collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn is_ipv6(text: &str) -> bool {
+    text.contains(':')
+        && text.matches(':').count() >= 2
+        && text.chars().all(|c| c.is_ascii_hexdigit() || c == ':')
+}
+
+fn is_number_like(text: &str) -> bool {
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    text.chars().all(|c| {
+        c.is_ascii_digit()
+            || c.is_ascii_alphabetic()
+            || matches!(c, '.' | ',' | '_' | '-' | '/' | '%' | '+' | '~' | ':')
+    })
+}
+
+fn looks_like_path(text: &str) -> bool {
+    if text.starts_with('/')
+        || text.starts_with('\\')
+        || text.starts_with("~/")
+        || text.starts_with("./")
+    {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    if text.contains('\\') {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    [
+        ".exe", ".dll", ".json", ".yaml", ".yml", ".toml", ".log", ".conf", ".db", ".txt",
+    ]
+    .iter()
+    .any(|extension| lower.ends_with(extension))
+}
+
+fn looks_like_domain(text: &str) -> bool {
+    if text.contains(':') || text.contains('|') || text.contains('@') {
+        return false;
+    }
+    let Some((name, tld)) = text.rsplit_once('.') else {
+        return false;
+    };
+    if name.is_empty() || name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    tld.len() >= 2
+        && tld.len() <= 24
+        && tld.chars().all(|c| c.is_ascii_alphabetic())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -5189,6 +5818,8 @@ fn settings_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
     });
     ui.add_space(14.0);
     settings_dns(ui, p, view, snapshot, &mut draft);
+    ui.add_space(14.0);
+    settings_backup(ui, p, view, engine);
     ui.add_space(14.0);
     settings_about(ui, p, snapshot, engine);
 
@@ -5450,6 +6081,16 @@ fn settings_connection(
                     switch(ui, p, &mut draft.allow_lan);
                 },
             );
+            if draft.allow_lan {
+                ui.label(
+                    RichText::new(
+                        "Прокси будет доступен всем устройствам в сети без пароля. \
+                         Включайте только в доверенной локальной сети.",
+                    )
+                    .size(10.0)
+                    .color(p.amber),
+                );
+            }
             set_row(
                 ui,
                 p,
@@ -5814,7 +6455,7 @@ fn core_option(
                 ui.vertical(|ui| {
                     ui.label(theme::medium(
                         match kind {
-                            CoreKind::Protogrid => "ProtoGrid",
+                            CoreKind::Protogrid => "ProtoGrid-core",
                             CoreKind::Singbox => "sing-box",
                             CoreKind::Xray => "Xray-core",
                         },
@@ -5870,6 +6511,73 @@ fn core_option(
             draft.tun_enabled = false;
         }
     }
+}
+
+fn settings_backup(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
+    settings_card(
+        ui,
+        p,
+        "Экспорт и импорт",
+        "Перенос настроек и профилей маршрутизации между устройствами",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if action_button(
+                            ui,
+                            p,
+                            egui_phosphor::regular::FLOPPY_DISK,
+                            "Экспорт настроек",
+                            BtnKind::Outline,
+                        )
+                        .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Экспорт настроек ProtoGrid")
+                                .set_file_name("protogrid-settings.json")
+                                .add_filter("JSON", &["json"])
+                                .save_file()
+                            {
+                                engine.export_settings_to(&path);
+                            }
+                        }
+                        if action_button(
+                            ui,
+                            p,
+                            egui_phosphor::regular::ARROWS_DOWN_UP,
+                            "Импорт настроек",
+                            BtnKind::Ghost,
+                        )
+                        .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Импорт настроек ProtoGrid")
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                if engine.import_settings_from(&path) {
+                                    // Re-read from the next snapshot instead of
+                                    // keeping the pre-import draft on screen.
+                                    view.settings_draft = None;
+                                    view.settings_dirty = false;
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Файл содержит только настройки, правила и профили маршрутизации. \
+                             Серверы, UUID, пароли и подписки в него не попадают.",
+                        )
+                        .size(10.5)
+                        .color(p.faint),
+                    );
+                });
+        },
+    );
 }
 
 fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
@@ -5953,6 +6661,1093 @@ fn settings_about(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine
 }
 
 /* -------------------------------------------------------------------------- */
+/* Information                                                                */
+/* -------------------------------------------------------------------------- */
+
+fn info_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, _engine: &Engine) {
+    page_head(
+        ui,
+        p,
+        "Информация",
+        "Простыми словами: как работает подключение, зачем три ядра и что выбрать",
+        |ui| {
+            if action_button(
+                ui,
+                p,
+                egui_phosphor::regular::GEAR_SIX,
+                "Настройки ядра",
+                BtnKind::Outline,
+            )
+            .clicked()
+            {
+                view.page = Page::Settings;
+                view.settings_draft = Some(settings_draft(snapshot));
+                view.settings_dirty = false;
+            }
+        },
+    );
+    info_route_card(ui, p);
+    ui.add_space(14.0);
+    info_cheatsheet(ui, p);
+    ui.add_space(14.0);
+    info_cores_section(ui, p, snapshot);
+    ui.add_space(14.0);
+    info_protocols_section(ui, p);
+    ui.add_space(14.0);
+    info_transport_section(ui, p);
+    ui.add_space(14.0);
+    info_tun_section(ui, p);
+    ui.add_space(14.0);
+    info_choice_section(ui, p, snapshot);
+    ui.add_space(20.0);
+}
+
+fn info_route_card(ui: &mut Ui, p: &Palette) {
+    Frame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(16)
+        .inner_margin(Margin::ZERO)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            Frame::new()
+                .inner_margin(Margin::symmetric(20, 18))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(theme::semibold("Как работает подключение", 14.0));
+                            ui.label(
+                                RichText::new(
+                                    "ProtoGrid — посредник между вашим устройством и сервером. \
+                                     Он забирает трафик, шифрует его и отправляет по туннелю.",
+                                )
+                                .size(11.5)
+                                .color(p.muted),
+                            );
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            pill(
+                                ui,
+                                "4 шага",
+                                p.accent_2,
+                                p.accent_soft,
+                                Stroke::new(1.0, p.accent_line),
+                            );
+                        });
+                    });
+                    ui.add_space(14.0);
+                    paint_route_diagram(ui, p);
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            "Снаружи виден только зашифрованный трафик до сервера. \
+                             Провайдер не знает, какие сайты вы открываете.",
+                        )
+                        .size(10.5)
+                        .color(p.faint),
+                    );
+                });
+        });
+}
+
+fn paint_route_diagram(ui: &mut Ui, p: &Palette) {
+    let width = ui.available_width().max(240.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 116.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let gap = (width * 0.032).clamp(8.0, 24.0);
+    let node_w = ((width - gap * 3.0) / 4.0).max(58.0);
+    let node_h = 94.0;
+    let top = rect.top() + 8.0;
+    let nodes = [
+        (
+            egui_phosphor::regular::DESKTOP,
+            "Вы",
+            "браузер и игры",
+            p.accent,
+        ),
+        (
+            egui_phosphor::regular::SHIELD_CHECK,
+            "ProtoGrid",
+            "ловит трафик",
+            p.cyan,
+        ),
+        (
+            egui_phosphor::regular::LOCK_KEY,
+            "Туннель",
+            "шифрует данные",
+            p.violet,
+        ),
+        (
+            egui_phosphor::regular::GLOBE,
+            "Сервер",
+            "выход в интернет",
+            p.green,
+        ),
+    ];
+    for (index, (icon, title, subtitle, color)) in nodes.iter().enumerate() {
+        let left = rect.left() + index as f32 * (node_w + gap);
+        let node = Rect::from_min_size(egui::pos2(left, top), Vec2::new(node_w, node_h));
+        painter.rect(
+            node,
+            CornerRadius::same(12),
+            p.panel_2,
+            Stroke::new(1.0, tinted(*color, if p.dark { 80 } else { 60 })),
+            egui::StrokeKind::Inside,
+        );
+        let center_x = node.center().x;
+        painter.circle_filled(
+            egui::pos2(center_x, top + 27.0),
+            15.0,
+            tinted(*color, if p.dark { 34 } else { 24 }),
+        );
+        painter.text(
+            egui::pos2(center_x, top + 27.0),
+            Align2::CENTER_CENTER,
+            *icon,
+            FontId::new(17.0, FontFamily::Proportional),
+            *color,
+        );
+        painter.text(
+            egui::pos2(center_x, top + 53.0),
+            Align2::CENTER_CENTER,
+            truncate(title, 14),
+            medium_font(11.5),
+            p.text,
+        );
+        painter.text(
+            egui::pos2(center_x, top + 71.0),
+            Align2::CENTER_CENTER,
+            truncate(subtitle, 17),
+            FontId::proportional(9.0),
+            p.faint,
+        );
+        if index + 1 < nodes.len() {
+            let y = top + node_h * 0.5;
+            let start = egui::pos2(node.right() + 3.0, y);
+            let end = egui::pos2(node.right() + gap - 3.0, y);
+            painter.line_segment([start, end], Stroke::new(1.5, p.line_strong));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    end,
+                    egui::pos2(end.x - 6.0, end.y - 4.0),
+                    egui::pos2(end.x - 6.0, end.y + 4.0),
+                ],
+                p.line_strong,
+                Stroke::NONE,
+            ));
+        }
+    }
+}
+
+fn info_cheatsheet(ui: &mut Ui, p: &Palette) {
+    let terms = [
+        (
+            egui_phosphor::regular::CUBE,
+            "Ядро",
+            "Движок, который строит туннель и говорит с сервером.",
+            p.accent,
+        ),
+        (
+            egui_phosphor::regular::PLUG,
+            "Протокол",
+            "Язык общения с сервером: VLESS, VMess, Trojan и другие.",
+            p.violet,
+        ),
+        (
+            egui_phosphor::regular::ROAD_HORIZON,
+            "Транспорт",
+            "Способ доставки: TCP, WebSocket, XHTTP, QUIC.",
+            p.cyan,
+        ),
+        (
+            egui_phosphor::regular::SHIELD,
+            "TUN",
+            "Перехват всего трафика системы. Нужны права администратора.",
+            p.amber,
+        ),
+    ];
+    card_grid(ui, 4, 12.0, |ui, index| {
+        let (icon, title, text, color) = terms[index];
+        info_term_tile(ui, p, icon, title, text, color);
+    });
+}
+
+fn info_term_tile(ui: &mut Ui, p: &Palette, icon: &str, title: &str, text: &str, color: Color32) {
+    Frame::new()
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(13))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(92.0);
+            icon_box(
+                ui,
+                p,
+                icon,
+                color,
+                tinted(color, if p.dark { 32 } else { 22 }),
+                30.0,
+            );
+            ui.add_space(8.0);
+            ui.label(theme::semibold(title, 11.5));
+            ui.label(RichText::new(text).size(10.0).color(p.muted));
+        });
+}
+
+fn info_cores_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
+    let selected = snapshot.config.settings.core;
+    settings_card(
+        ui,
+        p,
+        "Три ядра — три инструмента",
+        "Ядро — это программа-движок. Переключить его можно в «Настройках».",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "Все три ядра запускают прокси, но умеют разные протоколы и транспорты. \
+                             Поэтому один и тот же сервер может работать в одном ядре и не работать в другом.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    card_grid(ui, 3, 12.0, |ui, index| match index {
+                        0 => info_core_tile(
+                            ui,
+                            p,
+                            "ProtoGrid-core",
+                            "ProtoGrid-core · всё в одном",
+                            egui_phosphor::regular::ROCKET,
+                            p.accent,
+                            "Рекомендуется",
+                            p.green,
+                            &[
+                                "TUN и системный прокси",
+                                "XHTTP, mKCP, XDRIVE, MASQUE",
+                                "Hysteria2 и TUIC",
+                                "Reality 26 и Xray-серверы",
+                            ],
+                            "Выбирайте, если не знаете, что подойдёт.",
+                            selected == CoreKind::Protogrid,
+                        ),
+                        1 => info_core_tile(
+                            ui,
+                            p,
+                            "sing-box",
+                            "Стоковый · стабильная база",
+                            egui_phosphor::regular::CUBE,
+                            p.cyan,
+                            "Стабильный",
+                            p.cyan,
+                            &[
+                                "TUN и системный прокси",
+                                "Hysteria2 и TUIC",
+                                "Clash API и selector",
+                                "Без XHTTP, mKCP и VLESS Encryption",
+                            ],
+                            "Для чистого sing-box-стека.",
+                            selected == CoreKind::Singbox,
+                        ),
+                        _ => info_core_tile(
+                            ui,
+                            p,
+                            "Xray-core",
+                            "Эталон Xray-стека",
+                            egui_phosphor::regular::ATOM,
+                            p.amber,
+                            "Для Xray",
+                            p.amber,
+                            &[
+                                "XHTTP, mKCP, XDRIVE",
+                                "Reality 26 и VLESS Encryption",
+                                "VLESS, VMess, Trojan, SS",
+                                "Без TUN, Hysteria2 и TUIC",
+                            ],
+                            "Для Xray-серверов и тонкой настройки.",
+                            selected == CoreKind::Xray,
+                        ),
+                    });
+                    ui.add_space(12.0);
+                    info_why_cores(ui, p);
+                });
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn info_core_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    title: &str,
+    subtitle: &str,
+    icon: &str,
+    color: Color32,
+    tag: &str,
+    tag_color: Color32,
+    bullets: &[&str],
+    footer: &str,
+    selected: bool,
+) {
+    Frame::new()
+        .fill(if selected { p.accent_soft } else { p.panel_2 })
+        .stroke(Stroke::new(
+            1.0,
+            if selected { p.accent_line } else { p.line },
+        ))
+        .corner_radius(12)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(230.0);
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    color,
+                    tinted(color, if p.dark { 34 } else { 24 }),
+                    34.0,
+                );
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 12.5));
+                    ui.label(RichText::new(subtitle).size(9.5).color(p.faint));
+                });
+            });
+            ui.add_space(8.0);
+            if selected {
+                pill(
+                    ui,
+                    "Сейчас выбрано",
+                    p.accent_2,
+                    p.accent_soft,
+                    Stroke::new(1.0, p.accent_line),
+                );
+            } else {
+                pill(
+                    ui,
+                    tag,
+                    tag_color,
+                    tinted(tag_color, if p.dark { 28 } else { 18 }),
+                    Stroke::new(1.0, tinted(tag_color, if p.dark { 80 } else { 60 })),
+                );
+            }
+            ui.add_space(8.0);
+            for bullet in bullets {
+                let negative = bullet.starts_with("Без ") || bullet.starts_with("Нет ");
+                let (bullet_icon, bullet_color) = if negative {
+                    (egui_phosphor::regular::X_CIRCLE, p.red)
+                } else {
+                    (egui_phosphor::regular::CHECK_CIRCLE, p.green)
+                };
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(bullet_icon).size(11.0).color(bullet_color));
+                    ui.add(
+                        egui::Label::new(RichText::new(*bullet).size(10.0).color(p.muted)).wrap(),
+                    );
+                });
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(footer).size(9.5).color(p.faint));
+        });
+}
+
+fn info_why_cores(ui: &mut Ui, p: &Palette) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(10)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(theme::semibold("Почему ядра разные?", 11.5));
+            ui.label(
+                RichText::new(
+                    "sing-box и Xray — независимые проекты. Они по-разному развивают одни и те же \
+                     протоколы, поэтому их возможности не совпадают.",
+                )
+                .size(10.5)
+                .color(p.muted),
+            );
+            ui.add_space(8.0);
+            card_grid(ui, 2, 12.0, |ui, index| {
+                let (title, text, color) = if index == 0 {
+                    (
+                        "sing-box силён",
+                        "TUN, Hysteria2, TUIC, selector и Clash API.",
+                        p.cyan,
+                    )
+                } else {
+                    (
+                        "Xray силён",
+                        "XHTTP, mKCP, XDRIVE, VLESS Encryption и Reality 26.",
+                        p.amber,
+                    )
+                };
+                Frame::new()
+                    .fill(tinted(color, if p.dark { 20 } else { 12 }))
+                    .stroke(Stroke::new(
+                        1.0,
+                        tinted(color, if p.dark { 70 } else { 50 }),
+                    ))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(theme::medium(title, 10.5));
+                        ui.label(RichText::new(text).size(10.0).color(p.muted));
+                    });
+            });
+            ui.add_space(8.0);
+            Frame::new()
+                .fill(p.accent_soft)
+                .stroke(Stroke::new(1.0, p.accent_line))
+                .corner_radius(8)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "ProtoGrid-core = sing-box + недостающие Xray-транспорты. \
+                             Одно ядро, которое понимает почти все серверы.",
+                        )
+                        .size(10.5)
+                        .color(p.accent_2),
+                    );
+                });
+        });
+}
+
+fn info_protocols_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "Протоколы простыми словами",
+        "Протокол — это язык, на котором клиент договаривается с сервером.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "Вам не нужно выбирать протокол вручную: ProtoGrid определяет его из ссылки \
+                             или подписки. Ниже — чтобы понимать, что происходит.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("КЛАССИЧЕСКИЕ TCP-ПРОТОКОЛЫ")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Vless,
+                                "TCP · TLS/Reality",
+                                "Лёгкий и быстрый",
+                                "Современный протокол без лишнего: UUID вместо пароля, поддержка Reality, \
+                                 Vision и UDP. Обычно самый быстрый выбор для TCP-серверов.",
+                                "Если сервер даёт vless:// — берите его.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Vmess,
+                                "TCP · TLS",
+                                "Старый, но живой",
+                                "Чуть тяжелее VLESS, зато поддерживается почти везде: UUID, alterId, AEAD. \
+                                 Хорошо подходит для старых подписок.",
+                                "Когда сервер даёт vmess://.",
+                            );
+                        }
+                    });
+                    ui.add_space(12.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Trojan,
+                                "TCP · TLS",
+                                "Маскировка под HTTPS",
+                                "Выглядит как обычный HTTPS-сайт. Пароль и TLS, простая настройка, \
+                                 неплохая маскировка от фильтрации.",
+                                "Когда сервер даёт trojan://.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Shadowsocks,
+                                "TCP · SIP002",
+                                "Простой и быстрый",
+                                "Пароль и метод шифрования, без TLS внутри. Поддерживает плагины \
+                                 obfs-local и v2ray-plugin.",
+                                "Для лёгких серверов и плагинов.",
+                            );
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("БЫСТРЫЕ QUIC-ПРОТОКОЛЫ")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Hysteria2,
+                                "QUIC",
+                                "Скорость на плохой сети",
+                                "Работает поверх QUIC, хорошо переживает потери пакетов и высокий пинг. \
+                                 Есть маскировка obfs Salamander.",
+                                "Только sing-box и ProtoGrid.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Tuic,
+                                "QUIC",
+                                "QUIC с настройками",
+                                "Ещё один QUIC-протокол: congestion control, UDP relay и несколько \
+                                 режимов передачи.",
+                                "Только sing-box и ProtoGrid.",
+                            );
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("ОСОБЫЕ ПОДКЛЮЧЕНИЯ")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 2, 12.0, |ui, index| {
+                        if index == 0 {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::Masque,
+                                "HTTP/3 · QUIC",
+                                "Маскировка под HTTP/3",
+                                "Трафик выглядит как обычный HTTP/3. Полезно там, где QUIC разрешён, \
+                                 а VPN-протоколы фильтруются.",
+                                "ProtoGrid и Xray при поддержке ядра.",
+                            );
+                        } else {
+                            info_protocol_tile(
+                                ui,
+                                p,
+                                Protocol::OpenVpn,
+                                "UDP/TCP · TLS",
+                                "Классический VPN",
+                                "Готовый профиль .ovpn: сертификаты, TLS, auth-user-pass. Не прокси- \
+                                 протокол, но удобен для корпоративных серверов.",
+                                "ProtoGrid и sing-box 1.14+.",
+                            );
+                        }
+                    });
+                });
+        },
+    );
+}
+
+fn info_protocol_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    protocol: Protocol,
+    transport: &str,
+    headline: &str,
+    text: &str,
+    who: &str,
+) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(142.0);
+            ui.horizontal(|ui| {
+                protocol_badge(ui, p, protocol);
+                ui.label(RichText::new(transport).size(9.0).color(p.faint));
+            });
+            ui.add_space(7.0);
+            ui.label(theme::semibold(headline, 11.5));
+            ui.label(RichText::new(text).size(10.0).color(p.muted));
+            ui.add_space(5.0);
+            ui.label(RichText::new(who).size(9.5).color(p.faint));
+        });
+}
+
+fn info_transport_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "Транспорт: как везём данные",
+        "Протокол отвечает «что», транспорт — «как». Шифрование оборачивает всё сверху.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    info_layer_stack(ui, p);
+                    ui.add_space(14.0);
+                    card_grid(ui, 3, 12.0, |ui, index| {
+                        let (icon, title, text, color) = match index {
+                            0 => (
+                                egui_phosphor::regular::PLUG,
+                                "TCP",
+                                "База. Быстро и просто, но без маскировки.",
+                                p.green,
+                            ),
+                            1 => (
+                                egui_phosphor::regular::BROWSER,
+                                "WebSocket",
+                                "Маскировка под обычный сайт, дружит с CDN.",
+                                p.cyan,
+                            ),
+                            _ => (
+                                egui_phosphor::regular::ARROWS_LEFT_RIGHT,
+                                "gRPC",
+                                "HTTP/2-транспорт, стабилен у некоторых провайдеров.",
+                                p.violet,
+                            ),
+                        };
+                        info_transport_tile(ui, p, icon, title, text, color);
+                    });
+                    ui.add_space(12.0);
+                    card_grid(ui, 3, 12.0, |ui, index| {
+                        let (icon, title, text, color) = match index {
+                            0 => (
+                                egui_phosphor::regular::GLOBE,
+                                "XHTTP",
+                                "Обычные HTTP-запросы, CDN и HTTP/3. Только ProtoGrid и Xray.",
+                                p.accent,
+                            ),
+                            1 => (
+                                egui_phosphor::regular::LIGHTNING,
+                                "mKCP",
+                                "UDP-транспорт для плохих сетей. Только ProtoGrid и Xray.",
+                                p.amber,
+                            ),
+                            _ => (
+                                egui_phosphor::regular::WAVES,
+                                "QUIC",
+                                "Для Hysteria2 и TUIC. Быстро восстанавливается после потерь.",
+                                p.red,
+                            ),
+                        };
+                        info_transport_tile(ui, p, icon, title, text, color);
+                    });
+                });
+        },
+    );
+}
+
+fn info_layer_stack(ui: &mut Ui, p: &Palette) {
+    let layers = [
+        (
+            egui_phosphor::regular::LIGHTBULB,
+            "Что вы делаете",
+            "сайты, игры, приложения",
+            p.green,
+        ),
+        (
+            egui_phosphor::regular::PLUG,
+            "Протокол",
+            "VLESS · VMess · Trojan · Shadowsocks",
+            p.violet,
+        ),
+        (
+            egui_phosphor::regular::ROAD_HORIZON,
+            "Транспорт",
+            "XHTTP · WebSocket · gRPC · TCP · mKCP",
+            p.cyan,
+        ),
+        (
+            egui_phosphor::regular::LOCK_KEY,
+            "Шифрование",
+            "TLS · Reality",
+            p.amber,
+        ),
+    ];
+    for (index, (icon, title, examples, color)) in layers.iter().enumerate() {
+        Frame::new()
+            .fill(tinted(*color, if p.dark { 20 } else { 12 }))
+            .stroke(Stroke::new(
+                1.0,
+                tinted(*color, if p.dark { 70 } else { 50 }),
+            ))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(14, 9))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    icon_box(
+                        ui,
+                        p,
+                        icon,
+                        *color,
+                        tinted(*color, if p.dark { 36 } else { 24 }),
+                        30.0,
+                    );
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(theme::medium(*title, 11.5));
+                        ui.label(RichText::new(*examples).size(10.0).color(p.muted));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{}/{}", index + 1, layers.len()))
+                                .size(9.0)
+                                .color(p.faint),
+                        );
+                    });
+                });
+            });
+        if index + 1 < layers.len() {
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(egui_phosphor::regular::ARROW_DOWN)
+                        .size(14.0)
+                        .color(p.faint),
+                );
+            });
+        }
+    }
+}
+
+fn info_transport_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    icon: &str,
+    title: &str,
+    text: &str,
+    color: Color32,
+) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(13))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(86.0);
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    color,
+                    tinted(color, if p.dark { 32 } else { 22 }),
+                    28.0,
+                );
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 11.0));
+                    ui.add(egui::Label::new(RichText::new(text).size(9.5).color(p.muted)).wrap());
+                });
+            });
+        });
+}
+
+fn info_tun_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "TUN или системный прокси?",
+        "Оба режима пускают трафик через прокси, но перехватывают его по-разному.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    card_grid(ui, 2, 14.0, |ui, index| {
+                        if index == 0 {
+                            info_mode_tile(
+                                ui,
+                                p,
+                                egui_phosphor::regular::GLOBE,
+                                "Системный прокси",
+                                "Без прав администратора",
+                                p.green,
+                                "Прокси прописывается в настройках ОС. Его используют браузер и \
+                                 программы, которые умеют системный прокси.",
+                                &[
+                                    "Просто и без администратора",
+                                    "Хорошо для браузера",
+                                    "Игры могут его игнорировать",
+                                ],
+                            );
+                        } else {
+                            info_mode_tile(
+                                ui,
+                                p,
+                                egui_phosphor::regular::SHIELD_CHECK,
+                                "TUN-режим",
+                                "Нужны права администратора",
+                                p.amber,
+                                "Создаёт виртуальный сетевой адаптер и забирает весь трафик системы — \
+                                 даже от программ, которые не знают о прокси.",
+                                &[
+                                    "Весь трафик, включая игры",
+                                    "Работает с любыми приложениями",
+                                    "Нужны права администратора",
+                                ],
+                            );
+                        }
+                    });
+                    ui.add_space(14.0);
+                    ui.label(
+                        RichText::new("ПРАВА ДЛЯ TUN")
+                            .size(8.5)
+                            .color(p.faint)
+                            .family(FontFamily::Name("Medium".into())),
+                    );
+                    ui.add_space(6.0);
+                    card_grid(ui, 3, 12.0, |ui, index| {
+                        let (icon, title, text) = match index {
+                            0 => (
+                                egui_phosphor::regular::WINDOWS_LOGO,
+                                "Windows",
+                                "Запустите ProtoGrid от имени администратора. wintun.dll должна лежать \
+                                 рядом с ядром (в комплекте — рядом с ProtoGrid.exe).",
+                            ),
+                            1 => (
+                                egui_phosphor::regular::LINUX_LOGO,
+                                "Linux",
+                                "Запуск от root или с CAP_NET_ADMIN.",
+                            ),
+                            _ => (
+                                egui_phosphor::regular::APPLE_LOGO,
+                                "macOS",
+                                "Запуск с правами администратора.",
+                            ),
+                        };
+                        info_os_tile(ui, p, icon, title, text, p.amber);
+                    });
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            "Если прав нет — выключите TUN и пользуйтесь системным прокси или \
+                             локальными HTTP/SOCKS-портами: им администратор не нужен.",
+                        )
+                        .size(10.0)
+                        .color(p.faint),
+                    );
+                });
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn info_mode_tile(
+    ui: &mut Ui,
+    p: &Palette,
+    icon: &str,
+    title: &str,
+    tag: &str,
+    tag_color: Color32,
+    text: &str,
+    bullets: &[&str],
+) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(12)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(190.0);
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    tag_color,
+                    tinted(tag_color, if p.dark { 34 } else { 24 }),
+                    34.0,
+                );
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 12.0));
+                    pill(
+                        ui,
+                        tag,
+                        tag_color,
+                        tinted(tag_color, if p.dark { 26 } else { 16 }),
+                        Stroke::new(1.0, tinted(tag_color, if p.dark { 70 } else { 50 })),
+                    );
+                });
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new(text).size(10.0).color(p.muted));
+            ui.add_space(6.0);
+            for (index, bullet) in bullets.iter().enumerate() {
+                let negative = index + 1 == bullets.len();
+                let (bullet_icon, bullet_color) = if negative {
+                    (egui_phosphor::regular::X_CIRCLE, p.red)
+                } else {
+                    (egui_phosphor::regular::CHECK_CIRCLE, p.green)
+                };
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(bullet_icon).size(11.0).color(bullet_color));
+                    ui.add(
+                        egui::Label::new(RichText::new(*bullet).size(9.5).color(p.muted)).wrap(),
+                    );
+                });
+            }
+        });
+}
+
+fn info_os_tile(ui: &mut Ui, p: &Palette, icon: &str, title: &str, text: &str, color: Color32) {
+    Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(10)
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                icon_box(
+                    ui,
+                    p,
+                    icon,
+                    color,
+                    tinted(color, if p.dark { 30 } else { 20 }),
+                    28.0,
+                );
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 10.5));
+                    ui.add(egui::Label::new(RichText::new(text).size(9.5).color(p.muted)).wrap());
+                });
+            });
+        });
+}
+
+fn info_choice_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
+    let selected = match snapshot.config.settings.core {
+        CoreKind::Protogrid => "ProtoGrid-core",
+        CoreKind::Singbox => "sing-box",
+        CoreKind::Xray => "Xray-core",
+    };
+    settings_card(
+        ui,
+        p,
+        "Что выбрать?",
+        "Короткая шпаргалка для типичных случаев.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    Frame::new()
+                        .fill(p.accent_soft)
+                        .stroke(Stroke::new(1.0, p.accent_line))
+                        .corner_radius(8)
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(egui_phosphor::regular::INFO)
+                                        .size(13.0)
+                                        .color(p.accent_2),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Сейчас в настройках выбрано ядро: {selected}"
+                                    ))
+                                    .size(10.5)
+                                    .color(p.accent_2),
+                                );
+                            });
+                        });
+                    ui.add_space(10.0);
+                    for (icon, condition, answer, color) in [
+                        (
+                            egui_phosphor::regular::QUESTION,
+                            "Не знаю, что выбрать",
+                            "ProtoGrid — он понимает почти всё.",
+                            p.accent,
+                        ),
+                        (
+                            egui_phosphor::regular::SHIELD_CHECK,
+                            "Нужен TUN для игр и всех программ",
+                            "ProtoGrid или sing-box.",
+                            p.amber,
+                        ),
+                        (
+                            egui_phosphor::regular::LIGHTNING,
+                            "Сервер Hysteria2 или TUIC",
+                            "ProtoGrid или sing-box.",
+                            p.red,
+                        ),
+                        (
+                            egui_phosphor::regular::PLUG,
+                            "Сервер Xray-only: XHTTP, mKCP, Reality 26",
+                            "ProtoGrid; Xray-core — если нужен именно Xray.",
+                            p.cyan,
+                        ),
+                        (
+                            egui_phosphor::regular::LEAF,
+                            "Нужен чистый sing-box без форка",
+                            "sing-box.",
+                            p.green,
+                        ),
+                    ] {
+                        Frame::new()
+                            .fill(p.panel_2)
+                            .stroke(Stroke::new(1.0, p.line))
+                            .corner_radius(9)
+                            .inner_margin(Margin::symmetric(11, 8))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new(icon).size(14.0).color(color));
+                                    ui.add_space(2.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(condition).size(10.5).color(p.text));
+                                        ui.label(
+                                            RichText::new(format!("→ {answer}"))
+                                                .size(10.5)
+                                                .color(color),
+                                        );
+                                    });
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+        },
+    );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Modals                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -5993,8 +7788,9 @@ pub fn modals(
                     Some(ModalState::Server) => server_modal(ui, p, view, snapshot, engine),
                     Some(ModalState::Subscription) => subscription_modal(ui, p, view, engine),
                     Some(ModalState::Rule) => rule_modal(ui, p, view, snapshot, engine),
+                    Some(ModalState::ProfileName) => profile_name_modal(ui, p, view, engine),
                     Some(ModalState::Confirm) => confirm_modal(ui, p, view, engine),
-                    Some(ModalState::Help) => help_modal(ui, p),
+                    Some(ModalState::Help) => help_modal(ui, p, view),
                     None => {}
                 });
         });
@@ -6021,7 +7817,7 @@ fn modal_title(ui: &mut Ui, p: &Palette, title: &str, text: &str) {
     ui.add_space(12.0);
 }
 
-fn help_modal(ui: &mut Ui, p: &Palette) {
+fn help_modal(ui: &mut Ui, p: &Palette, view: &mut View) {
     modal_title(
         ui,
         p,
@@ -6071,7 +7867,45 @@ fn help_modal(ui: &mut Ui, p: &Palette) {
             });
         ui.add_space(6.0);
     }
-    help_cores_card(ui, p);
+    Frame::new()
+        .fill(p.accent_soft)
+        .stroke(Stroke::new(1.0, p.accent_line))
+        .corner_radius(8)
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(egui_phosphor::regular::BOOK_OPEN)
+                        .size(22.0)
+                        .color(p.accent_2),
+                );
+                ui.vertical(|ui| {
+                    ui.label(theme::medium("Подробное руководство", 11.5));
+                    ui.label(
+                        RichText::new(
+                            "Ядра, протоколы, транспорты и TUN — отдельная страница с картинками.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if action_button(
+                        ui,
+                        p,
+                        egui_phosphor::regular::ARROW_RIGHT,
+                        "Открыть",
+                        BtnKind::Outline,
+                    )
+                    .clicked()
+                    {
+                        view.page = Page::Info;
+                        view.modal = None;
+                    }
+                });
+            });
+        });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -6088,77 +7922,6 @@ fn help_modal(ui: &mut Ui, p: &Palette) {
             }
         });
     });
-}
-
-/// Last help card: explains why ProtoGrid ships three cores, what each protocol
-/// and transport is for, and why TUN asks for administrator rights.
-fn help_cores_card(ui: &mut Ui, p: &Palette) {
-    Frame::new()
-        .fill(p.panel_2)
-        .stroke(Stroke::new(1.0, p.line))
-        .corner_radius(8)
-        .inner_margin(Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.label(theme::medium("Ядра, протоколы и TUN", 11.5));
-            ui.add_space(6.0);
-            for (heading, text) in [
-                (
-                    "Три ядра",
-                    "ProtoGrid — форк sing-box 1.14.4: TUN, Hysteria2, TUIC, selector и Clash API \
-                     плюс XHTTP, mKCP, VLESS Encryption, XDRIVE, MASQUE, UDP noise и OpenVPN \
-                     endpoint. Стоковый sing-box — стабильная база без XHTTP, mKCP и VLESS \
-                     Encryption (OpenVPN endpoint есть с 1.14). Xray-core — \
-                     эталон Xray-стека: VLESS/VMess/Trojan, Reality 26 и XHTTP, но без TUN, \
-                     Hysteria2, TUIC и OpenVPN. Для большинства серверов подходит ProtoGrid; Xray нужен \
-                     для редких Xray-only настроек.",
-                ),
-                (
-                    "Почему они разные",
-                    "Ядра — независимые реализации одного набора прокси-протоколов. sing-box \
-                     делает ставку на TUN, QUIC-протоколы и Clash API, а Xray — на новые \
-                     Xray-транспорты и Reality. Форк ProtoGrid добавляет в sing-box недостающее \
-                     из Xray, чтобы одним ядром подключаться и к sing-box-, и к Xray-серверам. \
-                     Поэтому один и тот же сервер может работать в одном ядре и не работать \
-                     в другом.",
-                ),
-                (
-                    "Протоколы",
-                    "VLESS — лёгкий stateless-протокол с UUID, TLS/Reality, Vision и XUDP. VMess — \
-                     старший формат с alterId и AEAD. Trojan — маскировка под обычный HTTPS. \
-                     Shadowsocks — простой SIP002/AEAD, плагины obfs-local и v2ray-plugin. \
-                     Hysteria2 — QUIC для быстрых и нестабильных сетей, obfs Salamander. TUIC — \
-                     QUIC с выбором congestion control и UDP relay.",
-                ),
-                (
-                    "Транспорты",
-                    "TCP, WebSocket, gRPC, HTTP Upgrade, XHTTP (включая HTTP/3) и mKCP; сверху TLS \
-                     или Reality. XHTTP маскирует трафик под обычные HTTP-запросы и работает через \
-                     CDN. mKCP превращает TCP в надёжный поток поверх UDP и помогает на сетях \
-                     с потерями. Reality выдаёт себя за чужой TLS-сайт и не требует своего \
-                     сертификата. Hysteria2 и TUIC работают только по QUIC.",
-                ),
-                (
-                    "TUN и права администратора",
-                    "TUN перехватывает весь трафик системы. Windows: запуск от администратора и \
-                     wintun.dll рядом с исполняемым файлом ядра (в комплекте — рядом с \
-                     ProtoGrid.exe; для стокового sing-box — папка cores/sing-box). Linux: root \
-                     или CAP_NET_ADMIN. macOS: права администратора. В ProtoGrid TUN доступен \
-                     только на ядрах sing-box и ProtoGrid; для Xray-серверов выберите sing-box. \
-                     Системному прокси и локальным HTTP/SOCKS-портам права администратора не нужны.",
-                ),
-                (
-                    "Ограничения",
-                    "Xray не умеет Hysteria2, TUIC и TUN; HTTP/2 (h2) удалён в Xray 26. Стоковый \
-                     sing-box не понимает XHTTP, mKCP, VLESS Encryption и XDRIVE — для них нужен \
-                     форк ProtoGrid.",
-                ),
-            ] {
-                ui.label(theme::semibold(heading, 10.5));
-                ui.label(RichText::new(text).size(10.5).color(p.muted));
-                ui.add_space(6.0);
-            }
-        });
 }
 
 fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
@@ -6304,14 +8067,18 @@ fn subscription_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine
         p,
         "Ссылка на подписку",
         TextEdit::singleline(&mut view.subscription_url)
+            .password(true)
             .hint_text("https://example.com/sub?token=...")
             .desired_width(f32::INFINITY),
     );
     ui.add_space(4.0);
     ui.label(
-        RichText::new("Ссылка должна начинаться с http:// или https://.")
-            .size(9.5)
-            .color(p.faint),
+        RichText::new(
+            "Поддерживается только https:// — токен подписки не должен \
+             передаваться открытым текстом.",
+        )
+        .size(9.5)
+        .color(p.faint),
     );
     ui.add_space(14.0);
     ui.horizontal(|ui| {
@@ -6479,6 +8246,58 @@ fn rule_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, en
     view.rule_draft = Some(rule);
 }
 
+fn profile_name_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
+    let Some((id, mut name)) = view.profile_draft.clone() else {
+        view.modal = None;
+        return;
+    };
+    modal_title(
+        ui,
+        p,
+        "Название профиля",
+        "Так профиль будет виден в списке маршрутизации.",
+    );
+    let field_id = Id::new("profile-name-field");
+    ui.memory_mut(|memory| memory.request_focus(field_id));
+    field(
+        ui,
+        p,
+        "Название",
+        TextEdit::singleline(&mut name)
+            .id(field_id)
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Сохранить").size(11.5).color(Color32::WHITE))
+                        .fill(p.accent)
+                        .corner_radius(8)
+                        .min_size(Vec2::new(0.0, 32.0)),
+                )
+                .clicked()
+            {
+                engine.rename_custom_profile(&id, &name);
+                view.modal = None;
+            }
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Отмена").size(11.5))
+                        .fill(Color32::TRANSPARENT)
+                        .corner_radius(8)
+                        .min_size(Vec2::new(0.0, 32.0)),
+                )
+                .clicked()
+            {
+                view.modal = None;
+            }
+        });
+    });
+    view.profile_draft = Some((id, name));
+}
+
 fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
     let Some(mut server) = view.server_draft.clone() else {
         view.modal = None;
@@ -6522,7 +8341,7 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             } else if protocol == Protocol::Masque && !features.masque {
                 "MASQUE доступен только в ядре ProtoGrid"
             } else if protocol == Protocol::OpenVpn && !features.openvpn {
-                "OpenVPN доступен в sing-box 1.14+ с with_openvpn (форк ProtoGrid)"
+                "OpenVPN доступен в sing-box 1.14+ с with_openvpn (ProtoGrid-core)"
             } else {
                 "Протокол не поддерживается выбранным ядром"
             };
@@ -6592,7 +8411,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "UUID",
-                    TextEdit::singleline(&mut server.uuid).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.uuid)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Trojan | Protocol::Hysteria2 => {
@@ -6600,7 +8421,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "Пароль",
-                    TextEdit::singleline(&mut server.password).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Shadowsocks => {
@@ -6608,7 +8431,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "Пароль",
-                    TextEdit::singleline(&mut server.password).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Tuic => {
@@ -6616,7 +8441,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "UUID",
-                    TextEdit::singleline(&mut server.uuid).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.uuid)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             }
             Protocol::Masque => {}
@@ -6628,7 +8455,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             ui,
             p,
             "Пароль",
-            TextEdit::singleline(&mut server.password).desired_width(f32::INFINITY),
+            TextEdit::singleline(&mut server.password)
+                .password(true)
+                .desired_width(f32::INFINITY),
         );
     }
     if server.protocol == Protocol::Shadowsocks {
@@ -6887,6 +8716,16 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             &mut server.allow_insecure,
             "Разрешить недействительный сертификат",
         );
+        if server.allow_insecure {
+            ui.label(
+                RichText::new(
+                    "Проверка TLS-сертификата отключена: соединение можно перехватить. \
+                     Оставьте выключенным, если сервер не использует самоподписанный сертификат.",
+                )
+                .size(9.5)
+                .color(p.amber),
+            );
+        }
         if server.security == Security::Reality {
             ui.columns(3, |columns| {
                 field(
@@ -7081,7 +8920,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                 ui,
                 p,
                 "Secrets (через запятую)",
-                TextEdit::singleline(&mut server.xdrive_secrets).desired_width(f32::INFINITY),
+                TextEdit::singleline(&mut server.xdrive_secrets)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
             );
             if server.xdrive_service == "s3" {
                 ui.columns(2, |columns| {
@@ -7253,7 +9094,9 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                     &mut columns[1],
                     p,
                     "Пароль obfs",
-                    TextEdit::singleline(&mut server.obfs_password).desired_width(f32::INFINITY),
+                    TextEdit::singleline(&mut server.obfs_password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
                 );
             });
         }
@@ -7386,7 +9229,9 @@ fn confirm_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
                         engine.delete_subscription(id.as_str())
                     }
                     ConfirmAction::DeleteRule(id) => engine.delete_rule(id.as_str()),
-                    ConfirmAction::ForkRoutingProfile => engine.fork_routing_profile(),
+                    ConfirmAction::DeleteRoutingProfile(id) => {
+                        engine.delete_custom_profile(id.as_str())
+                    }
                 }
                 view.modal = None;
                 view.confirm = None;
@@ -7516,6 +9361,9 @@ pub fn toasts(ctx: &egui::Context, p: &Palette, view: &mut View) {
 pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
     let p = Palette::from_ctx(ui.ctx());
     view.tick(snapshot);
+    if view.page != Page::Logs {
+        engine.release_logs();
+    }
 
     let width = ui.ctx().input(|input| input.viewport_rect().width());
     let collapsed = width < 1040.0;
@@ -7535,7 +9383,8 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
                 3 => egui::Key::Num4,
                 4 => egui::Key::Num5,
                 5 => egui::Key::Num6,
-                _ => egui::Key::Num7,
+                6 => egui::Key::Num7,
+                _ => egui::Key::Num8,
             };
             if ui.ctx().input(|input| input.key_pressed(key)) {
                 view.page = *page;
@@ -7610,6 +9459,7 @@ pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) 
                         Page::Charts => charts_page(ui, &p, view, snapshot),
                         Page::Logs => logs_page(ui, &p, view, snapshot, engine),
                         Page::Settings => settings_page(ui, &p, view, snapshot, engine),
+                        Page::Info => info_page(ui, &p, view, snapshot, engine),
                     }
                 });
         });

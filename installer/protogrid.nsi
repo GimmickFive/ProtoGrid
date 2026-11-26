@@ -3,7 +3,7 @@ Unicode true
 !include "x64.nsh"
 
 !define APP_NAME "ProtoGrid"
-!define APP_VERSION "0.1.3"
+!define APP_VERSION "0.2.1"
 !define APP_EXE "ProtoGrid.exe"
 !define CORE_EXE "protogrid-core.exe"
 !define APP_PUBLISHER "ProtoGrid"
@@ -17,7 +17,7 @@ InstallDirRegKey HKCU "Software\ProtoGrid" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.1.3.0"
+VIProductVersion "0.2.1.0"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "FileDescription" "${APP_NAME} setup"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"
@@ -26,6 +26,10 @@ VIAddVersionKey "LegalCopyright" "MIT"
 
 !define MUI_ICON "..\apps\protogrid-desktop\assets\icon.ico"
 !define MUI_UNICON "..\apps\protogrid-desktop\assets\icon.ico"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "..\installer\welcome.bmp"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "..\installer\header.bmp"
+!define MUI_HEADERIMAGE_RIGHT
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Запустить ${APP_NAME}"

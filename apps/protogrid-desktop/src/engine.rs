@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use protogrid_core::link::{display_error_list, parse_links};
 use protogrid_core::model::{
     routing_preset, AppConfig, CoreCapabilities, CoreKind, CustomProfile, RoutingPreset,
-    RoutingRule, RuleAction, RuleKind, Server, Settings, Subscription,
+    RoutingRule, RuleAction, RuleKind, Server, Settings, Subscription, DEFAULT_PROFILE_NAME,
 };
 use protogrid_core::{geo, ping, ruleset, singbox, subscription, sysproxy, xray};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -19,6 +22,127 @@ use crate::autostart;
 use crate::installer::{self, CoreInfo};
 
 pub const MAX_LOG_LINES: usize = 2000;
+
+/// Make the profile directory private. On Unix the default umask often leaves
+/// it at 0755, which lets other local users walk into config.json and logs.
+fn harden_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+fn harden_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    harden_dir(path);
+    Ok(())
+}
+
+/// Open a file with 0600 from the moment it is created. `std::fs::write`
+/// creates 0666 (minus umask), which is how proxy credentials ended up
+/// world-readable.
+fn open_private_file(path: &Path, append: bool) -> io::Result<std::fs::File> {
+    if path.exists() {
+        // An older build may have created the file with 0644.
+        harden_file(path);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true);
+    if append {
+        options.append(true);
+    } else {
+        options.write(true).truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = open_private_file(path, false)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    harden_file(path);
+    Ok(())
+}
+
+const RUNTIME_CONFIGS: [&str; 3] = ["singbox.json", "xray.json", "protogrid.json"];
+
+/// Generated runtime configs duplicate every credential. Keep only the file
+/// for the core that is about to start; remove the rest (after disconnect or
+/// crash) so deleted servers do not linger on disk.
+fn clear_runtime_configs(runtime_dir: &Path, keep: Option<&str>) {
+    for name in RUNTIME_CONFIGS {
+        if Some(name) == keep {
+            continue;
+        }
+        let _ = std::fs::remove_file(runtime_dir.join(name));
+    }
+}
+
+fn harden_existing_logs(log_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            harden_file(&entry.path());
+        }
+    }
+}
+
+fn new_clash_secret() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(test)]
+mod permissions_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_and_dirs_get_restrictive_modes() {
+        let dir = std::env::temp_dir().join(format!("protogrid-perm-{}", new_clash_secret()));
+        ensure_private_dir(&dir).unwrap();
+        let file = dir.join("config.json");
+        write_private_file(&file, b"{\"password\":\"secret\"}").unwrap();
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_cleanup_keeps_only_target() {
+        let dir = std::env::temp_dir().join(format!("protogrid-runtime-{}", new_clash_secret()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in RUNTIME_CONFIGS {
+            std::fs::write(dir.join(name), b"{}").unwrap();
+        }
+        clear_runtime_configs(&dir, Some("protogrid.json"));
+        assert!(dir.join("protogrid.json").exists());
+        assert!(!dir.join("singbox.json").exists());
+        assert!(!dir.join("xray.json").exists());
+        clear_runtime_configs(&dir, None);
+        assert!(!dir.join("protogrid.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnStatus {
@@ -60,6 +184,87 @@ pub struct LogEntry {
     pub source: String,
     pub level: String,
     pub line: String,
+    pub route: Option<LogRoute>,
+}
+
+/// How a core log line routed its connection. Used by the journal to tell
+/// proxied traffic from direct bypasses at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRoute {
+    Direct,
+    Proxy,
+    Block,
+    Tun,
+}
+
+/// Bounded journal with a lazily materialized, shared view for the UI.
+///
+/// The Logs page used to receive a deep copy of all 2000 entries on every
+/// frame, and every new core line forced a full `Snapshot` clone. Keeping the
+/// cache here makes both operations O(1) while the journal is unchanged.
+#[derive(Default)]
+struct Journal {
+    entries: VecDeque<LogEntry>,
+    cache: Option<Arc<Vec<LogEntry>>>,
+}
+
+impl Journal {
+    fn push(&mut self, entry: LogEntry) {
+        self.entries.push_back(entry);
+        while self.entries.len() > MAX_LOG_LINES {
+            self.entries.pop_front();
+        }
+        self.cache = None;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.cache = None;
+    }
+
+    fn iter(&self) -> std::collections::vec_deque::Iter<'_, LogEntry> {
+        self.entries.iter()
+    }
+
+    fn entries(&self) -> &VecDeque<LogEntry> {
+        &self.entries
+    }
+
+    /// Release the materialized copy when the journal page is not visible.
+    fn release(&mut self) {
+        self.cache = None;
+    }
+
+    /// Shared view for rendering. `Arc::clone` is free while the journal is
+    /// unchanged; the vector is rebuilt once after the next line arrives.
+    fn shared(&mut self) -> Arc<Vec<LogEntry>> {
+        if self.cache.is_none() {
+            self.cache = Some(Arc::new(self.entries.iter().cloned().collect()));
+        }
+        self.cache
+            .as_ref()
+            .expect("journal cache was just populated")
+            .clone()
+    }
+}
+
+fn detect_log_route(line: &str) -> Option<LogRoute> {
+    if let Some((_, rest)) = line.split_once("outbound/") {
+        let proto = rest
+            .split(|c: char| c == '[' || c == ' ' || c == ':')
+            .next()
+            .unwrap_or_default();
+        return match proto {
+            "direct" => Some(LogRoute::Direct),
+            "block" => Some(LogRoute::Block),
+            "" => None,
+            _ => Some(LogRoute::Proxy),
+        };
+    }
+    if line.contains("inbound/tun[") {
+        return Some(LogRoute::Tun);
+    }
+    None
 }
 
 /// Live traffic counters sampled once per second while a core is running.
@@ -72,6 +277,20 @@ pub struct TrafficStats {
     pub proxy_up_bps: u64,
     pub direct_down_bps: u64,
     pub direct_up_bps: u64,
+    /// Exact byte counters reported by the core since it started. The four
+    /// route totals below are cumulative byte counts derived from the same
+    /// counters. Both are only meaningful when `totals_known` is set; cores
+    /// without byte counters (Xray) leave it unset and the UI integrates the
+    /// sampled rates instead.
+    pub total_down: u64,
+    pub total_up: u64,
+    /// Cumulative bytes attributed to each route by diffing per-connection
+    /// counters between samples. Their sum always equals `total_down + total_up`.
+    pub proxy_down_total: u64,
+    pub proxy_up_total: u64,
+    pub direct_down_total: u64,
+    pub direct_up_total: u64,
+    pub totals_known: bool,
 }
 
 pub struct Inner {
@@ -79,7 +298,7 @@ pub struct Inner {
     pub status: ConnStatus,
     pub error: Option<String>,
     pub warning: Option<String>,
-    pub logs: VecDeque<LogEntry>,
+    logs: Journal,
     pub pings: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
     /// Server ids with a country lookup in flight, so add + refresh + bootstrap
@@ -119,7 +338,7 @@ impl Inner {
                 .map_err(|error| format!("не удалось создать папку настроек: {error}"))?;
         }
         let tmp = self.config_path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
+        write_private_file(&tmp, json.as_bytes())
             .map_err(|error| format!("не удалось записать настройки: {error}"))?;
         #[cfg(windows)]
         {
@@ -129,6 +348,7 @@ impl Inner {
         }
         std::fs::rename(&tmp, &self.config_path)
             .map_err(|error| format!("не удалось сохранить настройки: {error}"))?;
+        harden_file(&self.config_path);
         Ok(())
     }
 
@@ -138,7 +358,6 @@ impl Inner {
             status: self.status,
             error: self.error.clone(),
             warning: self.warning.clone(),
-            logs: self.logs.iter().cloned().collect(),
             pings: self.pings.clone(),
             loading_pings: self.loading_pings.clone(),
             busy: self.busy.clone(),
@@ -162,7 +381,6 @@ pub struct Snapshot {
     pub status: ConnStatus,
     pub error: Option<String>,
     pub warning: Option<String>,
-    pub logs: Vec<LogEntry>,
     pub pings: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
     pub busy: HashSet<String>,
@@ -351,8 +569,10 @@ fn detect_elevation() -> bool {
 pub fn init_profile() -> Result<PathBuf, String> {
     let data_root = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     let data_dir = profile_data_dir(&data_root);
+    ensure_private_dir(&data_dir)
+        .map_err(|error| format!("не удалось создать {}: {error}", data_dir.display()))?;
     for sub in ["runtime", "cores", "rulesets", "logs"] {
-        std::fs::create_dir_all(data_dir.join(sub))
+        ensure_private_dir(&data_dir.join(sub))
             .map_err(|error| format!("не удалось создать {}: {error}", data_dir.display()))?;
     }
     let config_path = data_dir.join("config.json");
@@ -361,8 +581,10 @@ pub fn init_profile() -> Result<PathBuf, String> {
         config.normalize();
         let text = serde_json::to_string_pretty(&config)
             .map_err(|error| format!("не удалось создать конфиг: {error}"))?;
-        std::fs::write(&config_path, text)
+        write_private_file(&config_path, text.as_bytes())
             .map_err(|error| format!("не удалось записать {}: {error}", config_path.display()))?;
+    } else {
+        harden_file(&config_path);
     }
     Ok(data_dir)
 }
@@ -403,13 +625,20 @@ impl Engine {
         if !is_portable() {
             migrate_legacy_profile(&data_root, &data_dir);
         }
-        let _ = std::fs::create_dir_all(data_dir.join("runtime"));
-        let _ = std::fs::create_dir_all(data_dir.join("cores"));
-        let _ = std::fs::create_dir_all(data_dir.join("rulesets"));
-        let _ = std::fs::create_dir_all(data_dir.join("logs"));
+        let _ = ensure_private_dir(&data_dir);
+        for sub in ["runtime", "cores", "rulesets", "logs"] {
+            let _ = ensure_private_dir(&data_dir.join(sub));
+        }
+        let runtime_dir = data_dir.join("runtime");
+        // A previous run may have crashed before removing them.
+        clear_runtime_configs(&runtime_dir, None);
         let log_dir = data_dir.join("logs");
         cleanup_logs(&log_dir, 14);
+        harden_existing_logs(&log_dir);
         let config_path = data_dir.join("config.json");
+        if config_path.exists() {
+            harden_file(&config_path);
+        }
 
         let mut config = if config_path.exists() {
             std::fs::read_to_string(&config_path)
@@ -424,6 +653,8 @@ impl Engine {
         if config.settings.tun_enabled && !is_elevated() {
             config.settings.tun_enabled = false;
         }
+        // The Clash API password is ephemeral: config.json never stores it.
+        config.settings.clash_api_secret = new_clash_secret();
         config.normalize();
 
         let inner = Arc::new(Mutex::new(Inner {
@@ -431,7 +662,7 @@ impl Engine {
             status: ConnStatus::Disconnected,
             error: None,
             warning: None,
-            logs: VecDeque::new(),
+            logs: Journal::default(),
             pings: HashMap::new(),
             loading_pings: HashSet::new(),
             country_lookups: HashSet::new(),
@@ -486,6 +717,19 @@ impl Engine {
         }
         *last_revision = guard.revision;
         Some(guard.snapshot())
+    }
+
+    /// Journal for the Logs page, shared by reference so scrolling and
+    /// repainting re-use one allocation. The vector is materialized only when
+    /// the journal changed, and is dropped as soon as a new line invalidates
+    /// it, so it never adds steady-state memory while the page is closed.
+    pub fn logs(&self) -> Arc<Vec<LogEntry>> {
+        self.lock().logs.shared()
+    }
+
+    /// Free the materialized journal copy while the Logs page is closed.
+    pub fn release_logs(&self) {
+        self.lock().logs.release();
     }
 
     pub fn drain_toasts(&self) -> Vec<ToastEvent> {
@@ -700,10 +944,20 @@ impl Engine {
             (connected, old)
         };
         self.ctx.request_repaint();
+        self.after_settings_change(old_settings, settings, was_connected, false);
+    }
+
+    fn after_settings_change(
+        &self,
+        old_settings: Settings,
+        new_settings: Settings,
+        was_connected: bool,
+        force_restart: bool,
+    ) {
         if was_connected {
-            if old_settings.network_eq(&settings) {
-                if old_settings.system_proxy != settings.system_proxy {
-                    self.apply_proxy(settings.system_proxy);
+            if !force_restart && old_settings.network_eq(&new_settings) {
+                if old_settings.system_proxy != new_settings.system_proxy {
+                    self.apply_proxy(new_settings.system_proxy);
                 }
                 push_toast(
                     &self.inner,
@@ -727,6 +981,73 @@ impl Engine {
                 "Настройки сохранены",
                 ToastKind::Success,
             );
+        }
+    }
+
+    /// Write a credential-free settings snapshot (settings, routing rules and
+    /// custom profiles) to the chosen path. The file itself is created 0600.
+    pub fn export_settings_to(&self, path: &Path) {
+        let text = {
+            let guard = self.lock();
+            guard.config.export_settings_json()
+        };
+        let result = match text {
+            Ok(text) => write_private_file(path, text.as_bytes())
+                .map_err(|error| format!("не удалось записать настройки: {error}")),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => push_toast(
+                &self.inner,
+                &self.ctx,
+                "Настройки экспортированы",
+                ToastKind::Success,
+            ),
+            Err(error) => push_toast(&self.inner, &self.ctx, error, ToastKind::Error),
+        }
+    }
+
+    /// Import settings and routing profiles. Saved servers and subscriptions
+    /// are deliberately left untouched, and the file cannot set runtime
+    /// secrets such as the Clash API password.
+    pub fn import_settings_from(&self, path: &Path) -> bool {
+        let result = (|| {
+            let metadata = std::fs::metadata(path)
+                .map_err(|error| format!("не удалось открыть файл: {error}"))?;
+            if metadata.len() > 4 * 1024 * 1024 {
+                return Err("файл настроек слишком большой (больше 4 МБ)".to_string());
+            }
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("не удалось прочитать файл: {error}"))?;
+            let backup = AppConfig::parse_settings_backup(&text)?;
+            let (was_connected, old_settings, new_settings) = {
+                let mut guard = self.lock();
+                let old = guard.config.settings.clone();
+                let connected =
+                    matches!(guard.status, ConnStatus::Connected | ConnStatus::Connecting);
+                guard.config.apply_settings_backup(backup);
+                if guard.config.settings.tun_enabled && !is_elevated() {
+                    guard.config.settings.tun_enabled = false;
+                }
+                guard.config.enforce_tun_process_rules();
+                guard.config.sync_custom_profile();
+                guard
+                    .persist()
+                    .map_err(|error| format!("не удалось сохранить настройки: {error}"))?;
+                guard.touch();
+                let new = guard.config.settings.clone();
+                (connected, old, new)
+            };
+            self.ctx.request_repaint();
+            self.after_settings_change(old_settings, new_settings, was_connected, true);
+            Ok(())
+        })();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                push_toast(&self.inner, &self.ctx, error, ToastKind::Error);
+                false
+            }
         }
     }
 
@@ -1108,7 +1429,7 @@ impl Engine {
             .join("\n");
         let name = chrono::Local::now().format("export-%Y%m%d-%H%M%S.log");
         let path = guard.log_dir.join(name.to_string());
-        std::fs::write(&path, text)
+        write_private_file(&path, text.as_bytes())
             .map_err(|error| format!("не удалось сохранить логи: {error}"))?;
         Ok(path.to_string_lossy().to_string())
     }
@@ -1126,16 +1447,12 @@ impl Engine {
         let was_connected = self.lock().status == ConnStatus::Connected;
         {
             let mut guard = self.lock();
-            // Keep the user's own ruleset so it can be restored later.
-            if guard.config.settings.routing_preset == Some(RoutingPreset::Custom) {
-                guard.config.custom_profile = Some(CustomProfile {
-                    rules: guard.config.rules.clone(),
-                    final_action: guard.config.settings.final_action,
-                });
-            }
+            // Keep the active custom profile up to date before switching away.
+            guard.config.sync_custom_profile();
             guard.config.rules = rules;
             guard.config.settings.final_action = final_action;
             guard.config.settings.routing_preset = RoutingPreset::from_id(preset);
+            guard.config.settings.custom_profile_id = None;
             guard.config.enforce_tun_process_rules();
             let _ = guard.persist();
             guard.touch();
@@ -1152,19 +1469,21 @@ impl Engine {
         );
     }
 
-    /// Switches back to the rules that were active before a built-in preset.
-    pub fn restore_custom_profile(&self) {
+    /// Switches to one of the stored custom profiles.
+    pub fn activate_custom_profile(&self, id: &str) {
         let was_connected = self.lock().status == ConnStatus::Connected;
         {
             let mut guard = self.lock();
-            let Some(profile) = guard.config.custom_profile.clone() else {
-                return;
-            };
-            guard.config.rules = profile.rules;
-            guard.config.settings.final_action = profile.final_action;
-            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
-            guard.config.enforce_tun_process_rules();
             guard.config.sync_custom_profile();
+            if !guard.config.activate_custom_profile(id) {
+                push_toast(
+                    &self.inner,
+                    &self.ctx,
+                    "Профиль не найден",
+                    ToastKind::Error,
+                );
+                return;
+            }
             let _ = guard.persist();
             guard.touch();
         }
@@ -1175,22 +1494,63 @@ impl Engine {
         push_toast(
             &self.inner,
             &self.ctx,
-            "Возвращены свои правила маршрутизации",
+            "Профиль маршрутизации применён",
             ToastKind::Success,
         );
     }
 
-    /// Copies the active built-in preset into an editable profile. The rules
-    /// stay as they are; later edits are saved to the copy, never to the preset.
-    pub fn fork_routing_profile(&self) {
+    /// Creates a custom profile from the rules active right now.
+    pub fn create_custom_profile(&self) {
+        let was_connected = self.lock().status == ConnStatus::Connected;
+        let name;
         {
             let mut guard = self.lock();
-            if guard.config.settings.routing_preset == Some(RoutingPreset::Custom) {
-                return;
-            }
-            guard.config.settings.routing_preset = Some(RoutingPreset::Custom);
-            guard.config.enforce_tun_process_rules();
             guard.config.sync_custom_profile();
+            let index = guard.config.custom_profiles.len() + 1;
+            name = format!("{DEFAULT_PROFILE_NAME} {index}");
+            let mut profile = CustomProfile::new(name.clone());
+            profile.rules = guard.config.rules.clone();
+            profile.final_action = guard.config.settings.final_action;
+            let id = profile.id.clone();
+            guard.config.custom_profiles.push(profile);
+            guard.config.activate_custom_profile(&id);
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        if was_connected {
+            self.connect();
+        }
+        push_toast(
+            &self.inner,
+            &self.ctx,
+            &format!("Создан профиль «{name}»"),
+            ToastKind::Success,
+        );
+    }
+
+    pub fn rename_custom_profile(&self, id: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            push_toast(
+                &self.inner,
+                &self.ctx,
+                "Название не может быть пустым",
+                ToastKind::Warn,
+            );
+            return;
+        }
+        {
+            let mut guard = self.lock();
+            let Some(profile) = guard
+                .config
+                .custom_profiles
+                .iter_mut()
+                .find(|profile| profile.id == id)
+            else {
+                return;
+            };
+            profile.name = name.to_string();
             let _ = guard.persist();
             guard.touch();
         }
@@ -1198,9 +1558,39 @@ impl Engine {
         push_toast(
             &self.inner,
             &self.ctx,
-            "Создан свой профиль — правила теперь можно менять",
+            "Профиль переименован",
             ToastKind::Success,
         );
+    }
+
+    pub fn delete_custom_profile(&self, id: &str) {
+        let was_connected = self.lock().status == ConnStatus::Connected;
+        {
+            let mut guard = self.lock();
+            guard.config.sync_custom_profile();
+            let active = guard.config.settings.routing_preset == Some(RoutingPreset::Custom)
+                && guard.config.settings.custom_profile_id.as_deref() == Some(id);
+            guard
+                .config
+                .custom_profiles
+                .retain(|profile| profile.id != id);
+            if active {
+                guard.config.settings.custom_profile_id = None;
+                if let Some((rules, action)) = routing_preset(RoutingPreset::Bypass.id()) {
+                    guard.config.rules = rules;
+                    guard.config.settings.final_action = action;
+                    guard.config.settings.routing_preset = Some(RoutingPreset::Bypass);
+                }
+            }
+            guard.config.enforce_tun_process_rules();
+            let _ = guard.persist();
+            guard.touch();
+        }
+        self.ctx.request_repaint();
+        if was_connected {
+            self.connect();
+        }
+        push_toast(&self.inner, &self.ctx, "Профиль удалён", ToastKind::Success);
     }
 
     pub fn save_rule(&self, mut rule: RoutingRule) {
@@ -1450,7 +1840,6 @@ impl Engine {
     pub fn clear_logs(&self) {
         let mut guard = self.lock();
         guard.logs.clear();
-        guard.touch();
         drop(guard);
         self.ctx.request_repaint();
     }
@@ -1702,11 +2091,7 @@ fn write_log_file(guard: &mut Inner, ts: i64, level: &str, source: &str, line: &
         .unwrap_or(true);
     if rotate {
         let path = guard.log_dir.join(format!("protogrid-{date}.log"));
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        if let Ok(file) = open_private_file(&path, true) {
             guard.log_file = Some((date, file));
         }
     }
@@ -1738,20 +2123,26 @@ pub fn push_log(
     if line.trim().is_empty() {
         return;
     }
+    let route = if source == "core" {
+        detect_log_route(&line)
+    } else {
+        None
+    };
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let ts = now_ms();
         write_log_file(&mut guard, ts, &level, source, &line);
-        guard.logs.push_back(LogEntry {
+        // Do not bump `revision`: a log line only affects the journal page,
+        // which pulls the journal through `logs()`. Touching here made every
+        // line clone the whole `Snapshot` (config, pings, and all 2000
+        // entries) just to throw the previous copy away.
+        guard.logs.push(LogEntry {
             ts,
             source: source.to_string(),
             level,
             line,
+            route,
         });
-        while guard.logs.len() > MAX_LOG_LINES {
-            guard.logs.pop_front();
-        }
-        guard.touch();
     }
     ctx.request_repaint();
 }
@@ -2127,21 +2518,115 @@ fn set_error(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, message: String) ->
     message
 }
 
+#[cfg(target_os = "windows")]
+async fn wait_for_tun_adapter_gone(name: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if !tun_adapter_exists(name) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn tun_adapter_exists(name: &str) -> bool {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_ALL_INTERFACES, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    let mut size = 16 * 1024u32;
+    loop {
+        let mut buffer = vec![0u8; size as usize];
+        let result = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                std::ptr::null(),
+                buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut size,
+            )
+        };
+        if result == 0 {
+            let mut current = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            while !current.is_null() {
+                let adapter = unsafe { &*current };
+                if wide_name_eq(adapter.FriendlyName, name) {
+                    return true;
+                }
+                current = adapter.Next;
+            }
+            return false;
+        }
+        if result != ERROR_BUFFER_OVERFLOW {
+            return false;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wide_name_eq(ptr: *const u16, expected: &str) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *ptr.add(len) != 0 {
+            len += 1;
+            if len > 128 {
+                return false;
+            }
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+            .eq_ignore_ascii_case(expected)
+    }
+}
+
 async fn stop_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, silent: bool) {
-    let (child, proxy_set, was_active) = {
+    let (child, proxy_set, was_active, tun_on) = {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.run_id = guard.run_id.wrapping_add(1);
         let child = guard.child.take();
         let proxy_set = guard.proxy_set;
         let was_active = matches!(guard.status, ConnStatus::Connected | ConnStatus::Connecting);
+        let tun_on = guard.config.settings.tun_active();
         guard.proxy_set = false;
         guard.touch();
-        (child, proxy_set, was_active)
+        (child, proxy_set, was_active, tun_on)
     };
     if let Some(mut child) = child {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
     }
+    // The core has read its config; do not leave a second copy of UUIDs and
+    // passwords on disk while the app is disconnected.
+    let runtime_dir = inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .data_dir
+        .join("runtime");
+    clear_runtime_configs(&runtime_dir, None);
+    #[cfg(target_os = "windows")]
+    if tun_on && !wait_for_tun_adapter_gone(singbox::TUN_INTERFACE_NAME).await {
+        push_log(
+            inner,
+            ctx,
+            "app",
+            Some("warn"),
+            format!(
+                "TUN-адаптер {} не освободился за 8 секунд: следующий запуск может \
+                 завершиться ошибкой. Перезагрузите компьютер, если это повторяется.",
+                singbox::TUN_INTERFACE_NAME
+            ),
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = tun_on;
     if proxy_set {
         let _ = sysproxy::disable();
     }
@@ -2197,6 +2682,8 @@ struct ClashTraffic {
 #[derive(Debug, serde::Deserialize)]
 struct ClashConnection {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     download: u64,
     #[serde(default)]
     upload: u64,
@@ -2243,10 +2730,15 @@ fn system_totals(networks: &sysinfo::Networks) -> (u64, u64) {
     let mut rx = 0_u64;
     let mut tx = 0_u64;
     for (name, data) in networks {
-        let name = name.to_string_lossy();
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        // Loopback is irrelevant, and the TUN adapter sees the very same packets
+        // as the physical link, so counting both doubles every proxied byte.
         if name == "lo"
-            || name.starts_with("Loopback")
-            || name.contains("Loopback Pseudo-Interface")
+            || name.starts_with("loopback")
+            || name.contains("pseudo-interface")
+            || name.contains("protogrid_tun")
+            || name.starts_with("tun")
+            || name.starts_with("utun")
         {
             continue;
         }
@@ -2256,13 +2748,17 @@ fn system_totals(networks: &sysinfo::Networks) -> (u64, u64) {
     (rx, tx)
 }
 
-async fn clash_traffic(client: &reqwest::Client, port: u16) -> Result<ClashTraffic, String> {
+async fn clash_traffic(
+    client: &reqwest::Client,
+    port: u16,
+    secret: &str,
+) -> Result<ClashTraffic, String> {
     let endpoint = format!("http://127.0.0.1:{port}/connections");
-    let response = client
-        .get(endpoint)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut request = client.get(endpoint);
+    if !secret.is_empty() {
+        request = request.bearer_auth(secret);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
@@ -2270,6 +2766,40 @@ async fn clash_traffic(client: &reqwest::Client, port: u16) -> Result<ClashTraff
         .json::<ClashTraffic>()
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Splits a byte delta between the proxy and direct routes using the ratio seen
+/// in live connections. The four returned values always add up to the input
+/// delta, so route totals can never drift away from the core's byte counters.
+fn split_route_bytes(
+    delta_down: u64,
+    delta_up: u64,
+    proxy_down: u64,
+    proxy_up: u64,
+    direct_down: u64,
+    direct_up: u64,
+    fallback: f64,
+) -> (u64, u64, u64, u64) {
+    let down_accounted = proxy_down.saturating_add(direct_down);
+    let up_accounted = proxy_up.saturating_add(direct_up);
+    let share_down = if down_accounted > 0 {
+        proxy_down as f64 / down_accounted as f64
+    } else {
+        fallback
+    };
+    let share_up = if up_accounted > 0 {
+        proxy_up as f64 / up_accounted as f64
+    } else {
+        fallback
+    };
+    let split_down = (delta_down as f64 * share_down.clamp(0.0, 1.0)) as u64;
+    let split_up = (delta_up as f64 * share_up.clamp(0.0, 1.0)) as u64;
+    (
+        split_down,
+        split_up,
+        delta_down - split_down,
+        delta_up - split_up,
+    )
 }
 
 fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
@@ -2280,7 +2810,17 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
             .build()
             .ok();
         let mut system = SystemMeter::new();
-        let mut prev_clash: Option<(u64, u64)> = None;
+        let monitor_started = Instant::now();
+        let mut prev_clash: Option<(u64, u64, Instant)> = None;
+        let mut last_stats: Option<TrafficStats> = None;
+        let mut clash_misses = 0_u32;
+        // Per-connection counters from the previous sample, keyed by the
+        // connection id, so bursts that close between two polls are still
+        // attributed to the route they actually took.
+        let mut conn_seen: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut proxy_share: Option<f64> = None;
+        let (mut proxy_down_total, mut proxy_up_total) = (0_u64, 0_u64);
+        let (mut direct_down_total, mut direct_up_total) = (0_u64, 0_u64);
         loop {
             tokio::time::sleep(Duration::from_millis(1000)).await;
             let snapshot = {
@@ -2301,67 +2841,134 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
                 (
                     guard.config.settings.core,
                     guard.config.settings.clash_api_port,
-                    guard.config.settings.system_proxy || guard.config.settings.tun_enabled,
+                    guard.config.settings.clash_api_secret.clone(),
                 )
             };
-            let (core, port, proxied) = snapshot;
+            let (core, port, secret) = snapshot;
             let (sys_down, sys_up) = system.sample();
             let mut stats = TrafficStats::default();
-            let mut used_clash = false;
-            if core == CoreKind::Singbox {
+            let mut have_stats = false;
+            if core.is_singbox_like() {
                 if let Some(client) = client.as_ref() {
-                    if let Ok(data) = clash_traffic(client, port).await {
-                        let total_down = data.download_total;
-                        let total_up = data.upload_total;
-                        let (prev_down, prev_up) = prev_clash.unwrap_or((total_down, total_up));
-                        let down = total_down.saturating_sub(prev_down);
-                        let up = total_up.saturating_sub(prev_up);
-                        prev_clash = Some((total_down, total_up));
-                        stats.conns = data.connections.len().min(u32::MAX as usize) as u32;
-                        let mut proxy_bytes = 0_u64;
-                        let mut direct_bytes = 0_u64;
-                        for conn in &data.connections {
-                            let bytes = conn.download.saturating_add(conn.upload);
-                            if conn.chains.iter().any(|chain| chain == "direct") {
-                                direct_bytes = direct_bytes.saturating_add(bytes);
-                            } else {
-                                proxy_bytes = proxy_bytes.saturating_add(bytes);
+                    if let Ok(data) = clash_traffic(client, port, &secret).await {
+                        let now = Instant::now();
+                        let (delta_down, delta_up, secs) = match prev_clash {
+                            Some((prev_down, prev_up, at)) => {
+                                // The request takes time and can fail, so the gap
+                                // between two samples is not exactly one second.
+                                // Dividing by the real gap keeps bursts honest.
+                                (
+                                    data.download_total.saturating_sub(prev_down),
+                                    data.upload_total.saturating_sub(prev_up),
+                                    now.duration_since(at).as_secs_f64().max(0.2),
+                                )
                             }
-                        }
-                        let all = proxy_bytes.saturating_add(direct_bytes);
-                        let (proxy_down, proxy_up) = if all == 0 {
-                            if proxied {
-                                (down, up)
-                            } else {
-                                (0, 0)
-                            }
-                        } else {
-                            (
-                                down.saturating_mul(proxy_bytes) / all,
-                                up.saturating_mul(proxy_bytes) / all,
-                            )
+                            // The core starts its counters at zero, so the first
+                            // reading covers everything since the monitor started.
+                            // Averaging over that whole span avoids a fake spike
+                            // when the API took a few seconds to come up.
+                            None => (
+                                data.download_total,
+                                data.upload_total,
+                                now.duration_since(monitor_started).as_secs_f64().max(1.0),
+                            ),
                         };
-                        stats.down_bps = down;
-                        stats.up_bps = up;
-                        stats.proxy_down_bps = proxy_down;
-                        stats.proxy_up_bps = proxy_up;
-                        stats.direct_down_bps = down.saturating_sub(proxy_down);
-                        stats.direct_up_bps = up.saturating_sub(proxy_up);
-                        used_clash = true;
+                        prev_clash = Some((data.download_total, data.upload_total, now));
+
+                        let mut active = HashSet::new();
+                        let (mut p_down, mut p_up, mut d_down, mut d_up) =
+                            (0_u64, 0_u64, 0_u64, 0_u64);
+                        for conn in &data.connections {
+                            // Without an id the cumulative counter cannot be
+                            // diffed; its bytes fall into the ratio fallback.
+                            if conn.id.is_empty() {
+                                continue;
+                            }
+                            let direct = conn.chains.iter().any(|chain| chain == "direct");
+                            let (seen_down, seen_up) =
+                                conn_seen.get(&conn.id).copied().unwrap_or((0, 0));
+                            let conn_down = conn.download.saturating_sub(seen_down);
+                            let conn_up = conn.upload.saturating_sub(seen_up);
+                            if direct {
+                                d_down = d_down.saturating_add(conn_down);
+                                d_up = d_up.saturating_add(conn_up);
+                            } else {
+                                p_down = p_down.saturating_add(conn_down);
+                                p_up = p_up.saturating_add(conn_up);
+                            }
+                            conn_seen.insert(conn.id.clone(), (conn.download, conn.upload));
+                            active.insert(conn.id.clone());
+                        }
+                        // Forget closed connections so the map cannot grow forever.
+                        conn_seen.retain(|id, _| active.contains(id));
+
+                        // Scale the route ratio to the real byte delta: this keeps
+                        // "proxy + direct" equal to "received + sent" even when a
+                        // connection closed before we could read its last bytes.
+                        let down_accounted = p_down.saturating_add(d_down);
+                        let up_accounted = p_up.saturating_add(d_up);
+                        let accounted = down_accounted.saturating_add(up_accounted);
+                        let combined_share = if accounted > 0 {
+                            let share = (p_down.saturating_add(p_up)) as f64 / accounted as f64;
+                            proxy_share = Some(share);
+                            Some(share)
+                        } else {
+                            proxy_share
+                        };
+                        let (proxy_down, proxy_up, direct_down, direct_up) = split_route_bytes(
+                            delta_down,
+                            delta_up,
+                            p_down,
+                            p_up,
+                            d_down,
+                            d_up,
+                            combined_share.unwrap_or(1.0),
+                        );
+
+                        proxy_down_total = proxy_down_total.saturating_add(proxy_down);
+                        proxy_up_total = proxy_up_total.saturating_add(proxy_up);
+                        direct_down_total = direct_down_total.saturating_add(direct_down);
+                        direct_up_total = direct_up_total.saturating_add(direct_up);
+
+                        stats.conns = data.connections.len().min(u32::MAX as usize) as u32;
+                        stats.down_bps = (delta_down as f64 / secs) as u64;
+                        stats.up_bps = (delta_up as f64 / secs) as u64;
+                        stats.proxy_down_bps = (proxy_down as f64 / secs) as u64;
+                        stats.proxy_up_bps = (proxy_up as f64 / secs) as u64;
+                        stats.direct_down_bps = (direct_down as f64 / secs) as u64;
+                        stats.direct_up_bps = (direct_up as f64 / secs) as u64;
+                        stats.total_down = data.download_total;
+                        stats.total_up = data.upload_total;
+                        stats.proxy_down_total = proxy_down_total;
+                        stats.proxy_up_total = proxy_up_total;
+                        stats.direct_down_total = direct_down_total;
+                        stats.direct_up_total = direct_up_total;
+                        stats.totals_known = true;
+                        have_stats = true;
                     }
                 }
             }
-            if !used_clash {
-                stats.down_bps = sys_down;
-                stats.up_bps = sys_up;
-                if proxied {
-                    stats.proxy_down_bps = sys_down;
-                    stats.proxy_up_bps = sys_up;
+            if !have_stats {
+                clash_misses = clash_misses.saturating_add(1);
+                // Cores without a Clash API (Xray) expose nothing but the OS
+                // interface counters, and a short API hiccup should not punch a
+                // hole in the chart. Reuse the last real sample for a moment,
+                // then degrade to interface counters — never faking a split.
+                if clash_misses < 3 {
+                    if let Some(previous) = last_stats {
+                        stats = previous;
+                    } else {
+                        stats.down_bps = sys_down;
+                        stats.up_bps = sys_up;
+                    }
                 } else {
-                    stats.direct_down_bps = sys_down;
-                    stats.direct_up_bps = sys_up;
+                    stats.down_bps = sys_down;
+                    stats.up_bps = sys_up;
                 }
+            } else {
+                clash_misses = 0;
             }
+            last_stats = Some(stats);
             {
                 let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.run_id != run_id {
@@ -2373,6 +2980,23 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
             ctx.request_repaint();
         }
     });
+}
+
+fn unexpected_exit_message(code: &str, logs: &VecDeque<LogEntry>) -> String {
+    let tun_conflict = logs.iter().rev().take(16).any(|entry| {
+        entry.source == "core"
+            && (entry.line.contains("configure tun interface")
+                || entry.line.contains("create adapter"))
+    });
+    if tun_conflict {
+        format!(
+            "Ядро неожиданно завершилось (код {code}): TUN-адаптер уже занят другим VPN-клиентом \
+             или остался от прошлого запуска. Закройте другие VPN (v2rayN, sing-box) или \
+             перезагрузите компьютер."
+        )
+    } else {
+        format!("Ядро неожиданно завершилось (код {code}). Проверьте логи.")
+    }
 }
 
 fn spawn_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
@@ -2395,22 +3019,22 @@ fn spawn_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u64) {
                         .code()
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "неизвестен".into());
-                    let (proxy_set, message) = {
+                    let (proxy_set, message, runtime_dir) = {
                         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                         guard.child = None;
                         guard.pid = None;
                         guard.connected_at = None;
                         guard.active_core = None;
                         guard.status = ConnStatus::Error;
-                        let message =
-                            format!("Ядро неожиданно завершилось (код {code}). Проверьте логи.");
+                        let message = unexpected_exit_message(&code, guard.logs.entries());
                         guard.error = Some(message.clone());
                         guard.warning = None;
                         let proxy = guard.proxy_set;
                         guard.proxy_set = false;
                         guard.touch();
-                        (proxy, message)
+                        (proxy, message, guard.data_dir.join("runtime"))
                     };
+                    clear_runtime_configs(&runtime_dir, None);
                     if proxy_set {
                         let _ = sysproxy::disable();
                     }
@@ -2439,16 +3063,20 @@ fn write_runtime_config(
     value: &serde_json::Value,
 ) -> Result<PathBuf, String> {
     let runtime_dir = guard.data_dir.join("runtime");
-    std::fs::create_dir_all(&runtime_dir)
+    ensure_private_dir(&runtime_dir)
         .map_err(|error| format!("не удалось создать {}: {error}", runtime_dir.display()))?;
-    let file = runtime_dir.join(match core {
+    let name = match core {
         CoreKind::Singbox => "singbox.json",
         CoreKind::Xray => "xray.json",
         CoreKind::Protogrid => "protogrid.json",
-    });
+    };
+    // Runtime configs mirror every credential. Old cores must not keep a copy
+    // of a server the user has since deleted.
+    clear_runtime_configs(&runtime_dir, Some(name));
+    let file = runtime_dir.join(name);
     let text = serde_json::to_string_pretty(value)
         .map_err(|error| format!("не удалось сериализовать конфиг: {error}"))?;
-    std::fs::write(&file, text)
+    write_private_file(&file, text.as_bytes())
         .map_err(|error| format!("не удалось записать {}: {error}", file.display()))?;
     Ok(file)
 }
@@ -2620,9 +3248,15 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         command.as_std_mut().creation_flags(0x08000000);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| set_error(inner, ctx, format!("Не удалось запустить ядро: {error}")))?;
+    let mut child = command.spawn().map_err(|error| {
+        let runtime_dir = inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data_dir
+            .join("runtime");
+        clear_runtime_configs(&runtime_dir, None);
+        set_error(inner, ctx, format!("Не удалось запустить ядро: {error}"))
+    })?;
     let pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -2725,9 +3359,15 @@ async fn ping_one(
             .await
             .ok();
     } else if connected && settings.core.is_singbox_like() {
-        latency = ping::clash_delay(settings.clash_api_port, &id, &settings.test_url, 5000)
-            .await
-            .ok();
+        latency = ping::clash_delay(
+            settings.clash_api_port,
+            &settings.clash_api_secret,
+            &id,
+            &settings.test_url,
+            5000,
+        )
+        .await
+        .ok();
     }
     if latency.is_none() {
         latency = ping::tcp_ping(&server, 4000).await.ok();
@@ -2738,6 +3378,38 @@ async fn ping_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_split_always_matches_the_real_delta() {
+        let cases = [
+            (0, 0, 0, 0, 0, 0, 1.0),
+            (1000, 500, 100, 50, 100, 50, 1.0),
+            (12_345, 67_890, 111, 222, 333, 444, 0.0),
+            (7, 3, 0, 0, 1, 0, 0.37),
+        ];
+        for (delta_down, delta_up, proxy_down, proxy_up, direct_down, direct_up, fallback) in cases
+        {
+            let (p_down, p_up, d_down, d_up) = split_route_bytes(
+                delta_down,
+                delta_up,
+                proxy_down,
+                proxy_up,
+                direct_down,
+                direct_up,
+                fallback,
+            );
+            assert_eq!(p_down + d_down, delta_down);
+            assert_eq!(p_up + d_up, delta_up);
+        }
+    }
+
+    #[test]
+    fn route_split_uses_connection_ratio() {
+        assert_eq!(
+            split_route_bytes(1000, 500, 100, 50, 100, 50, 0.0),
+            (500, 250, 500, 250)
+        );
+    }
 
     #[test]
     fn strips_singbox_prefix() {
@@ -2763,5 +3435,85 @@ mod tests {
     fn keeps_plain_core_lines() {
         assert_eq!(strip_core_prefix("FATAL boom"), "FATAL boom");
         assert_eq!(strip_core_prefix("hello"), "hello");
+    }
+
+    #[test]
+    fn explains_tun_adapter_conflict() {
+        let mut logs = VecDeque::new();
+        logs.push_back(LogEntry {
+            ts: 0,
+            source: "core".into(),
+            level: "error".into(),
+            line: "FATAL start inbound/tun[tun-in]: configure tun interface: create adapter: \
+                   Cannot create a file when that file already exists"
+                .into(),
+            route: None,
+        });
+        assert!(unexpected_exit_message("1", &logs).contains("TUN-адаптер"));
+        assert_eq!(
+            unexpected_exit_message("2", &VecDeque::new()),
+            "Ядро неожиданно завершилось (код 2). Проверьте логи."
+        );
+    }
+
+    #[test]
+    fn detects_log_routes() {
+        assert_eq!(
+            detect_log_route("[1 0ms] outbound/vless[abc]: outbound connection to x:443"),
+            Some(LogRoute::Proxy)
+        );
+        assert_eq!(
+            detect_log_route("[2 1ms] outbound/direct[direct]: outbound connection to x:443"),
+            Some(LogRoute::Direct)
+        );
+        assert_eq!(
+            detect_log_route("[3 0ms] outbound/block[block]: outbound connection to x:443"),
+            Some(LogRoute::Block)
+        );
+        assert_eq!(
+            detect_log_route("inbound/tun[tun-in]: inbound connection to x:443"),
+            Some(LogRoute::Tun)
+        );
+        assert_eq!(
+            detect_log_route("inbound/mixed[mixed-in]: inbound connection to x:443"),
+            None
+        );
+    }
+
+    #[test]
+    fn journal_shares_until_next_line() {
+        let mut journal = Journal::default();
+        for i in 0..MAX_LOG_LINES {
+            journal.push(LogEntry {
+                ts: i as i64,
+                source: "core".into(),
+                level: "info".into(),
+                line: format!("line-{i}"),
+                route: None,
+            });
+        }
+
+        // Repainting the page re-uses the same vector, no deep copy.
+        let first = journal.shared();
+        let second = journal.shared();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.len(), MAX_LOG_LINES);
+
+        // A new line replaces the cache and keeps the ring bounded.
+        journal.push(LogEntry {
+            ts: 0,
+            source: "core".into(),
+            level: "info".into(),
+            line: "newest".into(),
+            route: None,
+        });
+        let third = journal.shared();
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(third.len(), MAX_LOG_LINES);
+        assert_eq!(third.first().unwrap().line, "line-1");
+        assert_eq!(third.last().unwrap().line, "newest");
+
+        journal.clear();
+        assert!(journal.shared().is_empty());
     }
 }

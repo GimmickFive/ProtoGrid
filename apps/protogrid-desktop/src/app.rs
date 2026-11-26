@@ -13,54 +13,8 @@ pub struct ProtoGridApp {
     quitting: bool,
 }
 
-fn rounded_icon(size: u32) -> Vec<u8> {
-    let mut rgba = vec![0_u8; (size * size * 4) as usize];
-    let radius = size as f32 * 0.23;
-    for y in 0..size {
-        for x in 0..size {
-            let fx = x as f32 + 0.5;
-            let fy = y as f32 + 0.5;
-            let dx = (fx - size as f32 / 2.0).abs() - (size as f32 / 2.0 - radius);
-            let dy = (fy - size as f32 / 2.0).abs() - (size as f32 / 2.0 - radius);
-            let inside = dx <= 0.0 || dy <= 0.0 || (dx * dx + dy * dy) <= radius * radius;
-            if !inside {
-                continue;
-            }
-            let t = (fx + fy) / (size as f32 * 2.0);
-            let r = (79.0 + (139.0 - 79.0) * t) as u8;
-            let g = (108.0 + (92.0 - 108.0) * t) as u8;
-            let b = (255.0 + (246.0 - 255.0) * t) as u8;
-            let index = ((y * size + x) * 4) as usize;
-            rgba[index] = r;
-            rgba[index + 1] = g;
-            rgba[index + 2] = b;
-            rgba[index + 3] = 255;
-
-            let cx = size as f32 / 2.0;
-            let cy = size as f32 / 2.0;
-            let px = fx - cx;
-            let py = fy - cy;
-            let in_triangle = py > -(size as f32) * 0.30
-                && py < size as f32 * 0.34
-                && px > -(size as f32) * 0.28
-                && px < size as f32 * 0.30
-                && (px * 0.9 + py * 0.7) < size as f32 * 0.12;
-            if in_triangle {
-                rgba[index] = 255;
-                rgba[index + 1] = 255;
-                rgba[index + 2] = 255;
-            }
-        }
-    }
-    rgba
-}
-
 pub fn icon_data(size: u32) -> egui::IconData {
-    egui::IconData {
-        rgba: rounded_icon(size),
-        width: size,
-        height: size,
-    }
+    crate::brand::icon_data(size)
 }
 
 #[cfg(target_os = "linux")]
@@ -107,7 +61,7 @@ fn create_tray() -> Option<tray_icon::TrayIcon> {
     let quit = MenuItem::with_id("quit", "Выход", true, None);
     menu.append_items(&[&show, &toggle, &separator, &quit])
         .ok()?;
-    let icon = tray_icon::Icon::from_rgba(rounded_icon(32), 32, 32).ok()?;
+    let icon = tray_icon::Icon::from_rgba(crate::brand::icon_rgba(32), 32, 32).ok()?;
     tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("ProtoGrid")

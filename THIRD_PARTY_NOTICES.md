@@ -1,14 +1,17 @@
 # Third-party notices
 
-ProtoGrid распространяется по MIT (см. [LICENSE](LICENSE)). В репозитории и в
-готовых сборках используются сторонние компоненты, у каждого — своя лицензия.
+ProtoGrid для desktop и общее Rust-ядро распространяются по MIT (см.
+[LICENSE](LICENSE)). Android-клиент линкует libbox и распространяется по
+GPL-3.0 (см. `apps/protogrid-android/LICENSE`). В репозитории и в готовых
+сборках используются сторонние компоненты, у каждого — своя лицензия.
 
-## sing-box (форк ProtoGrid)
+## sing-box (основа ProtoGrid-core)
 
 - Upstream: <https://github.com/SagerNet/sing-box>, тег `v1.14.4`.
 - Лицензия upstream: **GNU GPL v3** (`GPL-3.0-or-later`), файл `LICENSE` в
   upstream-репозитории.
-- Все изменения форка хранятся в этом репозитории в виде патчей
+- Продуктовое имя ядра — **ProtoGrid-core**. Все изменения форка хранятся в
+  этом репозитории в виде патчей
   `docs/patches/*.patch`; `forks/sing-box` в git не входит.
 - Соответствующий исходный код форка = upstream `v1.14.4` + патчи из
   `docs/patches`, применённые по порядку. Сборка: `scripts/build-fork.sh`
@@ -16,6 +19,14 @@ ProtoGrid распространяется по MIT (см. [LICENSE](LICENSE)). 
 - Если вы распространяете собранный бинарник форка, вы обязаны выполнить
   требования GPLv3: предоставить этот исходный код и текст лицензии. Текст
   лицензии — `installer/licenses/GPL-3.0.txt`, он входит в Windows-пакеты.
+
+## libbox (Android)
+
+- `apps/protogrid-android` линкует `libbox.aar`, собранный из того же форка
+  sing-box (`make lib_install` + `build_libbox`), поэтому APK распространяется
+  под **GPL-3.0**. Текст лицензии — `apps/protogrid-android/LICENSE`.
+- Исходники Android-оболочки и JNI-моста (`crates/protogrid-mobile`) входят в
+  этот репозиторий; исходники libbox — upstream `v1.14.4` + `docs/patches`.
 
 ## wintun
 

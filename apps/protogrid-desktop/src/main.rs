@@ -2,6 +2,7 @@
 
 mod app;
 mod autostart;
+mod brand;
 mod engine;
 mod flags;
 mod installer;

@@ -25,11 +25,13 @@ jobs:
             libgtk-3-dev libayatana-appindicator3-dev
       - name: Core tests
         run: cargo test -p protogrid-core
+      - name: Mobile bridge check
+        run: cargo check -p protogrid-mobile
       - name: Application check
         run: cargo check -p protogrid-desktop
 
   fork:
-    name: sing-box fork
+    name: ProtoGrid-core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

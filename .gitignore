@@ -11,3 +11,6 @@ dist
 
 # Local agent instructions, not published.
 .opencode/
+
+# Static site build output.
+/_site
