@@ -1,0 +1,16 @@
+# Normalize line endings (repo is developed on Windows and Linux).
+* text=auto eol=lf
+
+# Windows launchers must keep CRLF.
+*.bat text eol=crlf
+
+# Binary assets.
+*.png binary
+*.ico binary
+*.ttf binary
+*.rgba binary
+*.exe binary
+*.dll binary
+
+# Patches are applied verbatim by `git am` and CI.
+*.patch text eol=lf
