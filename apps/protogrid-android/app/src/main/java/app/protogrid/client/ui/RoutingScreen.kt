@@ -673,9 +673,10 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
                                     val raw = withContext(Dispatchers.IO) {
                                         runCatching {
                                             CoreBridge.prepareRuleSets(
-                                                settings.customRulesJson(),
+                                                settings.routingJson(),
                                                 geoDir.absolutePath,
-                                                7L * 24 * 60 * 60,
+                                                // 0 = force a refresh even if the cache is fresh.
+                                                0L,
                                             )
                                         }.getOrElse {
                                             """{"error":${JSONObject.quote(it.message ?: "download failed")}}"""
@@ -688,6 +689,7 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
                                     } else {
                                         val available = result?.optJSONArray("available")?.length() ?: 0
                                         val downloaded = result?.optInt("downloaded") ?: 0
+                                        val seeded = result?.optJSONArray("seeded")?.length() ?: 0
                                         val errors = result?.optJSONArray("errors")
                                         val errorText = buildList {
                                             if (errors != null) {
@@ -703,6 +705,10 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
                                             append(available)
                                             append(", скачано ")
                                             append(downloaded)
+                                            if (seeded > 0) {
+                                                append(", зашито ")
+                                                append(seeded)
+                                            }
                                             if (errorText.isNotBlank()) {
                                                 append("; ")
                                                 append(errorText)

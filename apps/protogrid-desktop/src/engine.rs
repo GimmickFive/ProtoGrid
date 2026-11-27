@@ -165,6 +165,32 @@ mod permissions_tests {
     }
 
     #[test]
+    fn bundled_rulesets_fill_empty_profile_once() {
+        let root = std::env::temp_dir().join(format!("protogrid-seed-{}", new_clash_secret()));
+        let source = root.join("package-rulesets");
+        let data = root.join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("geoip-ru.srs"), b"bundled-geoip").unwrap();
+        std::fs::write(source.join("geosite-category-ru.srs"), b"bundled-geosite").unwrap();
+        std::fs::write(source.join("notes.txt"), b"ignored").unwrap();
+
+        let seeded = seed_rulesets_from(&source, &data);
+        assert!(seeded.iter().any(|name| name == "geoip-ru.srs"));
+        assert!(seeded.iter().any(|name| name == "geosite-category-ru.srs"));
+        assert_eq!(
+            std::fs::read(data.join("rulesets").join("geoip-ru.srs")).unwrap(),
+            b"bundled-geoip"
+        );
+        assert!(!data.join("rulesets").join("notes.txt").exists());
+
+        // Existing cache files (possibly newer downloads) must be kept.
+        let seeded = seed_rulesets_from(&source, &data);
+        assert!(seeded.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_cleanup_keeps_only_target() {
         let dir = std::env::temp_dir().join(format!("protogrid-runtime-{}", new_clash_secret()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -683,6 +709,59 @@ pub fn profile_data_dir(data_root: &Path) -> PathBuf {
     data_root.join("app.protogrid.client")
 }
 
+/// Directory with the GeoIP/GeoSite files shipped next to the executable:
+/// `rulesets/` on Windows/Linux, `Contents/Resources/rulesets` inside a
+/// macOS app bundle, and the repository copy for `cargo run`.
+fn bundled_ruleset_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [
+        dir.join("rulesets"),
+        dir.join("../Resources/rulesets"),
+        dir.join("../../assets/rulesets"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_dir())
+}
+
+/// Copy the packaged GeoIP/GeoSite seed into the profile cache when the
+/// profile has no usable copies yet. Later connects still refresh stale files.
+fn seed_bundled_rulesets(data_dir: &Path) -> Vec<String> {
+    let Some(source) = bundled_ruleset_dir() else {
+        return Vec::new();
+    };
+    seed_rulesets_from(&source, data_dir)
+}
+
+fn seed_rulesets_from(source: &Path, data_dir: &Path) -> Vec<String> {
+    let target = data_dir.join("rulesets");
+    if ensure_private_dir(&target).is_err() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(source) else {
+        return Vec::new();
+    };
+    let mut seeded = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("srs") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let destination = target.join(name);
+        if matches!(std::fs::metadata(&destination), Ok(metadata) if metadata.len() > 0) {
+            continue;
+        }
+        if std::fs::copy(&path, &destination).is_ok() {
+            harden_file(&destination);
+            seeded.push(name.to_string());
+        }
+    }
+    seeded
+}
+
 /// Whether this process can create a TUN interface: an elevated process on
 /// Windows, root or `CAP_NET_ADMIN` on Linux. Cached for the process lifetime.
 pub fn is_elevated() -> bool {
@@ -741,6 +820,7 @@ pub fn init_profile() -> Result<PathBuf, String> {
         ensure_private_dir(&data_dir.join(sub))
             .map_err(|error| format!("не удалось создать {}: {error}", data_dir.display()))?;
     }
+    let _ = seed_bundled_rulesets(&data_dir);
     let config_path = data_dir.join("config.json");
     if !config_path.exists() {
         let mut config = AppConfig::default();
@@ -795,6 +875,7 @@ impl Engine {
         for sub in ["runtime", "cores", "rulesets", "logs"] {
             let _ = ensure_private_dir(&data_dir.join(sub));
         }
+        let _ = seed_bundled_rulesets(&data_dir);
         let runtime_dir = data_dir.join("runtime");
         // A previous run may have crashed before removing them.
         clear_runtime_configs(&runtime_dir, None);
@@ -3950,6 +4031,16 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         .ok_or_else(|| "нет пути к ядру".to_string())?;
 
     let ruleset_dir = data_dir.join("rulesets");
+    let seeded = seed_bundled_rulesets(&data_dir);
+    if !seeded.is_empty() {
+        push_log(
+            inner,
+            ctx,
+            "app",
+            Some("info"),
+            format!("Зашито базовых GeoIP/GeoSite: {}", seeded.len()),
+        );
+    }
     if settings.core.is_singbox_like() {
         let sources = ruleset::sources(&config.rules);
         if !sources.is_empty() {

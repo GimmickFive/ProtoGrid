@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -17,6 +18,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,6 +51,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -67,6 +70,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -81,6 +85,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -89,6 +95,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import app.protogrid.client.data.AndroidSettings
+import app.protogrid.client.data.BackgroundAccess
 import app.protogrid.client.data.ProfileStore
 import app.protogrid.client.data.ProfileSummary
 import app.protogrid.client.data.SubscriptionInfo
@@ -123,17 +130,36 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 
 class MainActivity : ComponentActivity() {
+    /** Ссылка из `protogrid://add?url=…`, ждущая обработки в Compose. */
+    private var deepLink by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(0xFF0F1115.toInt()),
             navigationBarStyle = SystemBarStyle.dark(0xFF0F1115.toInt()),
         )
+        deepLink = linkFromIntent(intent)
         setContent {
             ProtoGridTheme {
-                ProtoGridApp()
+                ProtoGridApp(deepLink) { deepLink = null }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        linkFromIntent(intent)?.let { deepLink = it }
+    }
+
+    /** `protogrid://add?url=https%3A…` и `protogrid://add/<url>`. */
+    private fun linkFromIntent(intent: Intent?): String? {
+        val data = intent?.data ?: return null
+        if (!data.scheme.equals("protogrid", ignoreCase = true)) return null
+        val direct = data.getQueryParameter("url")
+            ?: data.pathSegments.firstOrNull { it.startsWith("http", ignoreCase = true) }
+        return direct?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
     }
 }
 
@@ -161,7 +187,7 @@ private fun isSubscriptionLink(text: String): Boolean {
 }
 
 @Composable
-private fun ProtoGridApp() {
+private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Unit = {}) {
     val context = LocalContext.current
     val store = remember { ProfileStore(context) }
     val routingSettings = remember { AndroidSettings(context) }
@@ -176,6 +202,23 @@ private fun ProtoGridApp() {
     var notice by remember { mutableStateOf<String?>(null) }
     var silentNotification by remember { mutableStateOf(routingSettings.silentNotification) }
     var notificationSpeed by remember { mutableStateOf(routingSettings.notificationSpeed) }
+    var autoStart by remember { mutableStateOf(routingSettings.autoStart) }
+    var batteryUnrestricted by remember {
+        mutableStateOf(BackgroundAccess.isBatteryUnrestricted(context))
+    }
+
+    // The exemption can also be changed from the system settings app, so
+    // re-read it every time the UI comes back to the foreground.
+    val lifecycleOwner = context as? ComponentActivity
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                batteryUnrestricted = BackgroundAccess.isBatteryUnrestricted(context)
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(observer)
+        onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
+    }
 
     val status by VpnState.status.collectAsState()
     val vpnMessage by VpnState.message.collectAsState()
@@ -365,14 +408,31 @@ private fun ProtoGridApp() {
         reload()
     }
 
-    fun pinWidget() {
+    fun pinWidget(): Boolean {
         val manager = AppWidgetManager.getInstance(context)
-        if (!manager.isRequestPinAppWidgetSupported) return
-        manager.requestPinAppWidget(
+        if (!manager.isRequestPinAppWidgetSupported) return false
+        return manager.requestPinAppWidget(
             ComponentName(context, ProtoGridWidget::class.java),
             null,
             null,
         )
+    }
+
+    fun openBackgroundAccess() {
+        val opened = runCatching {
+            context.startActivity(BackgroundAccess.batteryRequestIntent(context))
+        }.isSuccess
+        if (!opened) {
+            runCatching { context.startActivity(BackgroundAccess.batterySettingsIntent()) }
+        }
+    }
+
+    fun openBatterySettings() {
+        runCatching { context.startActivity(BackgroundAccess.batterySettingsIntent()) }
+    }
+
+    fun openAutoStartSettings() {
+        BackgroundAccess.openAutoStartSettings(context)
     }
 
     LaunchedEffect(Unit) {
@@ -390,6 +450,14 @@ private fun ProtoGridApp() {
         }
     }
 
+    LaunchedEffect(deepLink) {
+        val link = deepLink?.trim().orEmpty()
+        if (link.isNotEmpty()) {
+            onDeepLinkConsumed()
+            submitInput(link)
+        }
+    }
+
     Scaffold(
         containerColor = Pg.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -399,7 +467,32 @@ private fun ProtoGridApp() {
         Box(
             Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .pointerInput(tab) {
+                    // Горизонтальный свайп по содержимому переключает вкладки
+                    // в том же порядке, что и нижнее меню.
+                    val tabs = Tab.entries
+                    val threshold = 64.dp.toPx()
+                    var dragged = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { dragged = 0f },
+                        onDragCancel = { dragged = 0f },
+                        onHorizontalDrag = { change, amount ->
+                            dragged += amount
+                            change.consume()
+                        },
+                        onDragEnd = {
+                            val index = tabs.indexOf(tab)
+                            when {
+                                dragged <= -threshold && index < tabs.lastIndex ->
+                                    tab = tabs[index + 1]
+                                dragged >= threshold && index > 0 ->
+                                    tab = tabs[index - 1]
+                            }
+                            dragged = 0f
+                        },
+                    )
+                },
         ) {
             key(tab) {
                 when (tab) {
@@ -448,6 +541,8 @@ private fun ProtoGridApp() {
                         update = update,
                         silentNotification = silentNotification,
                         notificationSpeed = notificationSpeed,
+                        autoStart = autoStart,
+                        batteryUnrestricted = batteryUnrestricted,
                         onSilentNotification = {
                             silentNotification = it
                             routingSettings.silentNotification = it
@@ -456,6 +551,13 @@ private fun ProtoGridApp() {
                             notificationSpeed = it
                             routingSettings.notificationSpeed = it
                         },
+                        onAutoStart = {
+                            autoStart = it
+                            routingSettings.autoStart = it
+                        },
+                        onRequestBackground = ::openBackgroundAccess,
+                        onOpenBatterySettings = ::openBatterySettings,
+                        onOpenAutoStartSettings = ::openAutoStartSettings,
                         onPinWidget = ::pinWidget,
                     )
                 }
@@ -1222,10 +1324,17 @@ private fun SettingsScreen(
     update: UpdateUiState,
     silentNotification: Boolean,
     notificationSpeed: Boolean,
+    autoStart: Boolean,
+    batteryUnrestricted: Boolean,
     onSilentNotification: (Boolean) -> Unit,
     onNotificationSpeed: (Boolean) -> Unit,
-    onPinWidget: () -> Unit,
+    onAutoStart: (Boolean) -> Unit,
+    onRequestBackground: () -> Unit,
+    onOpenBatterySettings: () -> Unit,
+    onOpenAutoStartSettings: () -> Unit,
+    onPinWidget: () -> Boolean,
 ) {
+    var pinHint by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1244,7 +1353,7 @@ private fun SettingsScreen(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Уведомления, виджет, обновления и приложение",
+                    text = "Фоновая работа, уведомления, виджет и обновления",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,
@@ -1256,27 +1365,90 @@ private fun SettingsScreen(
 
         Panel(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                SectionLabel("Уведомление")
-                Spacer(Modifier.height(12.dp))
-                SettingSwitch(
-                    title = "Тихая шторка",
-                    subtitle = "Уведомление VPN без звука и всплывания",
-                    checked = silentNotification,
-                    onChange = onSilentNotification,
-                )
-                Spacer(Modifier.height(12.dp))
-                SettingSwitch(
-                    title = "Показывать скорость",
-                    subtitle = "Скачивание и отправка в тексте уведомления",
-                    checked = notificationSpeed,
-                    onChange = onNotificationSpeed,
-                )
-                Spacer(Modifier.height(8.dp))
+                SectionLabel("Уведомление VPN")
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "Изменения применятся при следующем подключении.",
+                    text = "Постоянное уведомление показывает, что туннель запущен, " +
+                        "и даёт быстрый доступ к отключению.",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+                Spacer(Modifier.height(12.dp))
+                SettingSwitch(
+                    title = "Тихий режим",
+                    subtitle = "Без звука и всплывающих окон — уведомление остаётся только в шторке.",
+                    checked = silentNotification,
+                    onChange = onSilentNotification,
+                )
+                Spacer(Modifier.height(14.dp))
+                SettingSwitch(
+                    title = "Скорость в тексте",
+                    subtitle = "Показывать текущие скорости скачивания и отправки в уведомлении.",
+                    checked = notificationSpeed,
+                    onChange = onNotificationSpeed,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "Уведомление пересоздаётся при подключении: после изменения " +
+                        "этих настроек переподключите VPN.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        Panel(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("Фоновая работа")
+                Spacer(Modifier.height(12.dp))
+                SettingSwitch(
+                    title = "Не ограничивать в фоне",
+                    subtitle = if (batteryUnrestricted) {
+                        "Android не будет останавливать VPN для экономии заряда"
+                    } else {
+                        "Запросить у системы исключение из энергосбережения"
+                    },
+                    checked = batteryUnrestricted,
+                    onChange = { enabled ->
+                        if (enabled) onRequestBackground() else onOpenBatterySettings()
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+                SettingSwitch(
+                    title = "Автозапуск",
+                    subtitle = "Подключать VPN после перезагрузки устройства",
+                    checked = autoStart,
+                    onChange = onAutoStart,
+                )
+                if (autoStart && !batteryUnrestricted) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Без исключения из энергосбережения система может остановить VPN после перезагрузки.",
+                        color = Pg.amber,
+                        fontFamily = Inter,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "На Xiaomi, Huawei, Oppo и Vivo автозапуск нужно дополнительно разрешить в приложении безопасности.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                GhostButton(
+                    text = "Настройки автозапуска",
+                    onClick = onOpenAutoStartSettings,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
@@ -1288,7 +1460,9 @@ private fun SettingsScreen(
                 SectionLabel("Виджет")
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Виджет на главном экране показывает статус VPN и переключает его по нажатию.",
+                    text = "Виджет 4×1 на рабочем столе показывает статус подключения, " +
+                        "скорость трафика через прокси и кнопку включения/выключения VPN. " +
+                        "Плитка в шторке быстрых настроек дублирует управление.",
                     color = Pg.muted,
                     fontFamily = Inter,
                     fontSize = 11.sp,
@@ -1296,18 +1470,49 @@ private fun SettingsScreen(
                 )
                 Spacer(Modifier.height(12.dp))
                 GhostButton(
-                    text = "Закрепить виджет",
-                    onClick = onPinWidget,
+                    text = "Добавить виджет",
+                    onClick = {
+                        pinHint = false
+                        if (!onPinWidget()) pinHint = true
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     icon = painterResource(R.drawable.ic_add),
                 )
+                if (pinHint) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Лаунчер не умеет закреплять виджеты автоматически. " +
+                            "Добавьте вручную: долгое нажатие на рабочем столе → «Виджеты» → ProtoGrid.",
+                        color = Pg.muted,
+                        fontFamily = Inter,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "Плитка ProtoGrid в шторке: добавьте её через «Изменить плитки» в быстрых настройках.",
+                    text = "Плитка ProtoGrid в шторке: «Изменить плитки» в быстрых настройках → перетащите ProtoGrid.",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        Panel(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("Навигация")
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Разделы переключаются нижним меню или свайпом по экрану: " +
+                        "влево — следующий раздел, вправо — предыдущий.",
+                    color = Pg.muted,
+                    fontFamily = Inter,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
                 )
             }
         }
@@ -1325,6 +1530,8 @@ private fun SettingsScreen(
                 InfoRow("Версия", BuildConfig.VERSION_NAME)
                 Spacer(Modifier.height(6.dp))
                 InfoRow("Ядро", "$CORE_LABEL $CORE_VERSION")
+                Spacer(Modifier.height(6.dp))
+                InfoRow("Обновления", "проверяются при запуске")
             }
         }
 

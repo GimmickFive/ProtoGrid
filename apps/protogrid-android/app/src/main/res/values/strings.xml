@@ -5,4 +5,13 @@
     <string name="notification_connecting">Подключение…</string>
     <string name="notification_connected">Подключено</string>
     <string name="notification_stop">Отключить</string>
+    <string name="widget_stopped">Отключено</string>
+    <string name="widget_error">Ошибка</string>
+    <string name="widget_start">Вкл</string>
+    <string name="widget_stop">Выкл</string>
+    <string name="widget_turn_on">Включить VPN</string>
+    <string name="widget_turn_off">Отключить VPN</string>
+    <string name="widget_stats">Прокси ↓ %1$s  ↑ %2$s</string>
+    <string name="widget_stats_idle">Прокси ↓ —  ↑ —</string>
+    <string name="widget_description">ProtoGrid: статус VPN, трафик через прокси и кнопка включения</string>
 </resources>

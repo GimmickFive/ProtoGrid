@@ -46,6 +46,20 @@ GPL-3.0 (см. `apps/protogrid-android/LICENSE`). В репозитории и �
   вложенной в сам архив. Готовые пакеты ProtoGrid кладут текст лицензии рядом
   с `wintun.dll`.
 
+## GeoIP/GeoSite rule sets
+
+- Стартовый слепок: `geoip-ru.srs` из
+  <https://github.com/SagerNet/sing-geoip> и `geosite-category-ru.srs` из
+  <https://github.com/SagerNet/sing-geosite>.
+- Лицензия: **GNU GPL v3** (как у sing-box); текст — `installer/licenses/GPL-3.0.txt`
+  и `apps/protogrid-android/LICENSE`.
+- Исходники слепка — `assets/rulesets`. Android компилирует их в
+  `libprotogrid_mobile.so`; desktop-пакеты кладут их рядом с исполняемым файлом
+  (в macOS — в `Contents/Resources/rulesets`). При первом запуске они
+  копируются в кэш профиля. Обновления скачиваются с тех же URL SagerNet; при
+  недоступности сети используется зашитая/упакованная или последняя скачанная
+  копия.
+
 ## Шрифты
 
 | Шрифт | Лицензия | Файл |

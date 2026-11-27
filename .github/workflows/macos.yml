@@ -1,0 +1,66 @@
+name: macOS build
+
+# Сборка .app/.dmg под macOS. Запуск руками или по тегу v*.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  macos:
+    name: ${{ matrix.arch }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.arch }}
+
+      - name: Version
+        id: ver
+        run: echo "version=$(sed -n 's/^version = \"\(.*\)\"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release -p protogrid-desktop --target ${{ matrix.target }}
+
+      - name: Bundle app + dmg
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          bash apps/protogrid-desktop/scripts/macos-bundle.sh \
+            "target/${{ matrix.target }}/release/protogrid" \
+            "dist/macos-${{ matrix.arch }}" \
+            "$VERSION"
+
+      - name: Проверка схемы в Info.plist
+        run: |
+          plist="dist/macos-${{ matrix.arch }}/ProtoGrid.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" "$plist" | grep -qx protogrid
+          echo "protogrid:// объявлен"
+
+      - name: Zip app
+        run: |
+          cd "dist/macos-${{ matrix.arch }}"
+          ditto -c -k --sequesterRsrc --keepParent ProtoGrid.app "ProtoGrid-${{ steps.ver.outputs.version }}-macos-${{ matrix.arch }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos-${{ matrix.arch }}/*.zip
+            dist/macos-${{ matrix.arch }}/*.dmg
+          if-no-files-found: error

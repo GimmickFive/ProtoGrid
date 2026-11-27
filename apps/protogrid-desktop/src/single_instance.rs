@@ -5,11 +5,14 @@
 //! for activation requests. A second launch pokes that listener, so the already
 //! running window is restored and focused before the new process exits.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 static ACTIVATION_PENDING: AtomicBool = AtomicBool::new(false);
 static UI: OnceLock<egui::Context> = OnceLock::new();
+/// URL подписки из deep link: переживает передачу второму экземпляру.
+static PENDING_LINK: Mutex<Option<String>> = Mutex::new(None);
 
 /// Lets the activation listener wake an idle UI immediately.
 pub fn bind_ui(ctx: &egui::Context) {
@@ -25,6 +28,57 @@ fn request_activation() {
     ACTIVATION_PENDING.store(true, Ordering::Release);
     if let Some(ctx) = UI.get() {
         ctx.request_repaint();
+    }
+}
+
+/// Запоминает ссылку, которую должен получить запущенный экземпляр.
+pub fn set_pending_link(link: &str) {
+    *PENDING_LINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(link.to_owned());
+}
+
+fn pending_snapshot() -> Option<String> {
+    PENDING_LINK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Забирает ссылку из deep link: сначала из памяти (первый запуск),
+/// потом с диска (передача от второго экземпляра).
+pub fn take_pending_link() -> Option<String> {
+    if let Some(link) = PENDING_LINK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        return Some(link);
+    }
+    let path = handoff_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn handoff_path() -> Option<PathBuf> {
+    dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .map(|dir| dir.join("ProtoGrid").join("pending-link.txt"))
+}
+
+fn write_handoff(link: &str) -> bool {
+    let Some(path) = handoff_path() else {
+        return false;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, link).is_ok()
+}
+
+fn drop_handoff() {
+    if let Some(path) = handoff_path() {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -89,11 +143,16 @@ mod platform {
                 // The freshly launched process is allowed to hand foreground
                 // rights to the already running one.
                 AllowSetForegroundWindow(ASFW_ANY);
+                // Deep link: оставляем ссылку на диске, будим владельца событием.
+                if let Some(link) = super::pending_snapshot() {
+                    super::write_handoff(&link);
+                }
                 let signaled = !event.is_null() && SetEvent(event) != 0;
                 if !event.is_null() {
                     CloseHandle(event);
                 }
                 if !signaled {
+                    super::drop_handoff();
                     show_already_running();
                 }
             }
@@ -188,8 +247,16 @@ mod platform {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        // Deep link: второй экземпляр оставляет ссылку на диске и будит владельца.
+        let handoff = super::pending_snapshot();
+        if let Some(link) = handoff.as_deref() {
+            super::write_handoff(link);
+        }
         if poke(&path) {
             return None;
+        }
+        if handoff.is_some() {
+            super::drop_handoff();
         }
         // A crashed process leaves its socket behind; replacing it is safe
         // because connect() above already proved nobody is listening.

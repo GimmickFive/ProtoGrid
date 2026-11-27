@@ -19,6 +19,13 @@ for file in "$EXE" "$CORE" "$LITE" "$WINTUN"; do
     fi
 done
 
+for file in assets/rulesets/geoip-ru.srs assets/rulesets/geosite-category-ru.srs; do
+    if [[ ! -f "$file" ]]; then
+        echo "missing $file — restore the bundled GeoIP/GeoSite seed" >&2
+        exit 1
+    fi
+done
+
 echo "==> release build"
 cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
@@ -37,6 +44,10 @@ cp -f "$EXE" "$STAGE/ProtoGrid.exe"
 cp -f "$CORE" "$STAGE/protogrid-core.exe"
 cp -f "$LITE" "$STAGE/protogrid-core-lite.exe"
 cp -f "$WINTUN" "$STAGE/wintun.dll"
+# Offline GeoIP/GeoSite seed: the launcher copies these next to the profile on
+# first run, then refreshes them from GitHub every 7 days.
+mkdir -p "$STAGE/rulesets"
+cp -f assets/rulesets/*.srs "$STAGE/rulesets/"
 # Optional recovery tool for stale Wintun adapters left by older builds.
 [ -f reset-tun.bat ] && cp -f reset-tun.bat "$STAGE/reset-tun.bat"
 [ -f scripts/reset-tun.ps1 ] && cp -f scripts/reset-tun.ps1 "$STAGE/reset-tun.ps1"
@@ -57,6 +68,8 @@ files = [
     "protogrid-core.exe",
     "protogrid-core-lite.exe",
     "wintun.dll",
+    "rulesets/geoip-ru.srs",
+    "rulesets/geosite-category-ru.srs",
     "reset-tun.bat",
     "reset-tun.ps1",
     "LICENSE.txt",
@@ -74,7 +87,12 @@ print(out)
 PY
 
 # Keep an existing data/ directory: it holds the portable profile and logs.
-mkdir -p "$PORTABLE/licenses"
+mkdir -p "$PORTABLE/licenses" "$PORTABLE/rulesets"
+for name in geoip-ru.srs geosite-category-ru.srs; do
+    if ! cp -f "$STAGE/rulesets/$name" "$PORTABLE/rulesets/$name" 2>/dev/null; then
+        echo "note: $PORTABLE/rulesets/$name is in use; archive is up to date" >&2
+    fi
+done
 for name in ProtoGrid.exe protogrid-core.exe protogrid-core-lite.exe wintun.dll reset-tun.bat reset-tun.ps1 LICENSE.txt THIRD_PARTY_NOTICES.txt portable.txt; do
     if [ -f "$STAGE/$name" ] && ! cp -f "$STAGE/$name" "$PORTABLE/$name" 2>/dev/null; then
         echo "note: $PORTABLE/$name is in use; archive is up to date" >&2

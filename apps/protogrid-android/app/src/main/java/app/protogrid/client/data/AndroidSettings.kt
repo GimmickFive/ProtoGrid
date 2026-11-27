@@ -19,7 +19,11 @@ enum class PerAppMode(val id: String) {
 
 enum class TrafficPreset(val id: String, val label: String, val description: String) {
     Global("global", "Глобальный прокси", "Весь трафик через сервер"),
-    Bypass("bypass", "Жизнь в РФ", "RU-домены и локальная сеть напрямую"),
+    Bypass(
+        "bypass",
+        "Жизнь в РФ",
+        "RU-домены, GeoIP/GeoSite RU и локальная сеть напрямую; web.telegram.ru и instagram.ru — через прокси",
+    ),
     Direct("direct", "Прямой", "Без прокси"),
     Custom("custom", "Свой профиль", "Свои правила маршрутизации");
 
@@ -158,6 +162,13 @@ class AndroidSettings(context: Context) {
             prefs.edit().putBoolean(KEY_NOTIFICATION_SPEED, value).apply()
         }
 
+    /** Bring the tunnel back up after a reboot (see BootReceiver). */
+    var autoStart: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_START, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_AUTO_START, value).apply()
+        }
+
     val rulesetDir: File
         get() = File(appContext.filesDir, "rulesets")
 
@@ -188,5 +199,6 @@ class AndroidSettings(context: Context) {
         const val KEY_SHOW_SYSTEM = "show_system_apps"
         const val KEY_SILENT_NOTIFICATION = "silent_notification"
         const val KEY_NOTIFICATION_SPEED = "notification_speed"
+        const val KEY_AUTO_START = "auto_start"
     }
 }

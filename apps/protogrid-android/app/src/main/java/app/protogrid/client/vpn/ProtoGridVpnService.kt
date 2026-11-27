@@ -76,6 +76,7 @@ class ProtoGridVpnService :
     private var tunFd: ParcelFileDescriptor? = null
     private var clashApiSecret: String = ""
     private var notificationJob: Job? = null
+    private var widgetJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -141,7 +142,7 @@ class ProtoGridVpnService :
             val settings = AndroidSettings(this@ProtoGridVpnService)
             runCatching {
                 CoreBridge.prepareRuleSets(
-                    settings.customRulesJson(),
+                    settings.routingJson(),
                     settings.rulesetDir.absolutePath,
                     RULE_SET_MAX_AGE_SECONDS,
                 )
@@ -176,7 +177,7 @@ class ProtoGridVpnService :
             TrafficMonitor.start(scope, clashApiSecret)
             updateNotification(getString(R.string.notification_connected))
             startNotificationUpdates()
-            ProtoGridWidget.updateAll(this)
+            startWidgetUpdates()
         } catch (error: Throwable) {
             fail(error.message ?: error.toString())
         }
@@ -214,6 +215,8 @@ class ProtoGridVpnService :
         stopping = true
         notificationJob?.cancel()
         notificationJob = null
+        widgetJob?.cancel()
+        widgetJob = null
         TrafficMonitor.stop()
         closeEngine()
         DefaultNetworkMonitor.stop(this)
@@ -228,6 +231,8 @@ class ProtoGridVpnService :
     private fun closeEngine() {
         notificationJob?.cancel()
         notificationJob = null
+        widgetJob?.cancel()
+        widgetJob = null
         runCatching { commandServer?.closeService() }
             .onFailure { Log.w(TAG, "closeService failed", it) }
         runCatching { commandServer?.close() }
@@ -548,6 +553,17 @@ class ProtoGridVpnService :
         }
     }
 
+    /** Keeps the 4x1 widget's proxy totals fresh while the tunnel is up. */
+    private fun startWidgetUpdates() {
+        widgetJob?.cancel()
+        widgetJob = scope.launch {
+            while (isActive) {
+                ProtoGridWidget.updateAll(this@ProtoGridVpnService)
+                delay(WIDGET_UPDATE_MS)
+            }
+        }
+    }
+
     private fun formatRate(bytes: Long): String {
         if (bytes < 1024) return "$bytes Б/с"
         var value = bytes.toDouble()
@@ -606,6 +622,7 @@ class ProtoGridVpnService :
         private const val CHANNEL_ID_NORMAL = "protogrid_vpn_normal"
         private const val CHANNEL_ID_SILENT = "protogrid_vpn_silent"
         private const val NOTIFICATION_ID = 1
+        private const val WIDGET_UPDATE_MS = 3_000L
         private val RATE_UNITS = arrayOf("Б", "КБ", "МБ", "ГБ")
 
         const val ACTION_STOP = "app.protogrid.client.action.STOP"

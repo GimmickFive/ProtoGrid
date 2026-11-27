@@ -9,6 +9,7 @@
 *.ico binary
 *.bmp binary
 *.ttf binary
+*.srs binary
 *.rgba binary
 *.exe binary
 *.dll binary

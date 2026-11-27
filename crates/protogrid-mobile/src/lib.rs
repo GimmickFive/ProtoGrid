@@ -23,6 +23,17 @@ use serde_json::{json, Value};
 /// libbox in the Android app is the ProtoGrid-core build (sing-box + patches).
 const ANDROID_CORE_VERSION: &str = "1.14.4";
 
+/// Startup GeoIP/GeoSite snapshots compiled into the Android bridge. The
+/// desktop package ships the same files next to the executable instead, so
+/// the MIT launcher stays separate from the GPL rule-set data.
+static GEOIP_RU_SRS: &[u8] = include_bytes!("../../../assets/rulesets/geoip-ru.srs");
+static GEOSITE_CATEGORY_RU_SRS: &[u8] =
+    include_bytes!("../../../assets/rulesets/geosite-category-ru.srs");
+static BUNDLED_RULESETS: &[(&str, &[u8])] = &[
+    ("geoip-ru.srs", GEOIP_RU_SRS),
+    ("geosite-category-ru.srs", GEOSITE_CATEGORY_RU_SRS),
+];
+
 /// Set from Kotlin before the first config build: the Android lite flavor
 /// links a libbox built with `protogrid_lite`, which only registers VLESS over
 /// plain TCP. The flag keeps the shared Rust core from emitting configs the
@@ -94,17 +105,20 @@ fn android_tweaks(mut config: Value) -> Value {
     config
 }
 
-/// The mobile "Жизнь в РФ" preset stays offline: no GeoIP/GeoSite rule-set
-/// downloads, and no process rules (Android's connection-owner API is not
-/// wired yet). RU domains and the local network go direct, everything else
-/// goes through the proxy.
+/// The mobile "Жизнь в РФ" preset: RU domains, RU GeoIP/GeoSite and the local
+/// network go direct, everything else goes through the proxy. Process rules
+/// are omitted because Android's connection-owner API is not wired yet.
+///
+/// The GeoIP/GeoSite rule sets are seeded from binaries compiled into the app
+/// (see `protogrid_core::ruleset::seed_bundled`) and refreshed from SagerNet
+/// when the cache is stale. If neither the seed nor the download is available,
+/// `route_rule` drops those two rules and the `.ru/.su/.рф` suffix rule keeps
+/// the preset useful.
 fn mobile_bypass_rules() -> Vec<RoutingRule> {
     let mut rules = default_rules();
     rules.retain(|rule| {
-        !matches!(
-            rule.kind,
-            RuleKind::Geoip | RuleKind::Geosite | RuleKind::ProcessName
-        )
+        // RU GeoIP/GeoSite stay; unrelated Geo rules (ads) and process rules do not.
+        !matches!(rule.kind, RuleKind::ProcessName) && rule.id != "default-ads"
     });
     rules.push(RoutingRule {
         id: "android-ru-domains".into(),
@@ -204,17 +218,28 @@ fn build_config_json(
 }
 
 fn prepare_rule_sets_json(
-    rules_json: &str,
+    routing_json: &str,
     dir: &str,
     max_age_seconds: i64,
 ) -> Result<String, String> {
-    let rules: Vec<RoutingRule> = serde_json::from_str(rules_json).unwrap_or_default();
+    let routing: RoutingInput = serde_json::from_str(routing_json).unwrap_or_default();
+    let (rules, _, _) = routing_for(&routing);
+    let ruleset_dir = Path::new(dir);
+    let mut errors = Vec::new();
+    let seeded = match protogrid_core::ruleset::seed_bytes(ruleset_dir, BUNDLED_RULESETS) {
+        Ok(seeded) => seeded,
+        Err(error) => {
+            errors.push(format!("встроенные GeoIP/GeoSite: {error}"));
+            Vec::new()
+        }
+    };
     let sources = protogrid_core::ruleset::sources(&rules);
     if sources.is_empty() {
         return Ok(json!({
             "available": Vec::<String>::new(),
             "downloaded": 0,
-            "errors": Vec::<String>::new(),
+            "seeded": seeded,
+            "errors": errors,
         })
         .to_string());
     }
@@ -225,13 +250,15 @@ fn prepare_rule_sets_json(
     let max_age = Duration::from_secs(max_age_seconds.max(0) as u64);
     let prepared = runtime.block_on(protogrid_core::ruleset::prepare(
         &sources,
-        Path::new(dir),
+        ruleset_dir,
         max_age,
     ));
+    errors.extend(prepared.errors);
     Ok(json!({
         "available": prepared.available,
         "downloaded": prepared.downloaded,
-        "errors": prepared.errors,
+        "seeded": seeded,
+        "errors": errors,
     })
     .to_string())
 }
@@ -349,16 +376,16 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_buildConfig<'lo
     )
 }
 
-/// Kotlin: `CoreBridge.prepareRuleSets(rulesJson: String, dir: String, maxAgeSeconds: Long): String`
+/// Kotlin: `CoreBridge.prepareRuleSets(routingJson: String, dir: String, maxAgeSeconds: Long): String`
 #[no_mangle]
 pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_prepareRuleSets<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
-    rules_json: JString<'local>,
+    routing_json: JString<'local>,
     dir: JString<'local>,
     max_age_seconds: jlong,
 ) -> jstring {
-    let rules_json: String = match env.get_string(&rules_json) {
+    let routing_json: String = match env.get_string(&routing_json) {
         Ok(value) => value.into(),
         Err(error) => return new_string(&mut env, error_json(format!("JNI: {error}"))),
     };
@@ -367,7 +394,7 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_prepareRuleSets
         Err(error) => return new_string(&mut env, error_json(format!("JNI: {error}"))),
     };
     let result = catch_unwind(AssertUnwindSafe(|| {
-        prepare_rule_sets_json(&rules_json, &dir, max_age_seconds)
+        prepare_rule_sets_json(&routing_json, &dir, max_age_seconds)
     }))
     .unwrap_or_else(|_| Err("внутренняя ошибка загрузки GeoIP/GeoSite".into()));
     new_string(
@@ -466,7 +493,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("protogrid-geo-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let status = prepare_rule_sets_json(
-            r#"[{"id":"g","enabled":true,"action":"direct","kind":"geoip","value":"ru"}]"#,
+            r#"{"preset":"custom","final_action":"proxy","rules":[{"id":"g","enabled":true,"action":"direct","kind":"geoip","value":"ru"}]}"#,
             &dir.to_string_lossy(),
             0,
         )
@@ -487,10 +514,46 @@ mod tests {
     #[test]
     fn empty_rule_set_prepare_is_offline() {
         let dir = std::env::temp_dir().join(format!("protogrid-geo-empty-{}", std::process::id()));
-        let status = prepare_rule_sets_json("[]", &dir.to_string_lossy(), 0).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let status = prepare_rule_sets_json(
+            r#"{"preset":"custom","final_action":"proxy","rules":[]}"#,
+            &dir.to_string_lossy(),
+            0,
+        )
+        .unwrap();
         let status: Value = serde_json::from_str(&status).unwrap();
         assert_eq!(status["downloaded"], 0);
         assert_eq!(status["errors"], json!([]));
+        // Even with no custom Geo rules, the bundled RU seed is in the cache.
+        assert!(dir.join("geoip-ru.srs").is_file());
+        assert!(dir.join("geosite-category-ru.srs").is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bypass_preset_includes_ru_geo_rules_without_process_rules() {
+        let input = RoutingInput {
+            preset: "bypass".into(),
+            ..Default::default()
+        };
+        let (rules, final_action, preset) = routing_for(&input);
+        assert_eq!(final_action, RuleAction::Proxy);
+        assert_eq!(preset, RoutingPreset::Bypass);
+        assert!(rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::Geoip && rule.value == "ru"));
+        assert!(rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::Geosite && rule.value == "category-ru"));
+        assert!(rules.iter().any(|rule| {
+            rule.id == "default-forced-proxy"
+                && rule.kind == RuleKind::Domain
+                && rule.action == RuleAction::Proxy
+                && rule.value.contains("web.telegram.ru")
+                && rule.value.contains("instagram.ru")
+        }));
+        assert!(!rules.iter().any(|rule| rule.kind == RuleKind::ProcessName));
+        assert!(!rules.iter().any(|rule| rule.id == "default-ads"));
     }
 
     #[test]
@@ -508,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn bypass_preset_stays_offline() {
+    fn bypass_preset_uses_geo_rule_sets() {
         let servers = sample_servers();
         let active = serde_json::from_str::<Vec<Server>>(&servers).unwrap()[0]
             .id
@@ -516,11 +579,21 @@ mod tests {
         let config =
             build_config_json(&servers, &active, r#"{"preset":"bypass"}"#, "test-secret").unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
-        assert!(config["route"]["rule_set"].is_null());
+        let sets = config["route"]["rule_set"].as_array().unwrap();
+        assert!(sets.iter().any(|set| set["tag"] == "geoip-ru"));
+        assert!(sets.iter().any(|set| set["tag"] == "geosite-category-ru"));
         assert!(config["route"]["rules"]
             .as_array()
             .unwrap()
             .iter()
             .any(|rule| rule["domain_suffix"] == json!([".ru", ".su", ".рф"])));
+        assert!(config["route"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |rule| rule["domain"] == json!(["web.telegram.ru", "instagram.ru"])
+                    && rule["outbound"] == "proxy"
+            ));
     }
 }

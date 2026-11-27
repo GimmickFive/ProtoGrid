@@ -45,7 +45,10 @@ object CoreBridge {
         apiSecret: String,
     ): String
 
-    /** Downloads/caches GeoIP/GeoSite `.srs` files; returns a JSON status. */
+    /**
+     * Seeds bundled GeoIP/GeoSite `.srs` files, then downloads/refreshes stale
+     * ones for the effective routing preset; returns a JSON status.
+     */
     @JvmStatic
-    external fun prepareRuleSets(rulesJson: String, dir: String, maxAgeSeconds: Long): String
+    external fun prepareRuleSets(routingJson: String, dir: String, maxAgeSeconds: Long): String
 }

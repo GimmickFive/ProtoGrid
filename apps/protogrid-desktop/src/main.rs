@@ -3,6 +3,7 @@
 mod app;
 mod autostart;
 mod brand;
+mod deeplink;
 mod engine;
 mod flags;
 mod installer;
@@ -21,11 +22,16 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // `protogrid://add?url=…`: ссылка доедет либо в это окно, либо в уже запущенное.
+    if let Some(link) = deeplink::subscription_from_args() {
+        single_instance::set_pending_link(&link);
+    }
     let _single_instance = match single_instance::acquire() {
         Some(guard) => guard,
         // The running instance was asked to show its window.
         None => return Ok(()),
     };
+    deeplink::register_scheme();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ProtoGrid")

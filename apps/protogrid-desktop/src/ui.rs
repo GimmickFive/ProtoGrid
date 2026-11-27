@@ -198,6 +198,14 @@ pub struct View {
 }
 
 impl View {
+    /// Deep link (`protogrid://add?url=…`): открыть импорт с подставленной ссылкой.
+    pub fn open_import(&mut self, link: String) {
+        self.page = Page::Subscriptions;
+        self.subscription_edit = None;
+        self.import_text = link;
+        self.modal = Some(ModalState::Import);
+    }
+
     pub fn new(dark: bool) -> Self {
         let mut series = VecDeque::new();
         for _ in 0..120 {
@@ -4376,7 +4384,8 @@ fn routing_cards() -> [PresetCard; 3] {
             title: "Жизнь в РФ",
             text: "Сайты РФ и локальная сеть — напрямую, реклама — блок, остальное — через прокси"
                 .into(),
-            hint: "8 правил, первое совпадение выигрывает:\n\
+            hint: "9 правил, первое совпадение выигрывает:\n\
+                   • web.telegram.ru и instagram.ru → принудительно через прокси\n\
                    • приватные IP и локальные домены → напрямую\n\
                    • Cloudflare → через прокси\n\
                    • geoip ru и category-ru → напрямую\n\

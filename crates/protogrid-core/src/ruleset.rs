@@ -72,6 +72,27 @@ pub fn local_path(dir: &Path, tag: &str) -> PathBuf {
     dir.join(format!("{tag}.srs"))
 }
 
+/// Copies the supplied rule-set bytes into `dir` unless a non-empty file is
+/// already there. Returns the names that were seeded.
+///
+/// Callers pass either bytes compiled into their binary (Android) or files
+/// shipped next to the executable (desktop). The normal `prepare` refresh
+/// still updates stale copies from the network and keeps the previous copy if
+/// GitHub is unavailable.
+pub fn seed_bytes(dir: &Path, files: &[(&str, &[u8])]) -> std::io::Result<Vec<String>> {
+    std::fs::create_dir_all(dir)?;
+    let mut seeded = Vec::new();
+    for (name, bytes) in files {
+        let path = dir.join(name);
+        if matches!(std::fs::metadata(&path), Ok(metadata) if metadata.len() > 0) {
+            continue;
+        }
+        std::fs::write(&path, bytes)?;
+        seeded.push((*name).to_string());
+    }
+    Ok(seeded)
+}
+
 fn is_fresh(path: &Path, max_age: Duration) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
@@ -215,6 +236,30 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].tag, "geosite-geolocation--cn");
         assert!(sources[0].url.ends_with("geosite-geolocation-!cn.srs"));
+    }
+
+    #[test]
+    fn seed_bytes_fill_missing_files_only() {
+        let dir = std::env::temp_dir().join(format!("protogrid-seed-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let files: &[(&str, &[u8])] = &[
+            ("geoip-test.srs", b"bundled-geoip"),
+            ("geosite-test.srs", b"bundled-geosite"),
+        ];
+
+        let seeded = seed_bytes(&dir, files).unwrap();
+        assert!(seeded.iter().any(|name| name == "geoip-test.srs"));
+        assert!(seeded.iter().any(|name| name == "geosite-test.srs"));
+        let geoip = dir.join("geoip-test.srs");
+        assert_eq!(std::fs::read(&geoip).unwrap(), b"bundled-geoip");
+
+        // The cache may already contain a downloaded update: never overwrite it.
+        std::fs::write(&geoip, b"downloaded-update").unwrap();
+        let seeded = seed_bytes(&dir, files).unwrap();
+        assert!(!seeded.iter().any(|name| name == "geoip-test.srs"));
+        assert_eq!(std::fs::read(&geoip).unwrap(), b"downloaded-update");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

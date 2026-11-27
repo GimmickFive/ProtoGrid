@@ -82,6 +82,10 @@ impl ProtoGridApp {
         let tray = create_tray();
         let mut view = View::new(dark);
         view.tray_available = tray.is_some();
+        // Запуск по ссылке `protogrid://…`: сразу открываем импорт подписки.
+        if let Some(link) = crate::single_instance::take_pending_link() {
+            view.open_import(link);
+        }
         Self {
             engine,
             view,
@@ -165,6 +169,10 @@ impl eframe::App for ProtoGridApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if crate::single_instance::take_activation_request() {
             self.show_window(ctx);
+            // Ссылка от второго экземпляра (`protogrid://add?url=…`).
+            if let Some(link) = crate::single_instance::take_pending_link() {
+                self.view.open_import(link);
+            }
         }
         if let Some(snapshot) = self.engine.snapshot_if_changed(&mut self.last_revision) {
             self.snapshot = Some(snapshot);

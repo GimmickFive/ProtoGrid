@@ -1089,9 +1089,21 @@ impl AppConfig {
 /// уходят в прокси раньше geoip/geosite-правил.
 const CLOUDFLARE_CIDRS: &str = "173.245.48.0/20, 103.21.244.0/22, 103.22.200.0/22, 103.31.4.0/22, 141.101.64.0/18, 108.162.192.0/18, 190.93.240.0/20, 188.114.96.0/20, 197.234.240.0/22, 198.41.128.0/17, 162.158.0.0/15, 104.16.0.0/13, 104.24.0.0/14, 172.64.0.0/13, 131.0.72.0/22, 2400:cb00::/32, 2606:4700::/32, 2803:f800::/32, 2405:b500::/32, 2405:8100::/32, 2a06:98c0::/29, 2c0f:f248::/32";
 const CLOUDFLARE_RULE_ID: &str = "default-cloudflare";
+const FORCED_PROXY_RULE_ID: &str = "default-forced-proxy";
+/// Domains that must go through the proxy despite being `.ru` and matching the
+/// RU GeoIP/GeoSite/direct rules. Kept first so the exception always wins.
+const FORCED_PROXY_DOMAINS: &str = "web.telegram.ru, instagram.ru";
 
 pub fn default_rules() -> Vec<RoutingRule> {
     vec![
+        RoutingRule {
+            id: FORCED_PROXY_RULE_ID.into(),
+            name: "Принудительно через прокси".into(),
+            enabled: true,
+            action: RuleAction::Proxy,
+            kind: RuleKind::Domain,
+            value: FORCED_PROXY_DOMAINS.into(),
+        },
         RoutingRule {
             id: "default-private-ip".into(),
             name: "Локальная сеть".into(),
@@ -1217,20 +1229,32 @@ fn disable_process_rules(rules: &mut [RoutingRule]) {
     }
 }
 
-/// The bypass ruleset as shipped before process rules were added.
+/// The bypass ruleset as shipped by older builds. Besides the process-rule and
+/// Cloudflare migrations, `web.telegram.ru`/`instagram.ru` were added later.
 fn is_legacy_bypass(rules: &[RoutingRule]) -> bool {
     let canonical = default_rules();
-    let without_cloudflare: Vec<RoutingRule> = canonical
-        .iter()
-        .filter(|rule| rule.id != CLOUDFLARE_RULE_ID)
-        .cloned()
-        .collect();
-    let before_process_rules: Vec<RoutingRule> = without_cloudflare
-        .iter()
-        .filter(|rule| rule.kind != RuleKind::ProcessName)
-        .cloned()
-        .collect();
-    same_rules(rules, &without_cloudflare) || same_rules(rules, &before_process_rules)
+    for drop_forced in [false, true] {
+        for drop_cloudflare in [false, true] {
+            for drop_process in [false, true] {
+                if !drop_forced && !drop_cloudflare && !drop_process {
+                    continue;
+                }
+                let variant: Vec<RoutingRule> = canonical
+                    .iter()
+                    .filter(|rule| {
+                        !(drop_forced && rule.id == FORCED_PROXY_RULE_ID)
+                            && !(drop_cloudflare && rule.id == CLOUDFLARE_RULE_ID)
+                            && !(drop_process && rule.kind == RuleKind::ProcessName)
+                    })
+                    .cloned()
+                    .collect();
+                if same_rules(rules, &variant) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Ids and names are cosmetic, so only the parts that change routing count.
@@ -1358,6 +1382,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn previous_bypass_profile_gains_forced_proxy_rule() {
+        let mut config = AppConfig::default();
+        config.rules.retain(|rule| rule.id != FORCED_PROXY_RULE_ID);
+        config.settings.routing_preset = Some(RoutingPreset::Bypass);
+        config.normalize();
+        assert_eq!(
+            config.settings.routing_preset,
+            Some(RoutingPreset::Bypass),
+            "пресет без новых принудительных доменов должен обновиться"
+        );
+        assert!(config.rules.iter().any(|rule| {
+            rule.id == FORCED_PROXY_RULE_ID
+                && rule.action == RuleAction::Proxy
+                && rule.value.contains("web.telegram.ru")
+                && rule.value.contains("instagram.ru")
+        }));
     }
 
     #[test]
