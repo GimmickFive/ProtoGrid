@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.4.5"
+val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.4.6"
 val versionCodeEnv = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
 
 // Release builds are arm64-only. For an x86_64 emulator run:
@@ -94,6 +94,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Installable next to the release APK, so UI fixes can be tested
+            // over adb without uninstalling the user's profile.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "ProtoGrid Debug")
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")

@@ -6,6 +6,28 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.6] — 2026-11-27
+
+### Исправлено
+
+- **Android: автозапуск** — убрана вторая кнопка «Разрешить автозапуск в
+  системе», которая дублировала тумблер. Остался один тумблер: при включении
+  он показывает диалог с кнопкой «Открыть настройки».
+- **Android: «Не ограничивать в фоне»** — статус перечитывается через
+  `LocalLifecycleOwner`, а не через `Context as ComponentActivity`, поэтому
+  тумблер обновляется после возврата из системных настроек. Добавлено
+  пояснение, что на Xiaomi/HyperOS «Без ограничений» в настройках приложения и
+  «Не оптимизировать» в списке Android — разные переключатели.
+- **Android: виджет** — в настройках приложения появилось визуальное превью
+  виджета; провайдер обновляет старые `RemoteViews` при старте, а лаунчер
+  получает `previewImage`.
+
+### Добавлено
+
+- `docs/android-sideload-warning.md` — разбор предупреждения HyperOS/Play
+  Protect «опасное приложение» и варианты его устранения (включая отказ от
+  `REQUEST_INSTALL_PACKAGES` и встроенной установки APK).
+
 ## [0.4.5] — 2026-11-27
 
 ### Исправлено
@@ -315,7 +337,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.5...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.6...dev
+[0.4.6]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.6
 [0.4.5]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.5
 [0.4.4]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.4
 [0.4.3]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.3

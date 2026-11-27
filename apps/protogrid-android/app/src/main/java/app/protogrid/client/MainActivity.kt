@@ -16,6 +16,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -71,6 +72,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -87,6 +89,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -215,16 +218,18 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     var showAutoStartHelp by remember { mutableStateOf(false) }
 
     // The exemption can also be changed from the system settings app, so
-    // re-read it every time the UI comes back to the foreground.
-    val lifecycleOwner = context as? ComponentActivity
+    // re-read it every time the UI comes back to the foreground. Use the
+    // Compose lifecycle owner: LocalContext may be a ContextThemeWrapper, not
+    // the Activity, and then the observer silently never fires.
+    val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
+            if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME) {
                 batteryUnrestricted = BackgroundAccess.isBatteryUnrestricted(context)
             }
         }
-        lifecycleOwner?.lifecycle?.addObserver(observer)
-        onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val status by VpnState.status.collectAsState()
@@ -437,10 +442,6 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         showBatteryHelp = true
     }
 
-    fun openAutoStartSettings() {
-        showAutoStartHelp = true
-    }
-
     LaunchedEffect(Unit) {
         val stale = store.staleSubscriptionIds()
         if (stale.isNotEmpty()) {
@@ -544,7 +545,6 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                         },
                         onRequestBackground = ::openBackgroundAccess,
                         onOpenBatterySettings = ::openBatterySettings,
-                        onOpenAutoStartSettings = ::openAutoStartSettings,
                         onPinWidget = ::pinWidget,
                     )
             }
@@ -1376,7 +1376,6 @@ private fun SettingsScreen(
     onAutoStart: (Boolean) -> Unit,
     onRequestBackground: () -> Unit,
     onOpenBatterySettings: () -> Unit,
-    onOpenAutoStartSettings: () -> Unit,
     onPinWidget: () -> Boolean,
 ) {
     var pinHint by remember { mutableStateOf(false) }
@@ -1466,7 +1465,11 @@ private fun SettingsScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Выключить исключение можно только в системных настройках Android.",
+                    text = "Исключение выдаётся только в системных настройках Android. " +
+                        "На Xiaomi/HyperOS «Без ограничений» в настройках приложения и " +
+                        "«Не оптимизировать» в списке Android — разные переключатели; " +
+                        "этот тумблер показывает второй. После изменения вернитесь в " +
+                        "приложение — статус обновится.",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 10.sp,
@@ -1500,12 +1503,6 @@ private fun SettingsScreen(
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                 )
-                Spacer(Modifier.height(10.dp))
-                GhostButton(
-                    text = "Разрешить автозапуск в системе",
-                    onClick = onOpenAutoStartSettings,
-                    modifier = Modifier.fillMaxWidth(),
-                )
             }
         }
 
@@ -1523,6 +1520,16 @@ private fun SettingsScreen(
                     fontFamily = Inter,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Image(
+                    painter = painterResource(R.drawable.widget_preview),
+                    contentDescription = "Превью виджета ProtoGrid",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(92.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                    contentScale = ContentScale.FillWidth,
                 )
                 Spacer(Modifier.height(12.dp))
                 GhostButton(
