@@ -58,18 +58,28 @@ rustup target add x86_64-pc-windows-gnu
 
 ### Android APK
 
-Android-клиент собирается отдельным workflow `.github/workflows/android.yml`
-по тегу `android-vX.Y.Z` (например, `android-v0.2.0`). Локально можно проверить
-сборку командой:
+Android-клиент собирается workflow `.github/workflows/android.yml` по тегу
+`vX.Y.Z` — вместе с десктопным релизом — или по отдельному тегу
+`android-vX.Y.Z` (например, `android-v0.2.0`). APK прикрепляются к релизу
+соответствующего тега. Локально можно проверить сборку командой:
 
 ```bash
 ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh
 ```
 
-Для подписанного релиза в GitHub Actions должны быть заданы секреты
-`PROTOGRID_KEYSTORE_BASE64`, `PROTOGRID_KEYSTORE_PASSWORD`,
-`PROTOGRID_KEY_ALIAS` и `PROTOGRID_KEY_PASSWORD`. Без них тег `android-v*`
-завершится ошибкой.
+Для подписанного релиза в GitHub Actions должны быть заданы секреты нового
+ключа `PROTOGRID_KEYSTORE_BASE64`, `PROTOGRID_KEYSTORE_PASSWORD`,
+`PROTOGRID_KEY_ALIAS`, `PROTOGRID_KEY_PASSWORD` и старого ключа
+`PROTOGRID_LEGACY_KEYSTORE_BASE64`, `PROTOGRID_LEGACY_KEYSTORE_PASSWORD`,
+`PROTOGRID_LEGACY_KEY_ALIAS`, `PROTOGRID_LEGACY_KEY_PASSWORD`. Без них тег
+`v*` или `android-v*` завершится ошибкой. Workflow проверяет `apksigner` и
+падает, если APK подписан сертификатом `CN=Android Debug`.
+
+> **Ротация подписи.** APK 0.3–0.4.1 подписаны старым debug-ключом. Новые
+> релизы подписываются через `apps/protogrid-android/signing/lineage.bin`:
+> v1/v2 остаются на старом ключе (Android 8.x), v3 — на новом release-ключе
+> (Android 9+). Поэтому обновление поверх установленных версий работает без
+> переустановки. Старый ключ и lineage нужно хранить бессрочно.
 
 ### Имена файлов для автообновления
 
@@ -94,9 +104,16 @@ ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh
 git tag -a vX.Y.Z -m "ProtoGrid vX.Y.Z"
 git push origin main
 git push origin vX.Y.Z
+# Тег запускает Android-workflow. Создаём релиз сразу, пока APK собираются,
+# чтобы workflow прикрепил их к готовому релизу с notes из CHANGELOG.
 gh release create vX.Y.Z dist/*.zip dist/*setup.exe \
-  --title "ProtoGrid vX.Y.Z" --notes-file <(sed -n '/## \[X.Y.Z\]/,/^## \[/p' CHANGELOG.md)
+  --title "ProtoGrid vX.Y.Z" --notes-file <(sed -n '/## \[X.Y.Z\]/,/^## \[/p' CHANGELOG.md) \
+  || gh release upload vX.Y.Z dist/*.zip dist/*setup.exe --clobber
 ```
+
+Если Android-workflow успел создать релиз раньше, сработает вторая команда:
+она заменит вложения, но не notes. В этом случае notes правятся вручную в
+интерфейсе GitHub.
 
 Если это бета, в заголовке релиза и в notes явно писать «public beta» и
 перечислять известные ограничения из README.

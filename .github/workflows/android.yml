@@ -3,6 +3,9 @@ name: Android APK
 on:
   push:
     tags:
+      # Desktop releases and Android-only releases both carry APKs. `v*` does
+      # not match `android-v*`, so both patterns are required.
+      - "v*"
       - "android-v*"
   workflow_dispatch:
 
@@ -55,7 +58,10 @@ jobs:
       - name: Check cached libbox
         id: libbox
         run: |
-          if [ -f forks/sing-box/libbox.aar ] && [ -f forks/sing-box/libbox-lite.aar ]; then
+          has_abi() {
+            [ -f "$1" ] && jar tf "$1" | grep -x "jni/arm64-v8a/libbox.so" >/dev/null
+          }
+          if has_abi forks/sing-box/libbox.aar && has_abi forks/sing-box/libbox-lite.aar; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -73,6 +79,12 @@ jobs:
           go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
             -tags "protogrid_lite,with_utls,with_clash_api,with_gvisor" \
             -output libbox-lite.aar -legacy=false
+          for aar in libbox.aar libbox-lite.aar; do
+            jar tf "$aar" | grep -x "jni/arm64-v8a/libbox.so" >/dev/null || {
+              echo "::error::$aar does not contain jni/arm64-v8a/libbox.so"
+              exit 1
+            }
+          done
           ls -lh libbox.aar libbox-lite.aar
 
       - uses: dtolnay/rust-toolchain@stable
@@ -99,11 +111,19 @@ jobs:
           mkdir -p apps/protogrid-android/app/libs
           cp forks/sing-box/libbox.aar apps/protogrid-android/app/libs/libbox.aar
           cp forks/sing-box/libbox-lite.aar apps/protogrid-android/app/libs/libbox-lite.aar
+          for aar in apps/protogrid-android/app/libs/libbox.aar \
+                     apps/protogrid-android/app/libs/libbox-lite.aar; do
+            jar tf "$aar" | grep -x "jni/arm64-v8a/libbox.so" >/dev/null || {
+              echo "::error::$aar does not contain jni/arm64-v8a/libbox.so"
+              exit 1
+            }
+          done
 
       - name: Resolve version
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/android-v* ]]; then
-            echo "VERSION_NAME=${GITHUB_REF_NAME#android-v}" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/android-v* ]]; then
+            TAG="${GITHUB_REF_NAME#android-v}"
+            echo "VERSION_NAME=${TAG#v}" >> "$GITHUB_ENV"
           else
             echo "VERSION_NAME=0.1.0-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           fi
@@ -115,12 +135,27 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > apps/protogrid-android/app/release.keystore
-          elif [[ "$GITHUB_REF" == refs/tags/android-v* ]]; then
-            echo "::error::Set PROTOGRID_KEYSTORE_BASE64 before tagging an Android release"
+          elif [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_REF" == refs/tags/android-v* ]]; then
+            echo "::error::Set PROTOGRID_KEYSTORE_BASE64 before tagging a release"
             exit 1
           else
             echo "::warning::PROTOGRID_KEYSTORE_BASE64 is not set; using the debug key"
           fi
+
+      - name: Decode legacy signing material
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          LEGACY_KEYSTORE_BASE64: ${{ secrets.PROTOGRID_LEGACY_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$LEGACY_KEYSTORE_BASE64" ]; then
+            echo "::error::Set PROTOGRID_LEGACY_KEYSTORE_BASE64 before tagging a release"
+            exit 1
+          fi
+          echo "$LEGACY_KEYSTORE_BASE64" | base64 -d > apps/protogrid-android/app/legacy.keystore
+          test -s apps/protogrid-android/signing/lineage.bin || {
+            echo "::error::apps/protogrid-android/signing/lineage.bin is missing"
+            exit 1
+          }
 
       - name: Build release APKs
         working-directory: apps/protogrid-android
@@ -130,7 +165,11 @@ jobs:
           PROTOGRID_KEY_PASSWORD: ${{ secrets.PROTOGRID_KEY_PASSWORD }}
         run: |
           if [ -f app/release.keystore ]; then
+            : "${PROTOGRID_KEYSTORE_PASSWORD:?PROTOGRID_KEYSTORE_PASSWORD is required}"
+            : "${PROTOGRID_KEY_ALIAS:?PROTOGRID_KEY_ALIAS is required}"
+            : "${PROTOGRID_KEY_PASSWORD:?PROTOGRID_KEY_PASSWORD is required}"
             export PROTOGRID_KEYSTORE="$PWD/app/release.keystore"
+            export PROTOGRID_REQUIRE_RELEASE_KEY=1
           fi
           chmod +x gradlew
           ./gradlew :app:assembleStandardRelease :app:assembleLiteRelease --no-daemon
@@ -145,6 +184,58 @@ jobs:
           cp "$LITE" "ProtoGrid-${VERSION_NAME}-lite-arm64-v8a.apk"
           ls -lh ProtoGrid-*.apk
 
+      # v1/v2 must stay on the legacy key for Android 8.x, while v3 carries the
+      # new release key plus the proof-of-rotation. This keeps in-place updates
+      # working for everyone who installed 0.4.1 and earlier.
+      - name: Add key rotation lineage to APKs
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          PROTOGRID_KEYSTORE_PASSWORD: ${{ secrets.PROTOGRID_KEYSTORE_PASSWORD }}
+          PROTOGRID_KEY_PASSWORD: ${{ secrets.PROTOGRID_KEY_PASSWORD }}
+          PROTOGRID_KEY_ALIAS: ${{ secrets.PROTOGRID_KEY_ALIAS }}
+          PROTOGRID_LEGACY_KEYSTORE_PASSWORD: ${{ secrets.PROTOGRID_LEGACY_KEYSTORE_PASSWORD }}
+          PROTOGRID_LEGACY_KEY_PASSWORD: ${{ secrets.PROTOGRID_LEGACY_KEY_PASSWORD }}
+          PROTOGRID_LEGACY_KEY_ALIAS: ${{ secrets.PROTOGRID_LEGACY_KEY_ALIAS }}
+        run: |
+          APKSIGNER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/35.0.0/apksigner"
+          test -x "$APKSIGNER"
+          for apk in ProtoGrid-*.apk; do
+            "$APKSIGNER" sign \
+              --ks apps/protogrid-android/app/legacy.keystore \
+              --ks-pass "pass:${PROTOGRID_LEGACY_KEYSTORE_PASSWORD}" \
+              --key-pass "pass:${PROTOGRID_LEGACY_KEY_PASSWORD}" \
+              --ks-key-alias "${PROTOGRID_LEGACY_KEY_ALIAS}" \
+              --next-signer \
+              --ks apps/protogrid-android/app/release.keystore \
+              --ks-pass "pass:${PROTOGRID_KEYSTORE_PASSWORD}" \
+              --key-pass "pass:${PROTOGRID_KEY_PASSWORD}" \
+              --ks-key-alias "${PROTOGRID_KEY_ALIAS}" \
+              --lineage apps/protogrid-android/signing/lineage.bin \
+              --rotation-min-sdk-version 28 \
+              --out "$apk.rotated" "$apk"
+            mv "$apk.rotated" "$apk"
+          done
+
+      # The debug key is fine for a local build or a manual test run, but a
+      # published release must use the stable release certificate. Otherwise
+      # a later debug key would make in-place updates impossible.
+      - name: Verify release APK signatures
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          APKSIGNER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/35.0.0/apksigner"
+          test -x "$APKSIGNER"
+          for apk in ProtoGrid-*.apk; do
+            "$APKSIGNER" verify "$apk"
+            "$APKSIGNER" lineage --in "$apk" --print-certs >/dev/null
+            cert=$("$APKSIGNER" verify --print-certs "$apk" |
+              sed -n 's/^Signer #1 certificate DN: //p')
+            echo "$apk: $cert"
+            if echo "$cert" | grep -qi "CN=Android Debug"; then
+              echo "::error::$apk is signed with the Android debug certificate"
+              exit 1
+            fi
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: ProtoGrid-APK
@@ -152,8 +243,14 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/android-v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # Attach to the existing `vX.Y.Z` release when it was created by the
+          # desktop release step; create an `android-vX.Y.Z` release otherwise.
+          tag_name: ${{ github.ref_name }}
           files: ProtoGrid-*.apk
-          generate_release_notes: true
+          fail_on_unmatched_files: true
+          # `vX.Y.Z` already carries hand-written CHANGELOG notes; only the
+          # Android-only tag gets generated notes.
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/android-v') }}

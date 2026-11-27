@@ -41,6 +41,24 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
 LITE_TAGS="protogrid_lite,with_utls,with_clash_api,with_gvisor"
 
 FORK="$ROOT/forks/sing-box"
+
+# The `.libbox-abi` marker can lie after a manually replaced AAR. Check the
+# archive itself, so an `android/amd64` build cannot be picked up for arm64.
+if ! command -v jar >/dev/null 2>&1 && ! command -v unzip >/dev/null 2>&1; then
+    echo "error: jar or unzip is required to inspect libbox.aar" >&2
+    exit 1
+fi
+
+aar_has_abi() {
+    local aar="$1" abi="$2"
+    [ -f "$aar" ] || return 1
+    if command -v jar >/dev/null 2>&1; then
+        jar tf "$aar" 2>/dev/null | grep -x "jni/$abi/libbox.so" >/dev/null
+    else
+        unzip -Z1 "$aar" 2>/dev/null | grep -x "jni/$abi/libbox.so" >/dev/null
+    fi
+}
+
 if [ ! -d "$FORK/.git" ]; then
     echo "==> cloning sing-box v1.14.4"
     git clone --depth 1 --branch v1.14.4 https://github.com/SagerNet/sing-box.git "$FORK"
@@ -50,11 +68,13 @@ if [ ! -d "$FORK/.git" ]; then
 fi
 
 need_full=0
-if [ "$(cat "$FORK/.libbox-abi" 2>/dev/null || true)" != "$ABI" ] || [ ! -f "$FORK/libbox.aar" ]; then
+if [ "$(cat "$FORK/.libbox-abi" 2>/dev/null || true)" != "$ABI" ] ||
+    ! aar_has_abi "$FORK/libbox.aar" "$ABI"; then
     need_full=1
 fi
 need_lite=0
-if [ "$(cat "$FORK/.libbox-lite-abi" 2>/dev/null || true)" != "$ABI" ] || [ ! -f "$FORK/libbox-lite.aar" ]; then
+if [ "$(cat "$FORK/.libbox-lite-abi" 2>/dev/null || true)" != "$ABI" ] ||
+    ! aar_has_abi "$FORK/libbox-lite.aar" "$ABI"; then
     need_lite=1
 fi
 
@@ -76,6 +96,10 @@ if [ "$need_full" = 1 ]; then
         go run ./cmd/internal/build_libbox -target android -platform "$GO_PLATFORM" \
             -output libbox.aar
     )
+    if ! aar_has_abi "$FORK/libbox.aar" "$ABI"; then
+        echo "error: libbox.aar does not contain jni/$ABI/libbox.so" >&2
+        exit 1
+    fi
     echo "$ABI" > "$FORK/.libbox-abi"
 fi
 
@@ -87,12 +111,24 @@ if [ "$need_lite" = 1 ]; then
         go run ./cmd/internal/build_libbox -target android -platform "$GO_PLATFORM" \
             -tags "$LITE_TAGS" -output libbox-lite.aar -legacy=false
     )
+    if ! aar_has_abi "$FORK/libbox-lite.aar" "$ABI"; then
+        echo "error: libbox-lite.aar does not contain jni/$ABI/libbox.so" >&2
+        exit 1
+    fi
     echo "$ABI" > "$FORK/.libbox-lite-abi"
 fi
 
 mkdir -p apps/protogrid-android/app/libs
 cp -f "$FORK/libbox.aar" apps/protogrid-android/app/libs/libbox.aar
 cp -f "$FORK/libbox-lite.aar" apps/protogrid-android/app/libs/libbox-lite.aar
+aar_has_abi apps/protogrid-android/app/libs/libbox.aar "$ABI" || {
+    echo "error: staged libbox.aar does not contain jni/$ABI/libbox.so" >&2
+    exit 1
+}
+aar_has_abi apps/protogrid-android/app/libs/libbox-lite.aar "$ABI" || {
+    echo "error: staged libbox-lite.aar does not contain jni/$ABI/libbox.so" >&2
+    exit 1
+}
 
 echo "==> building Rust JNI bridge ($ABI)"
 rustup target add "$RUST_TARGET"

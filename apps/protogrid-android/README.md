@@ -145,9 +145,11 @@ adb install -r apps/protogrid-android/app/build/outputs/apk/lite/release/app-lit
 
 ## Релиз на GitHub
 
-Workflow `.github/workflows/android.yml` запускается по тегу `android-v*`
-или вручную. Он собирает libbox (полный и Lite), Rust `.so`, оба APK и
-прикрепляет файлы к Release.
+Workflow `.github/workflows/android.yml` запускается по тегу `v*` (вместе с
+десктопным релизом), по тегу `android-v*` (только Android) или вручную. Он
+собирает libbox (полный и Lite), Rust `.so`, оба APK и прикрепляет файлы к
+Release. Теговые сборки требуют release-keystore и проверяют, что APK не
+подписан debug-сертификатом.
 
 Приложение проверяет публичные релизы `GimmickFive/ProtoGrid` на GitHub при
 запуске. Если в ассетах есть APK для ABI устройства (обычно
@@ -164,10 +166,18 @@ Workflow `.github/workflows/android.yml` запускается по тегу `a
 
 | Секрет | Значение |
 |---|---|
-| `PROTOGRID_KEYSTORE_BASE64` | `release.keystore` в base64 |
-| `PROTOGRID_KEYSTORE_PASSWORD` | пароль хранилища |
-| `PROTOGRID_KEY_ALIAS` | alias ключа |
-| `PROTOGRID_KEY_PASSWORD` | пароль ключа |
+| `PROTOGRID_KEYSTORE_BASE64` | новый `release.keystore` в base64 |
+| `PROTOGRID_KEYSTORE_PASSWORD` | пароль нового хранилища |
+| `PROTOGRID_KEY_ALIAS` | alias нового ключа |
+| `PROTOGRID_KEY_PASSWORD` | пароль нового ключа |
+| `PROTOGRID_LEGACY_KEYSTORE_BASE64` | старый debug-keystore в base64 |
+| `PROTOGRID_LEGACY_KEYSTORE_PASSWORD` | пароль старого хранилища |
+| `PROTOGRID_LEGACY_KEY_ALIAS` | alias старого ключа |
+| `PROTOGRID_LEGACY_KEY_PASSWORD` | пароль старого ключа |
+
+`apps/protogrid-android/signing/lineage.bin` связывает старый и новый ключи.
+CI подписывает v1/v2 старым ключом, v3 — новым с lineage, поэтому обновления
+поверх 0.3–0.4.1 устанавливаются без удаления приложения.
 
 Создать ключ:
 

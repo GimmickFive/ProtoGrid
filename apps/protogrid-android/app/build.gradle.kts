@@ -1,3 +1,4 @@
+import org.gradle.api.GradleException
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.io.File
 
@@ -23,6 +24,10 @@ val releaseStore = System.getenv("PROTOGRID_KEYSTORE")
 val releaseStorePassword = System.getenv("PROTOGRID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("PROTOGRID_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("PROTOGRID_KEY_PASSWORD")
+// CI sets this for tag builds: a published APK must never silently fall back
+// to the debug certificate, otherwise the next build gets a different key and
+// in-place updates stop working.
+val requireReleaseKey = System.getenv("PROTOGRID_REQUIRE_RELEASE_KEY") == "1"
 
 android {
     namespace = "app.protogrid.client"
@@ -60,12 +65,31 @@ android {
 
     signingConfigs {
         if (!releaseStore.isNullOrBlank() && File(releaseStore).exists()) {
+            if (releaseStorePassword.isNullOrBlank() ||
+                releaseKeyAlias.isNullOrBlank() ||
+                releaseKeyPassword.isNullOrBlank()
+            ) {
+                throw GradleException(
+                    "PROTOGRID_KEYSTORE is set, but the password, alias or key " +
+                        "password is missing",
+                )
+            }
             create("release") {
                 storeFile = file(releaseStore)
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
             }
+        } else if (requireReleaseKey) {
+            throw GradleException(
+                "PROTOGRID_KEYSTORE must point to an existing release keystore " +
+                    "when PROTOGRID_REQUIRE_RELEASE_KEY=1",
+            )
+        } else {
+            project.logger.warn(
+                "PROTOGRID_KEYSTORE is not set; the APK will be signed with the " +
+                    "debug key and cannot be published as a stable release",
+            )
         }
     }
 
