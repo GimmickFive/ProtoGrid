@@ -569,9 +569,49 @@ cargo run -p protogrid-desktop</code></pre>
             return null;
           }
 
+          // Releases are not returned in tag order, so the Android button must
+          // pick the highest version with an APK instead of the first one.
+          function versionKey(tag) {
+            var text = String(tag || "")
+              .replace(/^android-v/i, "")
+              .replace(/^v/i, "")
+              .split("-")[0]
+              .split("+")[0];
+            return text.split(".").map(function (part) {
+              var n = parseInt(part, 10);
+              return isNaN(n) ? 0 : n;
+            });
+          }
+
+          function compareVersions(left, right) {
+            var a = versionKey(left);
+            var b = versionKey(right);
+            var count = Math.max(a.length, b.length);
+            for (var i = 0; i < count; i++) {
+              var av = a[i] || 0;
+              var bv = b[i] || 0;
+              if (av !== bv) return av > bv ? 1 : -1;
+            }
+            return 0;
+          }
+
+          function findNewestAsset(re) {
+            var best = null;
+            var bestTag = "";
+            for (var i = 0; i < published.length; i++) {
+              var match = (published[i].assets || []).find(function (a) { return re.test(a.name); });
+              if (!match) continue;
+              if (!best || compareVersions(published[i].tag_name, bestTag) > 0) {
+                best = match;
+                bestTag = published[i].tag_name;
+              }
+            }
+            return best;
+          }
+
           var setup = findAsset(setupRe);
           var portable = findAsset(portableRe);
-          var apk = findAsset(apkRe) || findAsset(anyApkRe);
+          var apk = findNewestAsset(apkRe) || findNewestAsset(anyApkRe);
 
           if (setup) document.querySelectorAll('[data-download="windows"]').forEach(function (el) {
             el.href = setup.browser_download_url;
