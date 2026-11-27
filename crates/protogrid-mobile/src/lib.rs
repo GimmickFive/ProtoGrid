@@ -6,10 +6,11 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use jni::objects::{JClass, JString};
-use jni::sys::{jlong, jstring};
+use jni::sys::{jboolean, jlong, jstring};
 use jni::JNIEnv;
 use protogrid_core::model::{
     default_rules, routing_preset, CoreCapabilities, CoreKind, RoutingPreset, RoutingRule,
@@ -22,6 +23,12 @@ use serde_json::{json, Value};
 /// libbox in the Android app is the ProtoGrid-core build (sing-box + patches).
 const ANDROID_CORE_VERSION: &str = "1.14.4";
 
+/// Set from Kotlin before the first config build: the Android lite flavor
+/// links a libbox built with `protogrid_lite`, which only registers VLESS over
+/// plain TCP. The flag keeps the shared Rust core from emitting configs the
+/// lite build cannot run.
+static LITE_MODE: AtomicBool = AtomicBool::new(false);
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct RoutingInput {
@@ -32,6 +39,19 @@ struct RoutingInput {
 }
 
 fn capabilities() -> CoreCapabilities {
+    capabilities_for(LITE_MODE.load(Ordering::Relaxed))
+}
+
+fn capabilities_for(lite: bool) -> CoreCapabilities {
+    if lite {
+        return CoreCapabilities {
+            // Reality still uses the patched TLS stack, including ML-DSA-65
+            // verification; only extra protocols/transports are absent.
+            mldsa65: true,
+            vless_only: true,
+            ..CoreCapabilities::default()
+        };
+    }
     CoreCapabilities {
         xhttp: true,
         kcp: true,
@@ -40,6 +60,7 @@ fn capabilities() -> CoreCapabilities {
         masque: true,
         noise: true,
         openvpn: true,
+        vless_only: false,
     }
 }
 
@@ -239,6 +260,16 @@ fn new_string(env: &mut JNIEnv<'_>, value: String) -> jstring {
 
 fn error_json(message: impl Into<String>) -> String {
     json!({ "error": message.into() }).to_string()
+}
+
+/// Kotlin: `CoreBridge.setLiteMode(enabled: Boolean): Unit`
+#[no_mangle]
+pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_setLiteMode<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    enabled: jboolean,
+) {
+    LITE_MODE.store(enabled != 0, Ordering::Relaxed);
 }
 
 /// Kotlin: `CoreBridge.parseLinks(input: String): String`
@@ -460,6 +491,20 @@ mod tests {
         let status: Value = serde_json::from_str(&status).unwrap();
         assert_eq!(status["downloaded"], 0);
         assert_eq!(status["errors"], json!([]));
+    }
+
+    #[test]
+    fn lite_capabilities_only_allow_vless_tcp() {
+        let lite = capabilities_for(true);
+        assert!(lite.vless_only);
+        assert!(lite.mldsa65);
+        assert!(!lite.xhttp);
+        assert!(!lite.openvpn);
+
+        let full = capabilities_for(false);
+        assert!(!full.vless_only);
+        assert!(full.xhttp);
+        assert!(full.openvpn);
     }
 
     #[test]

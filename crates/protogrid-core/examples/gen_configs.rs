@@ -128,6 +128,7 @@ fn main() {
             masque: true,
             noise: true,
             openvpn: true,
+            vless_only: false,
         },
     )
     .unwrap();

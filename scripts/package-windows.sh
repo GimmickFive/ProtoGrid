@@ -8,10 +8,11 @@ cd "$(dirname "$0")/.."
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 EXE="target/x86_64-pc-windows-gnu/release/protogrid.exe"
 CORE="dist/fork/sing-box-protogrid-windows-amd64.exe"
+LITE="dist/fork/protogrid-core-lite-windows-amd64.exe"
 WINTUN="dist/fork/wintun.dll"
 OUT="dist/ProtoGrid-${VERSION}-windows-x64"
 
-for file in "$EXE" "$CORE" "$WINTUN"; do
+for file in "$EXE" "$CORE" "$LITE" "$WINTUN"; do
     if [[ ! -f "$file" ]]; then
         echo "missing $file — build the fork first (scripts/build-fork.sh)" >&2
         exit 1
@@ -34,7 +35,11 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -f "$EXE" "$STAGE/ProtoGrid.exe"
 cp -f "$CORE" "$STAGE/protogrid-core.exe"
+cp -f "$LITE" "$STAGE/protogrid-core-lite.exe"
 cp -f "$WINTUN" "$STAGE/wintun.dll"
+# Optional recovery tool for stale Wintun adapters left by older builds.
+[ -f reset-tun.bat ] && cp -f reset-tun.bat "$STAGE/reset-tun.bat"
+[ -f scripts/reset-tun.ps1 ] && cp -f scripts/reset-tun.ps1 "$STAGE/reset-tun.ps1"
 cp -f LICENSE "$STAGE/LICENSE.txt"
 cp -f THIRD_PARTY_NOTICES.md "$STAGE/THIRD_PARTY_NOTICES.txt"
 mkdir -p "$STAGE/licenses"
@@ -50,7 +55,10 @@ prefix = pathlib.Path(out.stem)
 files = [
     "ProtoGrid.exe",
     "protogrid-core.exe",
+    "protogrid-core-lite.exe",
     "wintun.dll",
+    "reset-tun.bat",
+    "reset-tun.ps1",
     "LICENSE.txt",
     "THIRD_PARTY_NOTICES.txt",
     "licenses/GPL-3.0.txt",
@@ -67,8 +75,8 @@ PY
 
 # Keep an existing data/ directory: it holds the portable profile and logs.
 mkdir -p "$PORTABLE/licenses"
-for name in ProtoGrid.exe protogrid-core.exe wintun.dll LICENSE.txt THIRD_PARTY_NOTICES.txt portable.txt; do
-    if ! cp -f "$STAGE/$name" "$PORTABLE/$name" 2>/dev/null; then
+for name in ProtoGrid.exe protogrid-core.exe protogrid-core-lite.exe wintun.dll reset-tun.bat reset-tun.ps1 LICENSE.txt THIRD_PARTY_NOTICES.txt portable.txt; do
+    if [ -f "$STAGE/$name" ] && ! cp -f "$STAGE/$name" "$PORTABLE/$name" 2>/dev/null; then
         echo "note: $PORTABLE/$name is in use; archive is up to date" >&2
     fi
 done

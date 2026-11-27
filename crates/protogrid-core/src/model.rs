@@ -41,6 +41,7 @@ impl Protocol {
     pub fn supports(self, core: CoreKind) -> bool {
         match core {
             CoreKind::Singbox | CoreKind::Protogrid => true,
+            CoreKind::ProtogridLite => self == Protocol::Vless,
             CoreKind::Xray => matches!(
                 self,
                 Protocol::Vless
@@ -87,6 +88,11 @@ pub enum CoreKind {
     #[default]
     #[serde(rename = "protogrid")]
     Protogrid,
+    /// ProtoGrid-core Lite: the same core cut down to VLESS/Reality over TCP.
+    /// TUN and the mixed inbound are kept, so both VPN and system-proxy modes
+    /// still work.
+    #[serde(rename = "protogrid-lite")]
+    ProtogridLite,
 }
 
 impl CoreKind {
@@ -95,6 +101,7 @@ impl CoreKind {
             CoreKind::Singbox => "sing-box",
             CoreKind::Xray => "Xray",
             CoreKind::Protogrid => "ProtoGrid-core",
+            CoreKind::ProtogridLite => "ProtoGrid-core Lite",
         }
     }
 
@@ -102,13 +109,17 @@ impl CoreKind {
         match self {
             CoreKind::Singbox | CoreKind::Protogrid => "sing-box",
             CoreKind::Xray => "xray",
+            CoreKind::ProtogridLite => "protogrid-core-lite",
         }
     }
 
     /// ProtoGrid-core speaks the sing-box config language. Everything that
     /// is true for sing-box (ports, TUN, config generation) is true for it too.
     pub fn is_singbox_like(self) -> bool {
-        matches!(self, CoreKind::Singbox | CoreKind::Protogrid)
+        matches!(
+            self,
+            CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite
+        )
     }
 }
 
@@ -131,6 +142,9 @@ pub struct CoreCapabilities {
     /// OpenVPN client endpoint (`openvpn-client`). Requires sing-box 1.14+
     /// built with `with_openvpn` or ProtoGrid-core.
     pub openvpn: bool,
+    /// ProtoGrid-core Lite: only VLESS over plain TCP is registered. Other
+    /// protocols and transports are rejected before the config is written.
+    pub vless_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -490,6 +504,12 @@ impl Server {
         {
             return Err("Reality поддерживается только для VLESS и VMess".into());
         }
+        if capabilities.vless_only && self.protocol != Protocol::Vless {
+            return Err("ProtoGrid-core Lite поддерживает только VLESS".into());
+        }
+        if capabilities.vless_only && self.transport != Transport::Tcp {
+            return Err("ProtoGrid-core Lite поддерживает только транспорт TCP".into());
+        }
         if self.transport == Transport::Xhttp && core.is_singbox_like() && !capabilities.xhttp {
             return Err(
                 "транспорт XHTTP требует sing-box с поддержкой XHTTP (ProtoGrid-core)".into(),
@@ -622,6 +642,8 @@ pub struct Settings {
     pub xray_path: String,
     /// Path to ProtoGrid-core. Kept separate from `singbox_path`.
     pub protogrid_path: String,
+    /// Path to ProtoGrid-core Lite. Kept separate from the full core.
+    pub protogrid_lite_path: String,
 }
 
 impl Default for Settings {
@@ -651,6 +673,7 @@ impl Default for Settings {
             singbox_path: String::new(),
             xray_path: String::new(),
             protogrid_path: String::new(),
+            protogrid_lite_path: String::new(),
         }
     }
 }
@@ -659,14 +682,14 @@ impl Settings {
     /// HTTP port that clients (and the system proxy) should use.
     pub fn effective_http_port(&self) -> u16 {
         match self.core {
-            CoreKind::Singbox | CoreKind::Protogrid => self.mixed_port,
+            CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite => self.mixed_port,
             CoreKind::Xray => self.http_port,
         }
     }
 
     pub fn effective_socks_port(&self) -> u16 {
         match self.core {
-            CoreKind::Singbox | CoreKind::Protogrid => self.mixed_port,
+            CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite => self.mixed_port,
             CoreKind::Xray => self.socks_port,
         }
     }
@@ -681,6 +704,7 @@ impl Settings {
             CoreKind::Singbox => &self.singbox_path,
             CoreKind::Xray => &self.xray_path,
             CoreKind::Protogrid => &self.protogrid_path,
+            CoreKind::ProtogridLite => &self.protogrid_lite_path,
         }
     }
 
@@ -715,6 +739,7 @@ impl Settings {
         self.singbox_path = self.singbox_path.trim().to_string();
         self.xray_path = self.xray_path.trim().to_string();
         self.protogrid_path = self.protogrid_path.trim().to_string();
+        self.protogrid_lite_path = self.protogrid_lite_path.trim().to_string();
     }
 
     /// Fields that require a core restart when changed.
@@ -732,6 +757,7 @@ impl Settings {
             && self.singbox_path == other.singbox_path
             && self.xray_path == other.xray_path
             && self.protogrid_path == other.protogrid_path
+            && self.protogrid_lite_path == other.protogrid_lite_path
             && self.final_action == other.final_action
             && self.auto_select == other.auto_select
             && self.fake_dns == other.fake_dns
@@ -1058,6 +1084,12 @@ impl AppConfig {
     }
 }
 
+/// Официальные диапазоны Cloudflare (https://www.cloudflare.com/ips/): IPv4 + IPv6.
+/// Сайты за CF из РФ режутся после ~19 КБ (см. AGENTS.md §11.1), поэтому их адреса
+/// уходят в прокси раньше geoip/geosite-правил.
+const CLOUDFLARE_CIDRS: &str = "173.245.48.0/20, 103.21.244.0/22, 103.22.200.0/22, 103.31.4.0/22, 141.101.64.0/18, 108.162.192.0/18, 190.93.240.0/20, 188.114.96.0/20, 197.234.240.0/22, 198.41.128.0/17, 162.158.0.0/15, 104.16.0.0/13, 104.24.0.0/14, 172.64.0.0/13, 131.0.72.0/22, 2400:cb00::/32, 2606:4700::/32, 2803:f800::/32, 2405:b500::/32, 2405:8100::/32, 2a06:98c0::/29, 2c0f:f248::/32";
+const CLOUDFLARE_RULE_ID: &str = "default-cloudflare";
+
 pub fn default_rules() -> Vec<RoutingRule> {
     vec![
         RoutingRule {
@@ -1067,6 +1099,16 @@ pub fn default_rules() -> Vec<RoutingRule> {
             action: RuleAction::Direct,
             kind: RuleKind::IpCidr,
             value: "127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10".into(),
+        },
+        // Пользовательские сайты за Cloudflare из РФ часто рвутся после ~19 КБ
+        // (отсечка CF в РФ), поэтому CF-адреса уводим в прокси до geoip/geosite.
+        RoutingRule {
+            id: CLOUDFLARE_RULE_ID.into(),
+            name: "Cloudflare через прокси".into(),
+            enabled: true,
+            action: RuleAction::Proxy,
+            kind: RuleKind::IpCidr,
+            value: CLOUDFLARE_CIDRS.into(),
         },
         RoutingRule {
             id: "default-local-domains".into(),
@@ -1177,11 +1219,18 @@ fn disable_process_rules(rules: &mut [RoutingRule]) {
 
 /// The bypass ruleset as shipped before process rules were added.
 fn is_legacy_bypass(rules: &[RoutingRule]) -> bool {
-    let legacy: Vec<RoutingRule> = default_rules()
-        .into_iter()
-        .filter(|rule| rule.kind != RuleKind::ProcessName)
+    let canonical = default_rules();
+    let without_cloudflare: Vec<RoutingRule> = canonical
+        .iter()
+        .filter(|rule| rule.id != CLOUDFLARE_RULE_ID)
+        .cloned()
         .collect();
-    same_rules(rules, &legacy)
+    let before_process_rules: Vec<RoutingRule> = without_cloudflare
+        .iter()
+        .filter(|rule| rule.kind != RuleKind::ProcessName)
+        .cloned()
+        .collect();
+    same_rules(rules, &without_cloudflare) || same_rules(rules, &before_process_rules)
 }
 
 /// Ids and names are cosmetic, so only the parts that change routing count.
@@ -1267,7 +1316,7 @@ mod tests {
         let mut config = AppConfig::default();
         config
             .rules
-            .retain(|rule| rule.kind != RuleKind::ProcessName);
+            .retain(|rule| rule.kind != RuleKind::ProcessName && rule.id != CLOUDFLARE_RULE_ID);
         config.settings.routing_preset = Some(RoutingPreset::Bypass);
         config.normalize();
         assert_eq!(
@@ -1276,6 +1325,41 @@ mod tests {
             "an old bypass config must not look like a custom profile"
         );
         assert_eq!(config.rules.len(), default_rules().len());
+    }
+
+    #[test]
+    fn cloudflare_rule_sits_before_ru_rules() {
+        let rules = default_rules();
+        let cf = rules
+            .iter()
+            .position(|rule| rule.id == CLOUDFLARE_RULE_ID)
+            .expect("в пресете должно быть правило Cloudflare");
+        let ru = rules
+            .iter()
+            .position(|rule| rule.id == "default-ru-geoip")
+            .expect("GeoIP ru");
+        assert!(cf < ru, "Cloudflare должен проверяться раньше RU-правил");
+        assert_eq!(rules[cf].action, RuleAction::Proxy);
+        assert_eq!(rules[cf].kind, RuleKind::IpCidr);
+        assert!(rules[cf].value.contains("104.16.0.0/13"));
+        assert!(rules[cf].value.contains("2606:4700::/32"));
+    }
+
+    #[test]
+    fn previous_bypass_profile_gains_cloudflare_rule() {
+        let mut config = AppConfig::default();
+        config.rules.retain(|rule| rule.id != CLOUDFLARE_RULE_ID);
+        config.settings.routing_preset = Some(RoutingPreset::Bypass);
+        config.normalize();
+        assert_eq!(
+            config.settings.routing_preset,
+            Some(RoutingPreset::Bypass),
+            "прошлый пресет должен остаться пресетом, а не стать custom"
+        );
+        assert!(config
+            .rules
+            .iter()
+            .any(|rule| rule.id == CLOUDFLARE_RULE_ID));
     }
 
     #[test]

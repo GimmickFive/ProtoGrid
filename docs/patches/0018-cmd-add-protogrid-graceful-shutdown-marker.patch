@@ -1,0 +1,56 @@
+From 784e7a9bc3e167fc9c63b82679e50619e4116893 Mon Sep 17 00:00:00 2001
+From: ProtoGrid <dev@protogrid.local>
+Date: Fri, 27 Nov 2026 13:14:33 +0300
+Subject: [PATCH] cmd: add ProtoGrid graceful shutdown marker
+
+---
+ cmd/sing-box/cmd_run.go | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/cmd/sing-box/cmd_run.go b/cmd/sing-box/cmd_run.go
+index fecd99a..0e1e688 100644
+--- a/cmd/sing-box/cmd_run.go
++++ b/cmd/sing-box/cmd_run.go
+@@ -171,6 +171,31 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
+ 	return instance, cancel, nil
+ }
+ 
++// watchProtoGridShutdown turns a marker file into a normal shutdown signal.
++// The desktop app writes PROTOGRID_SHUTDOWN_FILE instead of calling
++// TerminateProcess, so sing-box closes TUN and releases the Wintun adapter
++// cleanly. Stock sing-box ignores the variable and keeps working as before.
++func watchProtoGridShutdown(osSignals chan<- os.Signal) {
++	path := os.Getenv("PROTOGRID_SHUTDOWN_FILE")
++	if path == "" {
++		return
++	}
++	go func() {
++		ticker := time.NewTicker(150 * time.Millisecond)
++		defer ticker.Stop()
++		for range ticker.C {
++			if _, err := os.Stat(path); err == nil {
++				log.Info("shutdown requested by ProtoGrid")
++				select {
++				case osSignals <- syscall.SIGTERM:
++				default:
++				}
++				return
++			}
++		}
++	}()
++}
++
+ func run() error {
+ 	optionsList, err := readConfig()
+ 	if err != nil {
+@@ -187,6 +212,7 @@ func run() error {
+ 	osSignals := make(chan os.Signal, 1)
+ 	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+ 	defer signal.Stop(osSignals)
++	watchProtoGridShutdown(osSignals)
+ 	for {
+ 		instance, cancel, createErr := create(options)
+ 		if createErr != nil {
+-- 
+2.34.1
+

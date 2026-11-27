@@ -1058,6 +1058,7 @@ fn core_protocols(kind: CoreKind, features: CoreFeatures) -> Vec<Protocol> {
                     | Protocol::Shadowsocks
                     | Protocol::Masque
             ),
+            CoreKind::ProtogridLite => matches!(protocol, Protocol::Vless),
             CoreKind::Singbox | CoreKind::Protogrid => match protocol {
                 Protocol::Masque => features.masque,
                 Protocol::OpenVpn => features.openvpn,
@@ -1495,6 +1496,9 @@ fn server_compatible(server: &Server, core: CoreKind, capabilities: CoreCapabili
                 && (server.transport != Transport::Xhttp || capabilities.xhttp)
                 && (server.transport != Transport::Kcp || capabilities.kcp)
                 && (server.transport != Transport::XDrive || capabilities.xdrive)
+        }
+        CoreKind::ProtogridLite => {
+            server.protocol == Protocol::Vless && server.transport == Transport::Tcp
         }
         CoreKind::Xray => {
             matches!(
@@ -2706,7 +2710,7 @@ fn info_card(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, engine: &Engine) {
                 .unwrap_or_else(|| "Добавьте подключение".into());
             let settings = &snapshot.config.settings;
             let ports = match settings.core {
-                CoreKind::Singbox | CoreKind::Protogrid => {
+                CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite => {
                     format!("mixed:{}", settings.mixed_port)
                 }
                 CoreKind::Xray => format!(
@@ -5809,6 +5813,14 @@ fn settings_draft(snapshot: &Snapshot) -> Settings {
             settings.protogrid_path = path;
         }
     }
+    if settings.protogrid_lite_path.trim().is_empty() {
+        if let Some(path) = snapshot
+            .core(CoreKind::ProtogridLite)
+            .and_then(|info| info.path.clone())
+        {
+            settings.protogrid_lite_path = path;
+        }
+    }
     settings
 }
 
@@ -5828,6 +5840,12 @@ fn settings_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
         && !saved.protogrid_path.trim().is_empty()
     {
         draft.protogrid_path = saved.protogrid_path.clone();
+    }
+    if !view.settings_dirty
+        && draft.protogrid_lite_path.trim().is_empty()
+        && !saved.protogrid_lite_path.trim().is_empty()
+    {
+        draft.protogrid_lite_path = saved.protogrid_lite_path.clone();
     }
     let dirty = draft != saved;
     let mut save = false;
@@ -6444,20 +6462,17 @@ fn settings_core(
         ui,
         p,
         "Ядро",
-        "ProtoGrid, sing-box или Xray-core — каждое со своим бинарником",
+        "ProtoGrid (обычный или Lite), sing-box и Xray-core — у каждого свой бинарник",
         |ui| {
             Frame::new()
                 .inner_margin(Margin::symmetric(18, 10))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    card_grid(ui, 3, 8.0, |ui, index| {
-                        let kind = match index {
-                            0 => CoreKind::Protogrid,
-                            1 => CoreKind::Singbox,
-                            _ => CoreKind::Xray,
-                        };
-                        core_option(ui, p, snapshot, kind, draft);
+                    card_grid(ui, 3, 8.0, |ui, index| match index {
+                        0 => protogrid_core_option(ui, p, snapshot, draft),
+                        1 => core_option(ui, p, snapshot, CoreKind::Singbox, draft),
+                        _ => core_option(ui, p, snapshot, CoreKind::Xray, draft),
                     });
                 });
             let (line, _) =
@@ -6466,10 +6481,24 @@ fn settings_core(
             set_row_path(
                 ui,
                 p,
-                "Путь к ProtoGrid",
+                "Путь к ProtoGrid (обычный)",
                 "Пусто — рядом с приложением",
                 |ui| {
                     path_input(ui, p, &mut draft.protogrid_path, "Выберите ядро ProtoGrid");
+                },
+            );
+            set_row_path(
+                ui,
+                p,
+                "Путь к ProtoGrid Lite",
+                "Пусто — рядом с приложением",
+                |ui| {
+                    path_input(
+                        ui,
+                        p,
+                        &mut draft.protogrid_lite_path,
+                        "Выберите ядро ProtoGrid Lite",
+                    );
                 },
             );
             set_row_path(
@@ -6510,7 +6539,10 @@ fn settings_core(
                             .core_update(draft.core)
                             .filter(|update| update.available)
                             .and_then(|update| update.latest.clone());
-                        let (icon, label): (&str, String) = if draft.core == CoreKind::Protogrid {
+                        let (icon, label): (&str, String) = if matches!(
+                            draft.core,
+                            CoreKind::Protogrid | CoreKind::ProtogridLite
+                        ) {
                             (
                                 egui_phosphor::regular::PACKAGE,
                                 "Найти рядом с приложением".into(),
@@ -6536,6 +6568,74 @@ fn settings_core(
     );
 }
 
+/// ProtoGrid ships in two builds. They share one card so the core list stays
+/// short: the user picks ProtoGrid and then switches between the full and Lite
+/// variants.
+fn protogrid_core_option(ui: &mut Ui, p: &Palette, snapshot: &Snapshot, draft: &mut Settings) {
+    let selected = matches!(draft.core, CoreKind::Protogrid | CoreKind::ProtogridLite);
+    let active = if draft.core == CoreKind::ProtogridLite {
+        CoreKind::ProtogridLite
+    } else {
+        CoreKind::Protogrid
+    };
+    let info = snapshot.core(active);
+    let features = info.map(|info| info.features).unwrap_or_default();
+    Frame::new()
+        .fill(if selected { p.accent_soft } else { p.panel_2 })
+        .stroke(Stroke::new(1.0, if selected { p.accent } else { p.line }))
+        .corner_radius(10)
+        .inner_margin(Margin::same(11))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(theme::medium("ProtoGrid-core", 12.0));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.selectable_value(&mut draft.core, CoreKind::Protogrid, "Обычный");
+                        ui.selectable_value(&mut draft.core, CoreKind::ProtogridLite, "Lite");
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            info.and_then(|info| info.version.clone())
+                                .map(|version| format!("v{version}"))
+                                .unwrap_or_else(|| "не найден".into()),
+                        )
+                        .size(9.5)
+                        .color(p.faint),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let (radio, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    ui.painter().circle_stroke(
+                        radio.center(),
+                        7.0,
+                        Stroke::new(1.5, if selected { p.accent } else { p.line_strong }),
+                    );
+                    if selected {
+                        ui.painter().circle_filled(radio.center(), 4.0, p.accent);
+                    }
+                });
+            });
+            ui.add_space(9.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                for protocol in core_protocols(active, features) {
+                    mini_protocol_chip(ui, p, protocol);
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                for feature in core_feature_list(features) {
+                    mini_feature_chip(ui, p, feature);
+                }
+            });
+        });
+}
+
 fn core_option(
     ui: &mut Ui,
     p: &Palette,
@@ -6558,6 +6658,7 @@ fn core_option(
                     ui.label(theme::medium(
                         match kind {
                             CoreKind::Protogrid => "ProtoGrid-core",
+                            CoreKind::ProtogridLite => "ProtoGrid Lite",
                             CoreKind::Singbox => "sing-box",
                             CoreKind::Xray => "Xray-core",
                         },
@@ -7183,7 +7284,7 @@ fn info_cores_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
         ui,
         p,
         "Три ядра — три инструмента",
-        "Ядро — это программа-движок. Переключить его можно в «Настройках».",
+        "У ProtoGrid-core два варианта: обычный и Lite. Переключить ядро можно в «Настройках».",
         |ui| {
             Frame::new()
                 .inner_margin(Margin::symmetric(18, 14))
@@ -7191,7 +7292,7 @@ fn info_cores_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
                     ui.set_min_width(ui.available_width());
                     ui.label(
                         RichText::new(
-                            "Все три ядра запускают прокси, но умеют разные протоколы и транспорты. \
+                            "Все ядра запускают прокси, но умеют разные протоколы и транспорты. \
                              Поэтому один и тот же сервер может работать в одном ядре и не работать в другом.",
                         )
                         .size(10.5)
@@ -7203,19 +7304,22 @@ fn info_cores_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
                             ui,
                             p,
                             "ProtoGrid-core",
-                            "ProtoGrid-core · всё в одном",
+                            "Обычный и Lite · два варианта",
                             egui_phosphor::regular::ROCKET,
                             p.accent,
                             "Рекомендуется",
                             p.green,
                             &[
-                                "TUN и системный прокси",
-                                "XHTTP, mKCP, XDRIVE, MASQUE",
-                                "Hysteria2 и TUIC",
-                                "Reality 26 и Xray-серверы",
+                                "Обычный: XHTTP, mKCP, XDRIVE, MASQUE",
+                                "Lite: только VLESS/Reality по TCP",
+                                "TUN и системный прокси в обоих",
+                                "Hysteria2, TUIC и OpenVPN — в обычном",
                             ],
-                            "Выбирайте, если не знаете, что подойдёт.",
-                            selected == CoreKind::Protogrid,
+                            "Lite — когда нужен только VLESS и минимальный клиент.",
+                            matches!(
+                                selected,
+                                CoreKind::Protogrid | CoreKind::ProtogridLite
+                            ),
                         ),
                         1 => info_core_tile(
                             ui,
@@ -7396,7 +7500,8 @@ fn info_why_cores(ui: &mut Ui, p: &Palette) {
                     ui.label(
                         RichText::new(
                             "ProtoGrid-core = sing-box + недостающие Xray-транспорты. \
-                             Одно ядро, которое понимает почти все серверы.",
+                             Одно ядро, которое понимает почти все серверы. \
+                             ProtoGrid Lite — тот же VLESS/Reality, но без лишнего кода.",
                         )
                         .size(10.5)
                         .color(p.accent_2),
@@ -7932,7 +8037,8 @@ fn info_os_tile(ui: &mut Ui, p: &Palette, icon: &str, title: &str, text: &str, c
 
 fn info_choice_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
     let selected = match snapshot.config.settings.core {
-        CoreKind::Protogrid => "ProtoGrid-core",
+        CoreKind::Protogrid => "ProtoGrid-core (обычный)",
+        CoreKind::ProtogridLite => "ProtoGrid-core (Lite)",
         CoreKind::Singbox => "sing-box",
         CoreKind::Xray => "Xray-core",
     };
@@ -7998,6 +8104,12 @@ fn info_choice_section(ui: &mut Ui, p: &Palette, snapshot: &Snapshot) {
                             egui_phosphor::regular::LEAF,
                             "Нужен чистый sing-box без форка",
                             "sing-box.",
+                            p.green,
+                        ),
+                        (
+                            egui_phosphor::regular::FEATHER,
+                            "Есть только VLESS/Reality-сервер",
+                            "ProtoGrid-core в режиме Lite — компактнее.",
                             p.green,
                         ),
                     ] {
@@ -9070,19 +9182,26 @@ fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                         (Transport::XDrive, "XDRIVE"),
                     ] {
                         let supported = match transport {
+                            Transport::Tcp => true,
+                            _ if core == CoreKind::ProtogridLite => false,
                             Transport::Http => core != CoreKind::Xray,
                             Transport::Xhttp => features.xhttp,
                             Transport::Kcp => features.kcp,
                             Transport::XDrive => features.xdrive,
                             _ => true,
                         };
-                        let reason = match transport {
-                            Transport::Http => "RAW/HTTP-транспорт недоступен в Xray",
-                            Transport::Xhttp => "XHTTP есть только в ядре ProtoGrid",
-                            Transport::Kcp => "mKCP есть только в ядре ProtoGrid",
-                            Transport::XDrive => "XDRIVE есть только в ядре ProtoGrid",
-                            _ => "",
-                        };
+                        let reason =
+                            if core == CoreKind::ProtogridLite && transport != Transport::Tcp {
+                                "ProtoGrid-core Lite поддерживает только TCP"
+                            } else {
+                                match transport {
+                                    Transport::Http => "RAW/HTTP-транспорт недоступен в Xray",
+                                    Transport::Xhttp => "XHTTP есть только в ядре ProtoGrid",
+                                    Transport::Kcp => "mKCP есть только в ядре ProtoGrid",
+                                    Transport::XDrive => "XDRIVE есть только в ядре ProtoGrid",
+                                    _ => "",
+                                }
+                            };
                         let response = ui.add_enabled_ui(supported, |ui| {
                             ui.selectable_value(&mut server.transport, transport, label)
                         });

@@ -277,7 +277,7 @@ class ProtoGridVpnService :
         }
 
         val builder = Builder()
-            .setSession("ProtoGrid")
+            .setSession(getString(R.string.app_name))
             .setMtu(options.getMTU())
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)

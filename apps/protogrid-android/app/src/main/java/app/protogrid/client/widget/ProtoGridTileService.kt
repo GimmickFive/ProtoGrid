@@ -53,7 +53,7 @@ class ProtoGridTileService : TileService() {
             VpnStatus.Connected, VpnStatus.Connecting -> Tile.STATE_ACTIVE
             else -> Tile.STATE_INACTIVE
         }
-        tile.label = "ProtoGrid"
+        tile.label = getString(R.string.app_name)
         tile.icon = Icon.createWithResource(this, R.drawable.ic_stat_vpn)
         tile.updateTile()
     }

@@ -77,6 +77,7 @@ impl ProtoGridApp {
             .and_then(|storage| eframe::get_value::<bool>(storage, "dark"))
             .unwrap_or(true);
         theme::install(&cc.egui_ctx, dark);
+        crate::single_instance::bind_ui(&cc.egui_ctx);
         let engine = Engine::new(cc.egui_ctx.clone());
         let tray = create_tray();
         let mut view = View::new(dark);
@@ -162,6 +163,9 @@ impl ProtoGridApp {
 
 impl eframe::App for ProtoGridApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if crate::single_instance::take_activation_request() {
+            self.show_window(ctx);
+        }
         if let Some(snapshot) = self.engine.snapshot_if_changed(&mut self.last_revision) {
             self.snapshot = Some(snapshot);
         }

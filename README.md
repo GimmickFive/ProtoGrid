@@ -14,7 +14,7 @@
 
 - Окно и весь UI рисуются Rust-кодом через egui/OpenGL.
 - Нет WebView2/WebKitGTK, нет HTML/CSS/JS и нет Node.js.
-- Компактный бинарник-лончер; ядро ProtoGrid-core лежит рядом (`protogrid-core.exe`) и не встраивается в него, поэтому запуск не раздувается. Меньше памяти и никаких webview-процессов.
+- Компактный бинарник-лончер; оба варианта ProtoGrid-core лежат рядом (`protogrid-core.exe` и облегчённый `protogrid-core-lite.exe`) и не встраиваются в него, поэтому запуск не раздувается. Меньше памяти и никаких webview-процессов.
 - Тяжёлая работа с сетью, ядрами и системным прокси — в отдельном Rust-движке `protogrid-core`.
 
 ## Возможности
@@ -22,13 +22,14 @@
 - **Импорт ссылок**: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://` (`hy2://`), `tuic://`, `ovpn://`/`openvpn://` (base64 профиля), файл `.ovpn` (OpenVPN), вставка из буфера.
 - **Подписки**: base64, списки ссылок, Clash/Clash.Meta YAML, трафик и срок из `subscription-userinfo`, автообновление раз в 12 часов. Ссылка подписки принимается только по HTTPS, чтобы токен не уходил открытым текстом.
 - **Настройки**: экспорт и импорт JSON с настройками, правилами и профилями маршрутизации. Серверы, UUID, пароли и токены подписок в файл не попадают.
-- **Три ядра**: ProtoGrid-core (на базе sing-box с XHTTP/MASQUE/XDRIVE), sing-box и Xray-core — у каждого свой бинарник и путь, автоопределение версии; стоковые ядра можно скачать с GitHub.
+- **Три ядра, у ProtoGrid два варианта**: ProtoGrid-core (обычный — XHTTP/MASQUE/XDRIVE, и Lite — только VLESS/Reality по TCP с TUN и mixed), sing-box и Xray-core — у каждого свой бинарник и путь, автоопределение версии; стоковые ядра можно скачать с GitHub.
 - **Обновления**: проверка новых релизов ProtoGrid, sing-box и Xray-core на GitHub при запуске и по кнопке. Файл скачивается только после подтверждения, с проверкой размера и SHA-256; Android-клиент скачивает APK и открывает системный установщик. ProtoGrid-core входит в сборку и обновляется вместе с приложением.
 - **OpenVPN**: через штатный endpoint sing-box 1.14+ (`with_openvpn`), только на sing-box-подобных ядрах; внешний бинарник `openvpn` не нужен.
 - **Подключение**: системный прокси (Windows / GNOME / KDE / macOS), TUN (sing-box), локальные HTTP/SOCKS-порты.
 - **Маршрутизация**: пресеты «Жизнь в РФ / Глобальный прокси / Прямой», несколько собственных профилей, правила по доменам, IP/CIDR, GeoIP, GeoSite и процессам. Базы GeoIP/GeoSite кэшируются, поэтому после первого запуска подключение не зависит от доступности GitHub.
 - **Пинг**: TCP, реальная задержка через Clash API sing-box, проверка текущего соединения через локальный прокси.
 - **Трей и автозапуск**: меню в трее, сворачивание окна, запуск при входе в систему.
+- **Один экземпляр**: повторный запуск не открывает вторую копию, а поднимает и фокусирует уже работающее окно, даже если оно свёрнуто или скрыто в трее (Windows, Linux, macOS).
 - **Интерфейс**: единый нативный лейаут — тёмный сайдбар, верхняя панель действий, обзор с карточками и живыми графиками, таблица серверов, подписки, маршрутизация, графики трафика, журнал, настройки и раздел «Информация» с наглядным руководством по ядрам, протоколам и TUN. Тёмная и светлая темы, русский язык, поиск (`Ctrl K`), быстрые переходы (`Ctrl 1…8`), трей и автозапуск.
 
 ## Скриншоты
@@ -79,7 +80,7 @@
   - **Xray-core** (проверено на 26.11.9).
 - **OpenVPN** — только sing-box 1.14+ с тегом сборки `with_openvpn`: подходят официальные релизы, ProtoGrid-core собирается с этим тегом. Xray-core OpenVPN не поддерживает.
 
-Стоковые ядра можно скачать в **Настройки → Подключение** или указать путь вручную. Ядро ProtoGrid-core поставляется рядом с приложением как `protogrid-core.exe` (Windows) или `protogrid-core` (Linux) и подхватывается автоматически.
+Стоковые ядра можно скачать в **Настройки → Подключение** или указать путь вручную. Оба варианта ProtoGrid-core поставляются рядом с приложением как `protogrid-core.exe` и `protogrid-core-lite.exe` (Windows) или `protogrid-core` и `protogrid-core-lite` (Linux) и подхватываются автоматически. В настройках выбирается один пункт «ProtoGrid», внутри которого переключается обычный вариант и Lite. Lite понимает только VLESS/Reality по TCP, зато меньше и быстрее собирается; TUN и mixed-порт в нём сохранены.
 
 ## Сборка и запуск
 
@@ -112,25 +113,36 @@ cargo build --release -p protogrid-desktop --target x86_64-pc-windows-gnu
 
 В отличие от старой Tauri-версии, здесь нет WebView и `WebView2Loader.dll`; exe зависит только от системных DLL Windows.
 
-Готовые Windows-пакеты собирает `scripts/package-windows.sh`: установщик NSIS и портативный zip. В обоих `protogrid-core.exe` и `wintun.dll` лежат рядом с `ProtoGrid.exe`, а не внутри него.
+Готовые Windows-пакеты собирает `scripts/package-windows.sh`: установщик NSIS и портативный zip. В обоих `protogrid-core.exe`, `protogrid-core-lite.exe`, `wintun.dll` и `reset-tun.bat` лежат рядом с `ProtoGrid.exe`, а не внутри него. `reset-tun.bat` удаляет зависшие Wintun-адаптеры, если TUN не запускается после аварийного завершения.
+
+Ядра форка собирает `scripts/build-fork.sh`: полный ProtoGrid-core (все протоколы и транспорты) и ProtoGrid-core Lite (`protogrid_lite`, только VLESS/Reality по TCP) под Linux, Windows и macOS.
 
 ### Android (APK)
 
 Android-клиент — отдельный MVP в `apps/protogrid-android`: обзор, серверы, маршрутизация по приложениям и трафику (включая GeoIP/GeoSite), мониторинг. Kotlin/Compose, `VpnService` и ProtoGrid-core (`libbox`); ссылки и конфиги разбирает общий `protogrid-core` через `crates/protogrid-mobile` (JNI). Релиз собирается под `arm64-v8a`, для эмулятора — `x86_64`.
 
+В одном релизе выходят два APK с одним ядром внутри: обычный `ProtoGrid-<версия>-arm64-v8a.apk` и лёгкий `ProtoGrid-<версия>-lite-arm64-v8a.apk`. Lite-ядро понимает только VLESS/Reality по TCP, зато занимает меньше места; у него отдельный `applicationId` (`app.protogrid.client.lite`), поэтому оба варианта можно держать установленными рядом.
+
 ```bash
-# libbox + Rust-мост
+# libbox (полный и Lite) + Rust-мост
 export CGO_LDFLAGS_ALLOW='-l:.*'   # Go 1.27 и cronet-go
-cd forks/sing-box && make lib_install && \
-  go run ./cmd/internal/build_libbox -target android -platform android/arm64 && cd ../..
+cd forks/sing-box && make lib_install
+go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
+  -output libbox.aar
+go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
+  -tags "protogrid_lite,with_utls,with_clash_api,with_gvisor" \
+  -output libbox-lite.aar -legacy=false
+cd ../..
 cp forks/sing-box/libbox.aar apps/protogrid-android/app/libs/libbox.aar
+cp forks/sing-box/libbox-lite.aar apps/protogrid-android/app/libs/libbox-lite.aar
 cargo ndk -t arm64-v8a -o apps/protogrid-android/app/src/main/jniLibs \
   build -p protogrid-mobile --release
 
-cd apps/protogrid-android && ./gradlew :app:assembleRelease
+cd apps/protogrid-android
+./gradlew :app:assembleStandardRelease :app:assembleLiteRelease
 ```
 
-APK прикрепляется к GitHub Release workflow `.github/workflows/android.yml` по тегу `android-v*`. Нужны JDK 17, Android SDK 35 и платформа 24 (libbox собирается с `-androidapi 24`), NDK 28.0.13004108, Go 1.27 и `cargo-ndk`; подпись и секреты описаны в [apps/protogrid-android/README.md](apps/protogrid-android/README.md).
+APK прикрепляются к GitHub Release workflow `.github/workflows/android.yml` по тегу `android-v*` — обычный и Lite. Нужны JDK 17, Android SDK 35 и платформа 24 (libbox собирается с `-androidapi 24`), NDK 28.0.13004108, Go 1.27 и `cargo-ndk`; подпись и секреты описаны в [apps/protogrid-android/README.md](apps/protogrid-android/README.md).
 
 Ту же цепочку можно запустить одной командой: `ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh`. Для x86_64-эмулятора — `./scripts/build-android.sh x86_64`.
 
@@ -166,6 +178,8 @@ Android-модуль линкует `libbox` (sing-box, GPLv3), поэтому �
 | OpenVPN | UDP, TCP | endpoint, профиль `.ovpn`, TLS, `auth-user-pass`, `tls-auth`/`tls-crypt` |
 
 `*` XHTTP в sing-box доступен только в ProtoGrid-core; стоковый sing-box его не поддерживает. mKCP, VLESS Encryption и UDP noise (Xray `finalmask`) также добавлены в форк. См. `docs/xhttp-fork-plan.md` и `docs/xray-parity-plan.md`.
+
+ProtoGrid-core Lite — отдельная сборка того же форка только с VLESS (TCP, TLS/Reality), TUN, mixed-входом и Clash API. Остальные протоколы и транспорты в неё не попадают: приложение просто не предложит их для этого ядра.
 
 ### Xray-core
 

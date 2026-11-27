@@ -50,6 +50,19 @@ impl CoreFeatures {
                 noise: true,
                 openvpn: false,
             },
+            CoreKind::ProtogridLite => Self {
+                xhttp: false,
+                kcp: false,
+                xdrive: false,
+                masque: false,
+                mldsa65: false,
+                vless_encryption: false,
+                tun: true,
+                fakedns: true,
+                clash_api: true,
+                noise: false,
+                openvpn: false,
+            },
             CoreKind::Singbox | CoreKind::Protogrid => Self {
                 xhttp: fork,
                 kcp: fork,
@@ -279,6 +292,11 @@ async fn run_check(kind: CoreKind, path: &Path, config: &Path) -> bool {
 /// newer upstream release changes the badges without code changes.
 async fn probe_features(kind: CoreKind, path: &Path, version: &str) -> CoreFeatures {
     let mut features = CoreFeatures::heuristic(kind, version);
+    // The Lite build is a fixed feature set; probing its absent features only
+    // costs eight extra process launches on every core detection.
+    if kind == CoreKind::ProtogridLite {
+        return features;
+    }
     let dir = std::env::temp_dir().join(format!("protogrid-probe-{}", std::process::id()));
     if std::fs::create_dir_all(&dir).is_err() {
         return features;
@@ -371,6 +389,13 @@ fn binary_name(kind: CoreKind) -> &'static str {
                 "protogrid-core"
             }
         }
+        CoreKind::ProtogridLite => {
+            if cfg!(windows) {
+                "protogrid-core-lite.exe"
+            } else {
+                "protogrid-core-lite"
+            }
+        }
     }
 }
 
@@ -379,6 +404,7 @@ fn dir_name(kind: CoreKind) -> &'static str {
         CoreKind::Singbox => "sing-box",
         CoreKind::Xray => "xray",
         CoreKind::Protogrid => "protogrid",
+        CoreKind::ProtogridLite => "protogrid-lite",
     }
 }
 
@@ -407,6 +433,7 @@ fn configure_path(kind: CoreKind, settings: &Settings) -> String {
         CoreKind::Singbox => settings.singbox_path.clone(),
         CoreKind::Xray => settings.xray_path.clone(),
         CoreKind::Protogrid => settings.protogrid_path.clone(),
+        CoreKind::ProtogridLite => settings.protogrid_lite_path.clone(),
     }
 }
 
@@ -438,7 +465,7 @@ fn candidate_paths(kind: CoreKind, settings: &Settings, data_dir: &Path) -> Vec<
         }
     };
 
-    if kind == CoreKind::Protogrid {
+    if matches!(kind, CoreKind::Protogrid | CoreKind::ProtogridLite) {
         let managed_binary = data_dir.join("cores").join(dir).join(binary);
         let managed_legacy = data_dir
             .join("cores")
@@ -451,16 +478,20 @@ fn candidate_paths(kind: CoreKind, settings: &Settings, data_dir: &Path) -> Vec<
                 candidates.push(path);
             }
         }
-        // The fork ships next to the launcher rather than inside it.
+        // Bundled cores ship next to the launcher rather than inside it.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 candidates.push(parent.join(binary));
                 candidates.push(parent.join("cores").join(dir).join(binary));
-                candidates.push(parent.join("cores").join(dir).join(legacy_protogrid_name()));
+                if kind == CoreKind::Protogrid {
+                    candidates.push(parent.join("cores").join(dir).join(legacy_protogrid_name()));
+                }
             }
         }
         candidates.push(managed_binary);
-        candidates.push(managed_legacy);
+        if kind == CoreKind::Protogrid {
+            candidates.push(managed_legacy);
+        }
         return candidates;
     }
 
@@ -532,7 +563,7 @@ fn parse_version(stdout: &str, stderr: &str) -> Option<String> {
 
 fn compatibility(kind: CoreKind, version: &str) -> Result<(), String> {
     match kind {
-        CoreKind::Singbox | CoreKind::Protogrid => {
+        CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite => {
             if version_at_least(version, "1.12.0") {
                 Ok(())
             } else {
@@ -568,7 +599,7 @@ pub async fn detect(kind: CoreKind, settings: &Settings, data_dir: &Path) -> Cor
         }
     }
     let binary = binary_name(kind);
-    if kind != CoreKind::Protogrid {
+    if !matches!(kind, CoreKind::Protogrid | CoreKind::ProtogridLite) {
         if let Some(path) = find_in_path(binary) {
             match run_version(&path).await {
                 Ok(version) => {
@@ -597,7 +628,7 @@ pub async fn detect(kind: CoreKind, settings: &Settings, data_dir: &Path) -> Cor
             features: CoreFeatures::default(),
         };
     }
-    let hint = if kind == CoreKind::Protogrid {
+    let hint = if matches!(kind, CoreKind::Protogrid | CoreKind::ProtogridLite) {
         format!(
             "{} не найден. Положите {} рядом с ProtoGrid.exe или укажите путь в настройках.",
             kind.name(),
@@ -626,6 +657,10 @@ fn asset_candidates(kind: CoreKind, tag: &str) -> Result<Vec<String>, String> {
     match kind {
         CoreKind::Protogrid => Err(
             "Ядро ProtoGrid поставляется вместе с приложением и не скачивается с GitHub.".into(),
+        ),
+        CoreKind::ProtogridLite => Err(
+            "Ядро ProtoGrid-core Lite поставляется вместе с приложением и не скачивается с GitHub."
+                .into(),
         ),
         CoreKind::Singbox => {
             let os_name = match os {
@@ -689,7 +724,7 @@ async fn fetch_release(repo: &str) -> Result<serde_json::Value, String> {
 
 fn is_wanted(kind: CoreKind, name: &str) -> bool {
     match kind {
-        CoreKind::Singbox | CoreKind::Protogrid => {
+        CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite => {
             matches!(name, "sing-box" | "sing-box.exe" | "wintun.dll")
         }
         CoreKind::Xray => matches!(name, "xray" | "xray.exe" | "geoip.dat" | "geosite.dat"),
@@ -772,8 +807,8 @@ pub async fn install(
     inner: &Arc<Mutex<Inner>>,
     ctx: &egui::Context,
 ) -> Result<CoreInfo, String> {
-    if kind == CoreKind::Protogrid {
-        return install_bundled(inner, ctx).await;
+    if matches!(kind, CoreKind::Protogrid | CoreKind::ProtogridLite) {
+        return install_bundled(kind, inner, ctx).await;
     }
     let data_dir = inner
         .lock()
@@ -790,7 +825,9 @@ pub async fn install(
     let repo = match kind {
         CoreKind::Singbox => "SagerNet/sing-box",
         CoreKind::Xray => "XTLS/Xray-core",
-        CoreKind::Protogrid => unreachable!("handled by install_bundled"),
+        CoreKind::Protogrid | CoreKind::ProtogridLite => {
+            unreachable!("handled by install_bundled")
+        }
     };
     let release = fetch_release(repo).await?;
     let tag = release
@@ -889,9 +926,10 @@ pub async fn install(
     Ok(info)
 }
 
-/// ProtoGrid core is shipped next to the launcher. Install means: locate and
+/// Bundled cores are shipped next to the launcher. Install means: locate and
 /// validate that binary without copying it into the profile.
 async fn install_bundled(
+    kind: CoreKind,
     inner: &Arc<Mutex<Inner>>,
     ctx: &egui::Context,
 ) -> Result<CoreInfo, String> {
@@ -904,13 +942,14 @@ async fn install_bundled(
         ctx,
         "app",
         Some("info"),
-        "Поиск ядра ProtoGrid рядом с приложением…",
+        format!("Поиск ядра {} рядом с приложением…", kind.name()),
     );
-    let info = detect(CoreKind::Protogrid, &settings, &data_dir).await;
+    let info = detect(kind, &settings, &data_dir).await;
     if !info.found {
         return Err(format!(
-            "Ядро ProtoGrid не найдено. Положите {} рядом с ProtoGrid.exe.",
-            binary_name(CoreKind::Protogrid)
+            "Ядро {} не найдено. Положите {} рядом с ProtoGrid.exe.",
+            kind.name(),
+            binary_name(kind)
         ));
     }
     if let Some(error) = info.error.clone() {
@@ -922,7 +961,7 @@ async fn install_bundled(
             ctx,
             "app",
             Some("info"),
-            format!("Ядро ProtoGrid готово: {path}"),
+            format!("Ядро {} готово: {path}", kind.name()),
         );
     }
     Ok(info)

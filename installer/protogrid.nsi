@@ -3,9 +3,10 @@ Unicode true
 !include "x64.nsh"
 
 !define APP_NAME "ProtoGrid"
-!define APP_VERSION "0.2.2"
+!define APP_VERSION "0.3.0"
 !define APP_EXE "ProtoGrid.exe"
 !define CORE_EXE "protogrid-core.exe"
+!define CORE_LITE_EXE "protogrid-core-lite.exe"
 !define APP_PUBLISHER "ProtoGrid"
 !define APP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ProtoGrid"
 !define INSTALL_DIR "$LOCALAPPDATA\Programs\ProtoGrid"
@@ -17,7 +18,7 @@ InstallDirRegKey HKCU "Software\ProtoGrid" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.2.2.0"
+VIProductVersion "0.3.0.0"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "FileDescription" "${APP_NAME} setup"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"
@@ -51,7 +52,10 @@ Section "ProtoGrid" SEC_APP
     ; The core and wintun.dll are installed next to the launcher instead of
     ; being embedded into it, so the launcher stays small.
     File /oname=${CORE_EXE} "..\dist\fork\sing-box-protogrid-windows-amd64.exe"
+    File /oname=${CORE_LITE_EXE} "..\dist\fork\protogrid-core-lite-windows-amd64.exe"
     File /oname=wintun.dll "..\dist\fork\wintun.dll"
+    File "..\reset-tun.bat"
+    File "..\scripts\reset-tun.ps1"
     File /oname=LICENSE.txt "..\LICENSE"
     File /oname=THIRD_PARTY_NOTICES.txt "..\THIRD_PARTY_NOTICES.md"
     SetOutPath "$INSTDIR\licenses"
@@ -88,7 +92,10 @@ SectionEnd
 Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\${CORE_EXE}"
+    Delete "$INSTDIR\${CORE_LITE_EXE}"
     Delete "$INSTDIR\wintun.dll"
+    Delete "$INSTDIR\reset-tun.bat"
+    Delete "$INSTDIR\reset-tun.ps1"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\THIRD_PARTY_NOTICES.txt"
     Delete "$INSTDIR\licenses\GPL-3.0.txt"

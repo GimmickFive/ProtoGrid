@@ -17,7 +17,8 @@
 
 ProtoGrid-core линкуется в APK как `libbox` (sing-box, GPLv3), поэтому Android-
 модуль распространяется под GPL-3.0 (см. [LICENSE](LICENSE)). Общий Rust-код
-остаётся MIT.
+остаётся MIT. Собираются два AAR из одного форка: `libbox.aar` для обычной
+сборки и `libbox-lite.aar` (`protogrid_lite`) для Lite-сборки.
 
 ## Маршрутизация
 
@@ -65,27 +66,37 @@ ANDROID_HOME=/path/to/android-sdk ./scripts/build-android.sh
 Или по шагам:
 
 ```bash
-# 1. ProtoGrid-core (libbox): sing-box v1.14.4 + патчи, arm64
+# 1. ProtoGrid-core (libbox): sing-box v1.14.4 + патчи, arm64.
+#    Собираются оба варианта — полный и Lite.
 export CGO_LDFLAGS_ALLOW='-l:.*'   # Go 1.27 отклоняет -l:libcronet.a
 git clone --depth 1 --branch v1.14.4 https://github.com/SagerNet/sing-box.git forks/sing-box
 cd forks/sing-box
 git am ../../docs/patches/*.patch
 make lib_install
-go run ./cmd/internal/build_libbox -target android -platform android/arm64
+go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
+  -output libbox.aar
+go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
+  -tags "protogrid_lite,with_utls,with_clash_api,with_gvisor" \
+  -output libbox-lite.aar -legacy=false
 cd ../..
 
 # 2. AAR и Rust-мост
 cp forks/sing-box/libbox.aar apps/protogrid-android/app/libs/libbox.aar
+cp forks/sing-box/libbox-lite.aar apps/protogrid-android/app/libs/libbox-lite.aar
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.0.13004108"
 cargo ndk -t arm64-v8a -o apps/protogrid-android/app/src/main/jniLibs \
   build -p protogrid-mobile --release
 
 # 3. APK
 cd apps/protogrid-android
-./gradlew :app:assembleRelease
+./gradlew :app:assembleStandardRelease :app:assembleLiteRelease
 ```
 
-Результат: `app/build/outputs/apk/release/app-release.apk`. Без переменных
+Результат: `app/build/outputs/apk/standard/release/app-standard-release.apk` и
+`app/build/outputs/apk/lite/release/app-lite-release.apk`. Lite-сборка
+линкует `libbox-lite.aar` (`protogrid_lite`, только VLESS/Reality по TCP) и
+ставится отдельным приложением `app.protogrid.client.lite` с названием
+«ProtoGrid Lite», поэтому оба варианта могут жить рядом. Без переменных
 подписи Gradle подписывает debug-ключом — такой APK ставится, но обновлять его
 поверх релизного нельзя.
 
@@ -96,10 +107,12 @@ cd apps/protogrid-android
 
 ```bash
 ANDROID_HOME=/path/to/android-sdk ./scripts/build-android.sh x86_64
-adb install -r apps/protogrid-android/app/build/outputs/apk/release/app-release.apk
+adb install -r apps/protogrid-android/app/build/outputs/apk/standard/release/app-standard-release.apk
+# или Lite-вариант:
+adb install -r apps/protogrid-android/app/build/outputs/apk/lite/release/app-lite-release.apk
 ```
 
-Скрипт пересоберёт libbox под `android/amd64`, Rust — под
+Скрипт пересоберёт libbox (полный и Lite) под `android/amd64`, Rust — под
 `x86_64-linux-android`, а Gradle запустит с `PROTOGRID_ABIS=x86_64`.
 Стандартный AVD поддерживает `VpnService`; ARM-образы на x86_64-хосте
 практически не пригодны из-за скорости.
@@ -107,14 +120,17 @@ adb install -r apps/protogrid-android/app/build/outputs/apk/release/app-release.
 ## Релиз на GitHub
 
 Workflow `.github/workflows/android.yml` запускается по тегу `android-v*`
-или вручную. Он собирает libbox, Rust `.so`, APK и прикрепляет файл к Release.
+или вручную. Он собирает libbox (полный и Lite), Rust `.so`, оба APK и
+прикрепляет файлы к Release.
 
 Приложение проверяет публичные релизы `GimmickFive/ProtoGrid` на GitHub при
 запуске. Если в ассетах есть APK для ABI устройства (обычно
-`ProtoGrid-<версия>-arm64-v8a.apk`), на «Обзоре» появляется карточка
+`ProtoGrid-<версия>-arm64-v8a.apk`, для Lite —
+`ProtoGrid-<версия>-lite-arm64-v8a.apk`), на «Обзоре» появляется карточка
 обновления: APK скачивается с прогрессом, сверяется SHA-256 из GitHub и
-открывается системный установщик. Ядро ProtoGrid-core находится внутри APK,
-поэтому отдельного скачивания ядра на Android нет — оно обновляется вместе с
+открывается системный установщик. Lite-сборка ищет только Lite-ассет, поэтому
+варианты не перепутаются. Ядро ProtoGrid-core находится внутри APK, поэтому
+отдельного скачивания ядра на Android нет — оно обновляется вместе с
 приложением.
 
 Секреты для стабильной подписи:
@@ -140,6 +156,9 @@ base64 -w0 release.keystore
 ## Ограничения MVP
 
 - релизный APK — `arm64-v8a`, для эмулятора собирается `x86_64`;
+- Lite-сборка принимает только VLESS/Reality по TCP; остальные профили
+  импортируются, но при подключении ядро вернёт ошибку «ProtoGrid-core Lite
+  поддерживает только VLESS» / «…только транспорт TCP»;
 - нет импорта подписок и `ovpn://` (парсинг уже есть в ядре — подключим дальше);
 - правила по процессам пока не выведены; свои домены, суффиксы, IP/CIDR и GeoIP/GeoSite работают;
 - TUN-стек `gvisor`, системный прокси Android не используется;

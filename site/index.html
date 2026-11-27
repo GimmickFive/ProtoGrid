@@ -14,7 +14,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="ProtoGrid" />
   <meta property="og:title" content="ProtoGrid — нативный прокси-клиент на Rust" />
-  <meta property="og:description" content="Без WebView, HTML и Node.js. Три ядра, TUN, подписки, маршрутизация и OpenVPN в одном нативном окне." />
+  <meta property="og:description" content="Без WebView, HTML и Node.js. Три ядра, два варианта ProtoGrid, TUN, подписки, маршрутизация и OpenVPN в одном нативном окне." />
   <meta property="og:url" content="https://gimmickfive.github.io/ProtoGrid/" />
   <meta property="og:image" content="https://gimmickfive.github.io/ProtoGrid/assets/og-brand.png" />
   <meta property="og:image:width" content="1200" />
@@ -166,8 +166,8 @@
             <div class="feature-icon tone-violet">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 7.5 12 12l9-4.5L12 3ZM3 12l9 4.5 9-4.5M3 16.5 12 21l9-4.5" /></svg>
             </div>
-            <h3>Три ядра</h3>
-            <p>ProtoGrid-core с XHTTP, MASQUE и XDRIVE, стоковый sing-box и Xray-core. Переключение без переустановки.</p>
+            <h3>Три ядра, два варианта ProtoGrid</h3>
+            <p>ProtoGrid-core с XHTTP, MASQUE и XDRIVE или компактный ProtoGrid Lite только для VLESS/Reality, стоковый sing-box и Xray-core. Переключение без переустановки.</p>
           </article>
 
           <article class="feature-card">
@@ -227,7 +227,8 @@
           <p class="eyebrow">Движки</p>
           <h2>Одно приложение — три ядра</h2>
           <p class="section-lead">
-            ProtoGrid-core — форк sing-box с XHTTP, MASQUE, XDRIVE и mKCP.
+            ProtoGrid-core — форк sing-box с XHTTP, MASQUE, XDRIVE и mKCP; в нём есть
+            обычный и компактный Lite-режим только для VLESS/Reality по TCP.
             Стоковые sing-box и Xray-core можно скачать прямо из настроек.
           </p>
         </div>
@@ -293,6 +294,7 @@
         <p class="table-hint">Прокрутите таблицу вбок →</p>
         <p class="table-note">
           ProtoGrid-core — сборка на базе sing-box с тегом <code>with_openvpn</code>.
+          ProtoGrid Lite — отдельная облегчённая сборка: только VLESS/Reality по TCP, TUN и mixed.
           Xray-core не поддерживает OpenVPN, TUN, Hysteria2 и TUIC — для них переключите ядро.
         </p>
       </div>
@@ -489,7 +491,7 @@ cargo run -p protogrid-desktop</code></pre>
           </details>
           <details>
             <summary>Откуда берутся ядра?</summary>
-            <p>ProtoGrid-core поставляется рядом с приложением. Стоковые sing-box и Xray-core можно скачать в разделе «Настройки → Подключение» или указать путь к своему бинарнику.</p>
+            <p>ProtoGrid-core и компактный ProtoGrid Lite поставляются рядом с приложением. Стоковые sing-box и Xray-core можно скачать в разделе «Настройки → Подключение» или указать путь к своему бинарнику.</p>
           </details>
           <details>
             <summary>Куда уходят мои данные?</summary>
@@ -551,7 +553,9 @@ cargo run -p protogrid-desktop</code></pre>
 
           var setupRe = /windows-x64-setup\.exe$/i;
           var portableRe = /windows-x64-portable\.zip$/i;
-          var apkRe = /\.apk$/i;
+          // Обычный APK, не Lite: Lite лежит в том же релизе отдельным файлом.
+          var apkRe = /^(?!.*-lite-).*\.apk$/i;
+          var anyApkRe = /\.apk$/i;
 
           function findAsset(re) {
             for (var i = 0; i < published.length; i++) {
@@ -563,7 +567,7 @@ cargo run -p protogrid-desktop</code></pre>
 
           var setup = findAsset(setupRe);
           var portable = findAsset(portableRe);
-          var apk = findAsset(apkRe);
+          var apk = findAsset(apkRe) || findAsset(anyApkRe);
 
           if (setup) document.querySelectorAll('[data-download="windows"]').forEach(function (el) {
             el.href = setup.browser_download_url;

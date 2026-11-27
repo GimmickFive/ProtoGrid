@@ -137,6 +137,10 @@ pub fn build_config_with_capabilities(
     let mut route_rules = vec![
         json!({"action": "sniff"}),
         json!({"protocol": "dns", "action": "hijack-dns"}),
+        // Соединения из mixed/socks приходят с именем домена, а IP-правила
+        // (например, Cloudflare → proxy) требуют адрес: резолвим домен до
+        // маршрутизации. Для TUN (там уже IP) это no-op.
+        json!({"action": "resolve"}),
         json!({"ip_is_private": true, "outbound": "direct"}),
     ];
     for rule in rules.iter().filter(|rule| rule.enabled) {
@@ -209,7 +213,7 @@ pub fn build_config_with_capabilities(
         "dns": {
             "servers": [
                 {"type": "local", "tag": "dns-local"},
-                remote_dns(settings),
+                remote_dns(settings, capabilities),
             ],
             "rules": [
                 {"domain_suffix": [".local", "localhost"], "server": "dns-local"},
@@ -296,13 +300,17 @@ fn build_inbounds(settings: &Settings, modern_tun: bool) -> Vec<Value> {
     inbounds
 }
 
-fn remote_dns(settings: &Settings) -> Value {
+fn remote_dns(settings: &Settings, capabilities: CoreCapabilities) -> Value {
     let spec = settings.dns_remote.trim();
     if let Ok(url) = Url::parse(spec) {
         let scheme = url.scheme().to_ascii_lowercase();
         let kind = match scheme.as_str() {
             "https" => "https",
             "tls" => "tls",
+            // QUIC DNS transports are not registered in the Lite build; fall
+            // back to DoH so the config still starts instead of failing at
+            // "unknown dns transport".
+            "quic" | "h3" if capabilities.vless_only => "https",
             "quic" => "quic",
             "h3" => "h3",
             "tcp" => "tcp",
@@ -830,6 +838,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();
@@ -875,6 +884,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();
@@ -885,6 +895,41 @@ mod tests {
             .find(|outbound| outbound["tag"] == "srv-1")
             .unwrap();
         assert_eq!(outbound["type"], "masque");
+    }
+
+    #[test]
+    fn lite_core_accepts_only_vless_over_tcp() {
+        let lite = CoreCapabilities {
+            vless_only: true,
+            ..Default::default()
+        };
+        let server = sample_server();
+        assert!(server.validate_with(CoreKind::Singbox, lite).is_ok());
+
+        let mut websocket = server.clone();
+        websocket.transport = Transport::Ws;
+        assert!(websocket.validate_with(CoreKind::Singbox, lite).is_err());
+
+        let mut vmess = server.clone();
+        vmess.protocol = Protocol::Vmess;
+        assert!(vmess.validate_with(CoreKind::Singbox, lite).is_err());
+
+        let mut other = sample_server();
+        other.id = "srv-2".into();
+        other.protocol = Protocol::Vmess;
+        let config = build_config_with_capabilities(
+            &[server, other],
+            "srv-1",
+            &Settings::default(),
+            &[],
+            Some("1.14.4-protogrid.5-lite.1"),
+            None,
+            lite,
+        )
+        .unwrap();
+        let outbounds = config["outbounds"].as_array().unwrap();
+        assert!(outbounds.iter().all(|outbound| outbound["type"] != "vmess"));
+        assert!(outbounds.iter().any(|outbound| outbound["type"] == "vless"));
     }
 
     #[test]
@@ -901,6 +946,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config["inbounds"][0]["type"], "mixed");
+        let route_rules = config["route"]["rules"].as_array().unwrap();
+        assert!(
+            route_rules.iter().any(|rule| rule["action"] == "resolve"),
+            "домен из mixed/socks должен резолвиться до IP-правил (Cloudflare)"
+        );
+        let cf = route_rules
+            .iter()
+            .position(|rule| {
+                rule["ip_cidr"]
+                    .as_array()
+                    .is_some_and(|cidrs| cidrs.iter().any(|c| c == "104.16.0.0/13"))
+            })
+            .expect("правило Cloudflare должно попасть в конфиг ядра");
+        let geoip = route_rules
+            .iter()
+            .position(|rule| rule["rule_set"].as_array().is_some())
+            .expect("geoip/geosite правила");
+        assert!(
+            cf < geoip,
+            "Cloudflare должен проверяться раньше geoip/geosite"
+        );
         assert!(config["http_clients"].is_array());
         assert_eq!(config["http_clients"][0]["detour"], "direct-http-out");
         assert!(config["route"]["default_http_client"].is_string());
@@ -1029,6 +1095,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();
@@ -1156,6 +1223,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();
@@ -1205,6 +1273,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();
@@ -1253,6 +1322,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();
@@ -1294,6 +1364,7 @@ mod tests {
                 masque: true,
                 noise: true,
                 openvpn: true,
+                vless_only: false,
             },
         )
         .unwrap();

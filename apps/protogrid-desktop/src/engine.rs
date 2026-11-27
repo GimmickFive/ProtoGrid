@@ -80,7 +80,12 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-const RUNTIME_CONFIGS: [&str; 3] = ["singbox.json", "xray.json", "protogrid.json"];
+const RUNTIME_CONFIGS: [&str; 4] = [
+    "singbox.json",
+    "xray.json",
+    "protogrid.json",
+    "protogrid-lite.json",
+];
 
 /// Generated runtime configs duplicate every credential. Keep only the file
 /// for the core that is about to start; remove the rest (after disconnect or
@@ -92,6 +97,33 @@ fn clear_runtime_configs(runtime_dir: &Path, keep: Option<&str>) {
         }
         let _ = std::fs::remove_file(runtime_dir.join(name));
     }
+}
+
+/// Marker the core watches for a graceful shutdown. Only ProtoGrid-core
+/// (full and Lite) understands it; stock sing-box and Xray ignore it and are
+/// killed as before.
+fn core_shutdown_marker(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("shutdown")
+}
+
+fn request_core_shutdown(
+    core: Option<CoreKind>,
+    version: Option<&str>,
+    data_dir: &Path,
+) -> Option<PathBuf> {
+    if !matches!(core, Some(CoreKind::Protogrid | CoreKind::ProtogridLite))
+        || !version.is_some_and(|version| {
+            protogrid_core::util::version_at_least(version, "1.14.4-protogrid.4")
+        })
+    {
+        return None;
+    }
+    let path = core_shutdown_marker(data_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, b"shutdown").ok()?;
+    Some(path)
 }
 
 fn harden_existing_logs(log_dir: &Path) {
@@ -329,6 +361,10 @@ pub struct Inner {
     pub core_singbox: Option<CoreInfo>,
     pub core_xray: Option<CoreInfo>,
     pub core_protogrid: Option<CoreInfo>,
+    pub core_protogrid_lite: Option<CoreInfo>,
+    /// Kill-on-close job holding the running core on Windows.
+    #[cfg(target_os = "windows")]
+    pub job: Option<CoreJob>,
     /// GitHub update state for the launcher, sing-box and Xray.
     pub update: UpdateState,
     pub core_updates: updates::CoreUpdates,
@@ -342,6 +378,15 @@ pub struct Inner {
 impl Inner {
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn core_info(&self, kind: CoreKind) -> Option<&CoreInfo> {
+        match kind {
+            CoreKind::Singbox => self.core_singbox.as_ref(),
+            CoreKind::Xray => self.core_xray.as_ref(),
+            CoreKind::Protogrid => self.core_protogrid.as_ref(),
+            CoreKind::ProtogridLite => self.core_protogrid_lite.as_ref(),
+        }
     }
 
     fn persist(&self) -> Result<(), String> {
@@ -378,6 +423,7 @@ impl Inner {
             core_singbox: self.core_singbox.clone(),
             core_xray: self.core_xray.clone(),
             core_protogrid: self.core_protogrid.clone(),
+            core_protogrid_lite: self.core_protogrid_lite.clone(),
             update: self.update.clone(),
             core_updates: self.core_updates.clone(),
             autostart: self.autostart,
@@ -403,6 +449,7 @@ pub struct Snapshot {
     pub core_singbox: Option<CoreInfo>,
     pub core_xray: Option<CoreInfo>,
     pub core_protogrid: Option<CoreInfo>,
+    pub core_protogrid_lite: Option<CoreInfo>,
     pub update: UpdateState,
     pub core_updates: updates::CoreUpdates,
     pub autostart: bool,
@@ -420,6 +467,7 @@ impl Snapshot {
             CoreKind::Singbox => self.core_singbox.as_ref(),
             CoreKind::Xray => self.core_xray.as_ref(),
             CoreKind::Protogrid => self.core_protogrid.as_ref(),
+            CoreKind::ProtogridLite => self.core_protogrid_lite.as_ref(),
         }
     }
 
@@ -429,7 +477,7 @@ impl Snapshot {
         match kind {
             CoreKind::Singbox => Some(&self.core_updates.singbox),
             CoreKind::Xray => Some(&self.core_updates.xray),
-            CoreKind::Protogrid => None,
+            CoreKind::Protogrid | CoreKind::ProtogridLite => None,
         }
     }
 
@@ -465,6 +513,7 @@ impl Snapshot {
             openvpn: self
                 .core(kind)
                 .is_some_and(installer::CoreInfo::supports_openvpn),
+            vless_only: kind == CoreKind::ProtogridLite,
         }
     }
 
@@ -708,6 +757,9 @@ impl Engine {
             core_singbox: None,
             core_xray: None,
             core_protogrid: None,
+            core_protogrid_lite: None,
+            #[cfg(target_os = "windows")]
+            job: None,
             update: UpdateState::default(),
             core_updates: updates::CoreUpdates::default(),
             autostart: autostart::is_enabled(),
@@ -902,6 +954,12 @@ impl Engine {
                                 }
                                 guard.core_protogrid = Some(info.clone());
                             }
+                            CoreKind::ProtogridLite => {
+                                if let Some(path) = &info.path {
+                                    guard.config.settings.protogrid_lite_path = path.clone();
+                                }
+                                guard.core_protogrid_lite = Some(info.clone());
+                            }
                         }
                         let _ = guard.persist();
                         guard.touch();
@@ -1077,7 +1135,33 @@ impl Engine {
         let inner = self.inner.clone();
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            match connect_core(&inner, &ctx).await {
+            let result = connect_core(&inner, &ctx).await;
+            #[cfg(target_os = "windows")]
+            let result = {
+                let mut result = result;
+                let tun_enabled = {
+                    let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.config.settings.tun_enabled
+                };
+                if tun_enabled
+                    && result.as_ref().err().is_some_and(|error| {
+                        error.contains("не смогло запуститься") || error.contains("TUN-адаптер")
+                    })
+                {
+                    push_log(
+                        &inner,
+                        &ctx,
+                        "app",
+                        Some("warn"),
+                        "Ядро не запустилось — очищаю TUN-адаптер и пробую ещё раз",
+                    );
+                    let _ = reset_wintun_devices(singbox::TUN_INTERFACE_NAME);
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                    result = connect_core(&inner, &ctx).await;
+                }
+                result
+            };
+            match result {
                 Ok(()) => push_toast(&inner, &ctx, "Соединение установлено", ToastKind::Success),
                 Err(error) => push_toast(&inner, &ctx, error, ToastKind::Error),
             }
@@ -2071,17 +2155,41 @@ impl Engine {
     }
 
     pub fn shutdown_blocking(&self) {
-        let (child, proxy_set) = {
+        let (child, proxy_set, active_core, active_version, data_dir) = {
             let mut guard = self.lock();
             guard.run_id = guard.run_id.wrapping_add(1);
             let child = guard.child.take();
             let proxy_set = guard.proxy_set;
+            let active_core = guard.active_core;
+            let active_version = active_core
+                .and_then(|kind| guard.core_info(kind))
+                .and_then(|info| info.version.clone());
+            let data_dir = guard.data_dir.clone();
             guard.proxy_set = false;
             guard.status = ConnStatus::Disconnected;
-            (child, proxy_set)
+            (child, proxy_set, active_core, active_version, data_dir)
         };
         if let Some(mut child) = child {
-            let _ = child.start_kill();
+            if let Some(marker) =
+                request_core_shutdown(active_core, active_version.as_deref(), &data_dir)
+            {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        Ok(None) => {
+                            let _ = child.start_kill();
+                            break;
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(marker);
+            } else {
+                let _ = child.start_kill();
+            }
         }
         if proxy_set {
             let _ = sysproxy::disable();
@@ -2534,10 +2642,11 @@ async fn detect_both(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         (guard.config.settings.clone(), guard.data_dir.clone())
     };
-    let (singbox, xray, protogrid) = tokio::join!(
+    let (singbox, xray, protogrid, protogrid_lite) = tokio::join!(
         installer::detect(CoreKind::Singbox, &settings, &data_dir),
         installer::detect(CoreKind::Xray, &settings, &data_dir),
-        installer::detect(CoreKind::Protogrid, &settings, &data_dir)
+        installer::detect(CoreKind::Protogrid, &settings, &data_dir),
+        installer::detect(CoreKind::ProtogridLite, &settings, &data_dir)
     );
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2550,16 +2659,28 @@ async fn detect_both(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
                 let _ = guard.persist();
             }
         }
+        if let Some(path) = protogrid_lite
+            .path
+            .as_ref()
+            .filter(|_| protogrid_lite.found)
+            .cloned()
+        {
+            if guard.config.settings.protogrid_lite_path != path {
+                guard.config.settings.protogrid_lite_path = path;
+                let _ = guard.persist();
+            }
+        }
         guard.core_singbox = Some(singbox);
         guard.core_xray = Some(xray);
         guard.core_protogrid = Some(protogrid);
+        guard.core_protogrid_lite = Some(protogrid_lite);
         guard.touch();
     }
     ctx.request_repaint();
 }
 
 fn log_core_versions(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
-    let (singbox, xray, protogrid) = {
+    let (singbox, xray, protogrid, protogrid_lite) = {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         let singbox = guard
             .core_singbox
@@ -2594,14 +2715,28 @@ fn log_core_versions(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) {
                 }
             })
             .unwrap_or_default();
-        (singbox, xray, protogrid)
+        let protogrid_lite = guard
+            .core_protogrid_lite
+            .as_ref()
+            .map(|info| {
+                if info.found {
+                    format!(
+                        "ProtoGrid Lite {}",
+                        info.version.clone().unwrap_or_default()
+                    )
+                } else {
+                    "ProtoGrid Lite не найден".into()
+                }
+            })
+            .unwrap_or_default();
+        (singbox, xray, protogrid, protogrid_lite)
     };
     push_log(
         inner,
         ctx,
         "app",
         Some("info"),
-        format!("Ядра: {singbox} · {xray} · {protogrid}"),
+        format!("Ядра: {singbox} · {xray} · {protogrid} · {protogrid_lite}"),
     );
 }
 
@@ -2878,8 +3013,65 @@ fn set_error(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, message: String) ->
 }
 
 #[cfg(target_os = "windows")]
-async fn wait_for_tun_adapter_gone(name: &str) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(8);
+pub(crate) struct CoreJob(isize);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for CoreJob {}
+
+#[cfg(target_os = "windows")]
+impl Drop for CoreJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe {
+            CloseHandle(self.0 as *mut _);
+        }
+    }
+}
+
+/// Keep every core in a job object that kills its members when ProtoGrid exits.
+/// Without it a crash or `TerminateProcess` of the launcher leaves an orphan
+/// `protogrid-core.exe` holding the Wintun adapter, and the next start cannot
+/// create TUN.
+#[cfg(target_os = "windows")]
+fn create_core_job() -> Option<CoreJob> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if configured == 0 {
+            CloseHandle(job);
+            return None;
+        }
+        Some(CoreJob(job as isize))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn assign_core_to_job(job: &CoreJob, process: *mut core::ffi::c_void) -> bool {
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+    unsafe { AssignProcessToJobObject(job.0 as *mut _, process) != 0 }
+}
+
+#[cfg(target_os = "windows")]
+async fn wait_for_tun_adapter_gone_for(name: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
     loop {
         if !tun_adapter_exists(name) {
             return true;
@@ -2889,6 +3081,52 @@ async fn wait_for_tun_adapter_gone(name: &str) -> bool {
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
+}
+
+/// Removes stale Wintun PnP devices. Wintun keeps a persistent device node
+/// after an unclean core exit, so the next start fails with
+/// `create adapter: Cannot create a file when that file already exists` even
+/// though no adapter is visible in the network list. Removing our named
+/// adapter (and any other phantom Wintun nodes) lets the core create a clean
+/// one.
+#[cfg(target_os = "windows")]
+fn reset_wintun_devices(name: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$netClass = '{4d36e972-e325-11ce-bfc1-08002be10318}'
+function Get-TunAlias($id) {
+  $guid = ($id -split '\\')[-1]
+  $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\' + $netClass + '\' + $guid + '\Connection'
+  $props = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+  if ($props -and $props.PSObject.Properties['Name']) { return [string]$props.Name }
+  return $null
+}
+Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+  Where-Object { $_.InstanceId -like 'SWD\WINTUN*' } |
+  ForEach-Object {
+    $alias = Get-TunAlias $_.InstanceId
+    if ($alias -eq $env:PROTOGRID_TUN -or -not $_.Present) {
+      & pnputil.exe /remove-device $_.InstanceId | Out-Null
+    }
+  }
+"#;
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .env("PROTOGRID_TUN", name)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -2947,42 +3185,105 @@ fn wide_name_eq(ptr: *const u16, expected: &str) -> bool {
 }
 
 async fn stop_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, silent: bool) {
-    let (child, proxy_set, was_active, tun_on) = {
+    let (child, proxy_set, was_active, tun_on, active_core, active_version, data_dir) = {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.run_id = guard.run_id.wrapping_add(1);
         let child = guard.child.take();
         let proxy_set = guard.proxy_set;
         let was_active = matches!(guard.status, ConnStatus::Connected | ConnStatus::Connecting);
         let tun_on = guard.config.settings.tun_active();
+        let active_core = guard.active_core;
+        let active_version = active_core
+            .and_then(|kind| guard.core_info(kind))
+            .and_then(|info| info.version.clone());
+        let data_dir = guard.data_dir.clone();
         guard.proxy_set = false;
         guard.touch();
-        (child, proxy_set, was_active, tun_on)
+        (
+            child,
+            proxy_set,
+            was_active,
+            tun_on,
+            active_core,
+            active_version,
+            data_dir,
+        )
     };
     if let Some(mut child) = child {
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        if let Some(marker) =
+            request_core_shutdown(active_core, active_version.as_deref(), &data_dir)
+        {
+            // Give ProtoGrid-core time to close TUN itself. A killed process
+            // leaves the Wintun device in a deleting state, which is what
+            // makes the next start wait tens of seconds for the name.
+            push_log(
+                inner,
+                ctx,
+                "app",
+                Some("info"),
+                format!(
+                    "Останавливаю {} штатно",
+                    active_core.map(CoreKind::name).unwrap_or("ядро")
+                ),
+            );
+            if tokio::time::timeout(Duration::from_secs(10), child.wait())
+                .await
+                .is_err()
+            {
+                push_log(
+                    inner,
+                    ctx,
+                    "app",
+                    Some("warn"),
+                    format!(
+                        "{} не завершилось штатно за 10 с — завершаю принудительно",
+                        active_core.map(CoreKind::name).unwrap_or("Ядро")
+                    ),
+                );
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            }
+            let _ = std::fs::remove_file(marker);
+        } else {
+            if active_core.is_some() {
+                push_log(
+                    inner,
+                    ctx,
+                    "app",
+                    Some("warn"),
+                    format!(
+                        "{} не поддерживает штатную остановку — завершаю принудительно",
+                        active_core.map(CoreKind::name).unwrap_or("Ядро")
+                    ),
+                );
+            }
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        }
     }
     // The core has read its config; do not leave a second copy of UUIDs and
     // passwords on disk while the app is disconnected.
-    let runtime_dir = inner
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .data_dir
-        .join("runtime");
+    let runtime_dir = data_dir.join("runtime");
     clear_runtime_configs(&runtime_dir, None);
     #[cfg(target_os = "windows")]
-    if tun_on && !wait_for_tun_adapter_gone(singbox::TUN_INTERFACE_NAME).await {
-        push_log(
-            inner,
-            ctx,
-            "app",
-            Some("warn"),
-            format!(
-                "TUN-адаптер {} не освободился за 8 секунд: следующий запуск может \
-                 завершиться ошибкой. Перезагрузите компьютер, если это повторяется.",
-                singbox::TUN_INTERFACE_NAME
-            ),
-        );
+    if tun_on
+        && !wait_for_tun_adapter_gone_for(singbox::TUN_INTERFACE_NAME, Duration::from_secs(3)).await
+    {
+        // The core is gone but its Wintun device may still hold the name.
+        // Remove it now so the next connect does not have to recover.
+        let _ = reset_wintun_devices(singbox::TUN_INTERFACE_NAME);
+        if !wait_for_tun_adapter_gone_for(singbox::TUN_INTERFACE_NAME, Duration::from_secs(3)).await
+        {
+            push_log(
+                inner,
+                ctx,
+                "app",
+                Some("info"),
+                format!(
+                    "TUN-адаптер {} пока виден — очищу его перед следующим запуском.",
+                    singbox::TUN_INTERFACE_NAME
+                ),
+            );
+        }
     }
     #[cfg(not(target_os = "windows"))]
     let _ = tun_on;
@@ -2991,6 +3292,7 @@ async fn stop_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, silent: bool)
     }
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.run_id = guard.run_id.wrapping_add(1);
         guard.status = ConnStatus::Disconnected;
         guard.pid = None;
         guard.connected_at = None;
@@ -3341,17 +3643,21 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
     });
 }
 
-fn unexpected_exit_message(code: &str, logs: &VecDeque<LogEntry>) -> String {
-    let tun_conflict = logs.iter().rev().take(16).any(|entry| {
+fn recent_tun_conflict(logs: &VecDeque<LogEntry>) -> bool {
+    logs.iter().rev().take(16).any(|entry| {
         entry.source == "core"
             && (entry.line.contains("configure tun interface")
                 || entry.line.contains("create adapter"))
-    });
-    if tun_conflict {
+    })
+}
+
+fn unexpected_exit_message(code: &str, logs: &VecDeque<LogEntry>) -> String {
+    if recent_tun_conflict(logs) {
         format!(
-            "Ядро неожиданно завершилось (код {code}): TUN-адаптер уже занят другим VPN-клиентом \
-             или остался от прошлого запуска. Закройте другие VPN (v2rayN, sing-box) или \
-             перезагрузите компьютер."
+            "Ядро завершилось с кодом {code}: не удалось создать TUN-адаптер. \
+             Чаще всего это не другая VPN-программа, а зависшее Wintun-устройство \
+             от прошлого запуска. Приложение пытается очистить его; если ошибка \
+             повторяется — запустите reset-tun.bat или перезагрузите компьютер."
         )
     } else {
         format!("Ядро неожиданно завершилось (код {code}). Проверьте логи.")
@@ -3428,6 +3734,7 @@ fn write_runtime_config(
         CoreKind::Singbox => "singbox.json",
         CoreKind::Xray => "xray.json",
         CoreKind::Protogrid => "protogrid.json",
+        CoreKind::ProtogridLite => "protogrid-lite.json",
     };
     // Runtime configs mirror every credential. Old cores must not keep a copy
     // of a server the user has since deleted.
@@ -3466,12 +3773,38 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
                 .into(),
         ));
     }
+    // Wintun keeps a device node after an unclean core exit. It may not show
+    // up in the adapter list at all, but it still blocks `create adapter` with
+    // "Cannot create a file when that file already exists". Remove our stale
+    // device before every TUN start. Do not refuse to start just because the
+    // old interface is still listed: Windows can keep a dead entry for a long
+    // time, while the core is often able to open it.
+    #[cfg(target_os = "windows")]
+    if settings.tun_enabled {
+        if tun_adapter_exists(singbox::TUN_INTERFACE_NAME) {
+            push_log(
+                inner,
+                ctx,
+                "app",
+                Some("warn"),
+                format!(
+                    "Старый TUN-адаптер {} ещё виден — очищаю перед запуском",
+                    singbox::TUN_INTERFACE_NAME
+                ),
+            );
+        }
+        let _ = reset_wintun_devices(singbox::TUN_INTERFACE_NAME);
+        // Best effort only: a stale interface entry is not a reason to abort.
+        let _ = wait_for_tun_adapter_gone_for(singbox::TUN_INTERFACE_NAME, Duration::from_secs(2))
+            .await;
+    }
     let cached = {
         let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         match settings.core {
             CoreKind::Singbox => guard.core_singbox.clone(),
             CoreKind::Xray => guard.core_xray.clone(),
             CoreKind::Protogrid => guard.core_protogrid.clone(),
+            CoreKind::ProtogridLite => guard.core_protogrid_lite.clone(),
         }
     };
     let info = match cached {
@@ -3529,23 +3862,26 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
     }
 
     let value = match settings.core {
-        CoreKind::Singbox | CoreKind::Protogrid => singbox::build_config_with_capabilities(
-            &config.servers,
-            &active_id,
-            &settings,
-            &config.rules,
-            info.version.as_deref(),
-            Some(ruleset_dir.as_path()),
-            CoreCapabilities {
-                xhttp: info.supports_xhttp(),
-                kcp: info.supports_kcp(),
-                xdrive: info.supports_xdrive(),
-                mldsa65: info.supports_mldsa65(),
-                masque: info.supports_masque(),
-                noise: info.supports_noise(),
-                openvpn: info.supports_openvpn(),
-            },
-        ),
+        CoreKind::Singbox | CoreKind::Protogrid | CoreKind::ProtogridLite => {
+            singbox::build_config_with_capabilities(
+                &config.servers,
+                &active_id,
+                &settings,
+                &config.rules,
+                info.version.as_deref(),
+                Some(ruleset_dir.as_path()),
+                CoreCapabilities {
+                    xhttp: info.supports_xhttp(),
+                    kcp: info.supports_kcp(),
+                    xdrive: info.supports_xdrive(),
+                    mldsa65: info.supports_mldsa65(),
+                    masque: info.supports_masque(),
+                    noise: info.supports_noise(),
+                    openvpn: info.supports_openvpn(),
+                    vless_only: settings.core == CoreKind::ProtogridLite,
+                },
+            )
+        }
         CoreKind::Xray => xray::build_config(&config.servers, &active_id, &settings, &config.rules),
     }
     .map_err(|error| set_error(inner, ctx, error))?;
@@ -3596,6 +3932,16 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // Remove a marker left by a crash; otherwise the new core would exit as
+    // soon as it starts.
+    let shutdown_marker = config_file
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("shutdown");
+    let _ = std::fs::remove_file(&shutdown_marker);
+    if matches!(settings.core, CoreKind::Protogrid | CoreKind::ProtogridLite) {
+        command.env("PROTOGRID_SHUTDOWN_FILE", &shutdown_marker);
+    }
     if settings.core == CoreKind::Xray {
         if let Some(parent) = Path::new(&core_path).parent() {
             command.env("XRAY_LOCATION_ASSET", parent);
@@ -3621,6 +3967,15 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
     let stderr = child.stderr.take();
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(target_os = "windows")]
+        {
+            if guard.job.is_none() {
+                guard.job = create_core_job();
+            }
+            if let (Some(job), Some(handle)) = (guard.job.as_ref(), child.raw_handle()) {
+                let _ = assign_core_to_job(job, handle);
+            }
+        }
         guard.child = Some(child);
         guard.pid = pid;
         guard.touch();
@@ -3647,6 +4002,21 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         if exited {
             tokio::time::sleep(Duration::from_millis(180)).await;
             stop_core(inner, ctx, true).await;
+            let tun_conflict = {
+                let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                recent_tun_conflict(guard.logs.entries())
+            };
+            if tun_conflict {
+                return Err(set_error(
+                    inner,
+                    ctx,
+                    "Не удалось создать TUN-адаптер. Обычно это не другая VPN-программа, \
+                     а зависшее Wintun-устройство от прошлого запуска. Приложение уже \
+                     очищает его; если ошибка повторяется — запустите reset-tun.bat \
+                     или перезагрузите компьютер."
+                        .into(),
+                ));
+            }
             return Err(set_error(
                 inner,
                 ctx,
