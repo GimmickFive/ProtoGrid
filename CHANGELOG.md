@@ -6,6 +6,18 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.9] — 2026-11-28
+
+### Изменено
+
+- **Android: обновления только через браузер.** Удалён встроенный установщик
+  APK и разрешение `REQUEST_INSTALL_PACKAGES`, а также `FileProvider`. Кнопка
+  обновления теперь открывает страницу релиза на GitHub.
+- Причина: Google Play Protect при сканировании APK 0.4.8 показал
+  «Вредоносное приложение заблокировано». Для приложения вне Play связка
+  «VPN + скачивание и установка APK» выглядит как dropper; убираем этот
+  вектор. Подробности — `docs/android-sideload-warning.md`.
+
 ## [0.4.8] — 2026-11-28
 
 ### Изменено
@@ -370,7 +382,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.8...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.9...dev
+[0.4.9]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.9
 [0.4.8]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.8
 [0.4.7]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.7
 [0.4.6]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.6
