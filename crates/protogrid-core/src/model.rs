@@ -1346,6 +1346,21 @@ mod tests {
     }
 
     #[test]
+    fn preset_rule_names_are_filled() {
+        let mut presets = vec![default_rules()];
+        presets.push(routing_preset("global").unwrap().0);
+        for rules in presets {
+            for rule in rules {
+                assert!(
+                    !rule.name.trim().is_empty(),
+                    "у правила {} нет названия",
+                    rule.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn previous_bypass_profile_gains_cloudflare_rule() {
         let mut config = AppConfig::default();
         config.rules.retain(|rule| rule.id != CLOUDFLARE_RULE_ID);

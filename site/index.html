@@ -191,7 +191,7 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17V7m5 10V4m5 13v-7m5 7V9M2 21h20" /></svg>
             </div>
             <h3>Живые графики и журнал</h3>
-            <p>Скорость, трафик через прокси и напрямую, реальная задержка через Clash API, журнал с метками DIRECT, PROXY и TUN.</p>
+            <p>Скорость, трафик через прокси и напрямую, прямой TCP-RTT и HTTP TTFB через Clash API, журнал с метками DIRECT, PROXY и TUN.</p>
           </article>
 
           <article class="feature-card">
@@ -282,10 +282,10 @@
                 <td><span class="no">Удалён в 26</span></td>
               </tr>
               <tr>
-                <th scope="row">Задержка всех узлов</th>
-                <td><span class="yes">Clash API</span></td>
-                <td><span class="yes">Clash API</span></td>
-                <td><span class="partial">Только активный</span></td>
+                <th scope="row">RTT и HTTP TTFB всех узлов</th>
+                <td><span class="yes">RTT + Clash API</span></td>
+                <td><span class="yes">RTT + Clash API</span></td>
+                <td><span class="partial">RTT + активный</span></td>
               </tr>
             </tbody>
           </table>
@@ -296,6 +296,10 @@
           ProtoGrid-core — сборка на базе sing-box с тегом <code>with_openvpn</code>.
           ProtoGrid Lite — отдельная облегчённая сборка: только VLESS/Reality по TCP, TUN и mixed.
           Xray-core не поддерживает OpenVPN, TUN, Hysteria2 и TUIC — для них переключите ядро.
+        </p>
+        <p class="table-note">
+          RTT — прямой TCP-handshake (медиана из 3 проб, DNS и туннель не входят).
+          HTTP TTFB — полный запрос через узел. Это разные метрики: их значения нельзя сравнивать.
         </p>
       </div>
     </section>

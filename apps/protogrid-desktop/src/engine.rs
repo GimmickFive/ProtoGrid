@@ -221,21 +221,70 @@ pub struct LogEntry {
     pub source: String,
     pub level: String,
     pub line: String,
-    pub route: Option<LogRoute>,
+    pub channel: LogChannel,
 }
 
-/// How a core log line routed its connection. Used by the journal to tell
-/// proxied traffic from direct bypasses at a glance.
+/// What kind of event a log line describes: a routing decision, a DNS lookup,
+/// a process match or a core/app lifecycle message. Shown in the "Канал"
+/// column and used by the channel filter in the journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogRoute {
-    Direct,
-    Proxy,
-    Block,
-    Tun,
+pub enum LogChannel {
     /// A connection that only entered through an HTTP/SOCKS inbound. The
     /// route is not known yet: it is decided later on the `outbound/...` line
     /// that shares the same connection id.
     Inbound,
+    Tun,
+    Proxy,
+    Direct,
+    Block,
+    Dns,
+    Process,
+    System,
+    App,
+}
+
+impl LogChannel {
+    /// Order of the filter chips in the journal.
+    pub const ALL: [LogChannel; 9] = [
+        LogChannel::Inbound,
+        LogChannel::Tun,
+        LogChannel::Proxy,
+        LogChannel::Direct,
+        LogChannel::Block,
+        LogChannel::Dns,
+        LogChannel::Process,
+        LogChannel::System,
+        LogChannel::App,
+    ];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            LogChannel::Inbound => "IN",
+            LogChannel::Tun => "TUN",
+            LogChannel::Proxy => "PROXY",
+            LogChannel::Direct => "DIRECT",
+            LogChannel::Block => "BLOCK",
+            LogChannel::Dns => "DNS",
+            LogChannel::Process => "PROC",
+            LogChannel::System => "SYS",
+            LogChannel::App => "APP",
+        }
+    }
+
+    /// Full explanation for the channel filter tooltip.
+    pub fn description(self) -> &'static str {
+        match self {
+            LogChannel::Inbound => "IN — входящее через mixed/SOCKS; маршрут ещё не выбран",
+            LogChannel::Tun => "TUN — входящее через TUN-интерфейс",
+            LogChannel::Proxy => "PROXY — исходящее через прокси",
+            LogChannel::Direct => "DIRECT — исходящее напрямую, мимо прокси",
+            LogChannel::Block => "BLOCK — соединение заблокировано правилом",
+            LogChannel::Dns => "DNS — резолв или кэш DNS",
+            LogChannel::Process => "PROC — определение процесса и решение роутера",
+            LogChannel::System => "SYS — старт, стоп, конфиг и служебные сообщения ядра",
+            LogChannel::App => "APP — сообщения самого ProtoGrid",
+        }
+    }
 }
 
 /// Bounded journal with a lazily materialized, shared view for the UI.
@@ -289,25 +338,40 @@ impl Journal {
     }
 }
 
-fn detect_log_route(line: &str) -> Option<LogRoute> {
+fn detect_log_channel(line: &str) -> LogChannel {
+    let line = strip_conn_prefix(line).trim_start();
+    if line.starts_with("dns:") {
+        return LogChannel::Dns;
+    }
+    if line.starts_with("router:") {
+        return LogChannel::Process;
+    }
     if let Some((_, rest)) = line.split_once("outbound/") {
         let proto = rest.split(['[', ' ', ':']).next().unwrap_or_default();
         return match proto {
-            "direct" => Some(LogRoute::Direct),
-            "block" => Some(LogRoute::Block),
-            "" => None,
-            _ => Some(LogRoute::Proxy),
+            "direct" => LogChannel::Direct,
+            "block" => LogChannel::Block,
+            "" => LogChannel::System,
+            _ => LogChannel::Proxy,
         };
     }
     if let Some((_, rest)) = line.split_once("inbound/") {
         let proto = rest.split(['[', ' ', ':']).next().unwrap_or_default();
-        return match proto {
-            "" => None,
-            "tun" => Some(LogRoute::Tun),
-            _ => Some(LogRoute::Inbound),
-        };
+        if proto.is_empty() {
+            return LogChannel::System;
+        }
+        // "started"/"listening" lines mention the inbound too, but they are
+        // lifecycle messages, not connections.
+        if line.contains("inbound connection") {
+            return if proto == "tun" {
+                LogChannel::Tun
+            } else {
+                LogChannel::Inbound
+            };
+        }
+        return LogChannel::System;
     }
-    None
+    LogChannel::System
 }
 
 /// Live traffic counters sampled once per second while a core is running.
@@ -342,7 +406,12 @@ pub struct Inner {
     pub error: Option<String>,
     pub warning: Option<String>,
     logs: Journal,
+    /// HTTP TTFB through the node (not RTT), measured via the local proxy or
+    /// the Clash API.
     pub pings: HashMap<String, Option<u32>>,
+    /// Direct TCP RTT to the configured endpoint, DNS excluded. Skipped while
+    /// TUN is active because the local stack would answer instantly.
+    pub rtts: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
     /// Server ids with a country lookup in flight, so add + refresh + bootstrap
     /// never query the same address twice.
@@ -418,6 +487,7 @@ impl Inner {
             error: self.error.clone(),
             warning: self.warning.clone(),
             pings: self.pings.clone(),
+            rtts: self.rtts.clone(),
             loading_pings: self.loading_pings.clone(),
             busy: self.busy.clone(),
             core_singbox: self.core_singbox.clone(),
@@ -443,7 +513,10 @@ pub struct Snapshot {
     pub status: ConnStatus,
     pub error: Option<String>,
     pub warning: Option<String>,
+    /// HTTP TTFB through the node (not RTT).
     pub pings: HashMap<String, Option<u32>>,
+    /// Direct TCP RTT to the configured endpoint.
+    pub rtts: HashMap<String, Option<u32>>,
     pub loading_pings: HashSet<String>,
     pub busy: HashSet<String>,
     pub core_singbox: Option<CoreInfo>,
@@ -462,6 +535,22 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Direct TCP RTT, if it has been measured.
+    pub fn rtt(&self, id: &str) -> Option<u32> {
+        self.rtts.get(id).copied().flatten()
+    }
+
+    /// HTTP TTFB through the node, if it has been measured.
+    pub fn delay(&self, id: &str) -> Option<u32> {
+        self.pings.get(id).copied().flatten()
+    }
+
+    /// RTT when available, otherwise the through-node TTFB. Used only for the
+    /// overview sparkline, where mixing the two is acceptable.
+    pub fn rtt_or_delay(&self, id: &str) -> Option<u32> {
+        self.rtt(id).or_else(|| self.delay(id))
+    }
+
     pub fn core(&self, kind: CoreKind) -> Option<&CoreInfo> {
         match kind {
             CoreKind::Singbox => self.core_singbox.as_ref(),
@@ -741,6 +830,7 @@ impl Engine {
             warning: None,
             logs: Journal::default(),
             pings: HashMap::new(),
+            rtts: HashMap::new(),
             loading_pings: HashSet::new(),
             country_lookups: HashSet::new(),
             busy: HashSet::new(),
@@ -1759,17 +1849,33 @@ impl Engine {
         );
     }
 
-    /// Creates a custom profile from the rules active right now.
-    pub fn create_custom_profile(&self) {
+    /// Creates a custom profile. With `copy_rules` it starts from the rules
+    /// active right now; otherwise it starts empty and keeps only the current
+    /// "если не совпало" action.
+    pub fn create_custom_profile(&self, copy_rules: bool) {
         let was_connected = self.lock().status == ConnStatus::Connected;
         let name;
         {
             let mut guard = self.lock();
+            // Persist whatever the active custom profile currently shows before
+            // switching away, so creating another profile cannot lose edits.
             guard.config.sync_custom_profile();
-            let index = guard.config.custom_profiles.len() + 1;
-            name = format!("{DEFAULT_PROFILE_NAME} {index}");
+            let mut index = guard.config.custom_profiles.len() + 1;
+            let mut candidate = format!("{DEFAULT_PROFILE_NAME} {index}");
+            while guard
+                .config
+                .custom_profiles
+                .iter()
+                .any(|profile| profile.name == candidate)
+            {
+                index += 1;
+                candidate = format!("{DEFAULT_PROFILE_NAME} {index}");
+            }
+            name = candidate;
             let mut profile = CustomProfile::new(name.clone());
-            profile.rules = guard.config.rules.clone();
+            if copy_rules {
+                profile.rules = guard.config.rules.clone();
+            }
             profile.final_action = guard.config.settings.final_action;
             let id = profile.id.clone();
             guard.config.custom_profiles.push(profile);
@@ -1784,7 +1890,14 @@ impl Engine {
         push_toast(
             &self.inner,
             &self.ctx,
-            &format!("Создан профиль «{name}»"),
+            &format!(
+                "Создан профиль «{name}»{}",
+                if copy_rules {
+                    ""
+                } else {
+                    " без правил"
+                }
+            ),
             ToastKind::Success,
         );
     }
@@ -1996,10 +2109,11 @@ impl Engine {
                 }));
             }
             for handle in handles {
-                if let Ok((id, latency)) = handle.await {
+                if let Ok(sample) = handle.await {
                     let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.pings.insert(id.clone(), latency);
-                    guard.loading_pings.remove(&id);
+                    guard.pings.insert(sample.id.clone(), sample.delay);
+                    guard.rtts.insert(sample.id.clone(), sample.rtt);
+                    guard.loading_pings.remove(&sample.id);
                     guard.touch();
                 }
             }
@@ -2040,10 +2154,11 @@ impl Engine {
         let inner = self.inner.clone();
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            let (id, latency) = ping_one(server, &settings, active_id.as_deref(), connected).await;
+            let sample = ping_one(server, &settings, active_id.as_deref(), connected).await;
             let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.pings.insert(id.clone(), latency);
-            guard.loading_pings.remove(&id);
+            guard.pings.insert(sample.id.clone(), sample.delay);
+            guard.rtts.insert(sample.id.clone(), sample.rtt);
+            guard.loading_pings.remove(&sample.id);
             guard.touch();
             drop(guard);
             ctx.request_repaint();
@@ -2070,7 +2185,7 @@ impl Engine {
         let inner = self.inner.clone();
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            match ping::http_proxy_test(settings.effective_http_port(), &settings.test_url, 9000)
+            match ping::http_proxy_ttfb(settings.effective_http_port(), &settings.test_url, 9000)
                 .await
             {
                 Ok(latency) => {
@@ -2088,7 +2203,7 @@ impl Engine {
                     push_toast(
                         &inner,
                         &ctx,
-                        format!("Задержка: {latency} мс"),
+                        format!("HTTP TTFB через узел: {latency} мс"),
                         ToastKind::Success,
                     );
                 }
@@ -2439,10 +2554,10 @@ pub fn push_log(
     if line.trim().is_empty() {
         return;
     }
-    let route = if source == "core" {
-        detect_log_route(&line)
+    let channel = if source == "core" {
+        detect_log_channel(&line)
     } else {
-        None
+        LogChannel::App
     };
     {
         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2457,7 +2572,7 @@ pub fn push_log(
             source: source.to_string(),
             level,
             line,
-            route,
+            channel,
         });
     }
     ctx.request_repaint();
@@ -4074,37 +4189,58 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
     Ok(())
 }
 
+struct PingSample {
+    id: String,
+    /// Direct TCP RTT, DNS excluded.
+    rtt: Option<u32>,
+    /// HTTP TTFB through the node (proxy or Clash API).
+    delay: Option<u32>,
+}
+
 async fn ping_one(
     server: Server,
     settings: &Settings,
     active_id: Option<&str>,
     connected: bool,
-) -> (String, Option<u32>) {
+) -> PingSample {
     let id = server.id.clone();
     let is_active = active_id == Some(id.as_str());
-    let mut latency = None;
-    if connected && is_active {
-        latency = ping::http_proxy_test(settings.effective_http_port(), &settings.test_url, 7000)
+    // With TUN up, a plain connect() is answered by the local sing-box stack
+    // before the remote dial even starts, so it would report ~0-1 ms for every
+    // server. Better no value than a fake one.
+    let rtt_allowed = !(connected && settings.tun_active());
+    let rtt = async {
+        if rtt_allowed {
+            ping::tcp_rtt(&server, 3000).await.ok()
+        } else {
+            None
+        }
+    };
+    let delay = async {
+        if !connected {
+            return None;
+        }
+        let mut value = None;
+        if is_active {
+            value = ping::http_proxy_ttfb(settings.effective_http_port(), &settings.test_url, 7000)
+                .await
+                .ok();
+        }
+        if value.is_none() && settings.core.is_singbox_like() {
+            value = ping::clash_delay(
+                settings.clash_api_port,
+                &settings.clash_api_secret,
+                &id,
+                &settings.test_url,
+                5000,
+            )
             .await
             .ok();
-    } else if connected && settings.core.is_singbox_like() {
-        latency = ping::clash_delay(
-            settings.clash_api_port,
-            &settings.clash_api_secret,
-            &id,
-            &settings.test_url,
-            5000,
-        )
-        .await
-        .ok();
-    }
-    if latency.is_none() && !(connected && settings.tun_active()) {
-        // With TUN up, a plain connect() is answered by the local sing-box
-        // stack before the remote dial even starts, so it would report ~0-1 ms
-        // for every server. Better no value than a fake one.
-        latency = ping::tcp_ping(&server, 4000).await.ok();
-    }
-    (id, latency)
+        }
+        value
+    };
+    let (rtt, delay) = tokio::join!(rtt, delay);
+    PingSample { id, rtt, delay }
 }
 
 /// Subscription refreshes also touch display-only fields (traffic counters in
@@ -4230,7 +4366,7 @@ mod tests {
             line: "FATAL start inbound/tun[tun-in]: configure tun interface: create adapter: \
                    Cannot create a file when that file already exists"
                 .into(),
-            route: None,
+            channel: LogChannel::System,
         });
         assert!(unexpected_exit_message("1", &logs).contains("TUN-адаптер"));
         assert_eq!(
@@ -4240,31 +4376,44 @@ mod tests {
     }
 
     #[test]
-    fn detects_log_routes() {
+    fn detects_log_channels() {
         assert_eq!(
-            detect_log_route("[1 0ms] outbound/vless[abc]: outbound connection to x:443"),
-            Some(LogRoute::Proxy)
+            detect_log_channel("[1 0ms] outbound/vless[abc]: outbound connection to x:443"),
+            LogChannel::Proxy
         );
         assert_eq!(
-            detect_log_route("[2 1ms] outbound/direct[direct]: outbound connection to x:443"),
-            Some(LogRoute::Direct)
+            detect_log_channel("[2 1ms] outbound/direct[direct]: outbound connection to x:443"),
+            LogChannel::Direct
         );
         assert_eq!(
-            detect_log_route("[3 0ms] outbound/block[block]: outbound connection to x:443"),
-            Some(LogRoute::Block)
+            detect_log_channel("[3 0ms] outbound/block[block]: outbound connection to x:443"),
+            LogChannel::Block
         );
         assert_eq!(
-            detect_log_route("inbound/tun[tun-in]: inbound connection to x:443"),
-            Some(LogRoute::Tun)
+            detect_log_channel("inbound/tun[tun-in]: inbound connection to x:443"),
+            LogChannel::Tun
         );
         assert_eq!(
-            detect_log_route("inbound/mixed[mixed-in]: inbound connection to x:443"),
-            Some(LogRoute::Inbound)
+            detect_log_channel("inbound/mixed[mixed-in]: inbound connection to x:443"),
+            LogChannel::Inbound
         );
         assert_eq!(
-            detect_log_route("router: found process path: C:\\chrome.exe"),
-            None
+            detect_log_channel("inbound/mixed[mixed-in]: started"),
+            LogChannel::System
         );
+        assert_eq!(
+            detect_log_channel("dns: cached A example.com"),
+            LogChannel::Dns
+        );
+        assert_eq!(
+            detect_log_channel("[7 0ms] dns: lookup succeeded for example.com"),
+            LogChannel::Dns
+        );
+        assert_eq!(
+            detect_log_channel("router: found process path: C:\\chrome.exe"),
+            LogChannel::Process
+        );
+        assert_eq!(detect_log_channel("sing-box started"), LogChannel::System);
     }
 
     #[test]
@@ -4304,7 +4453,7 @@ mod tests {
                 source: "core".into(),
                 level: "info".into(),
                 line: format!("line-{i}"),
-                route: None,
+                channel: LogChannel::System,
             });
         }
 
@@ -4320,7 +4469,7 @@ mod tests {
             source: "core".into(),
             level: "info".into(),
             line: "newest".into(),
-            route: None,
+            channel: LogChannel::System,
         });
         let third = journal.shared();
         assert!(!Arc::ptr_eq(&second, &third));

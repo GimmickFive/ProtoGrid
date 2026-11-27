@@ -13,7 +13,7 @@ use protogrid_core::model::{
 };
 
 use crate::engine::{
-    now_ms, strip_conn_prefix, ConnStatus, Engine, LogEntry, LogRoute, Snapshot, ToastEvent,
+    now_ms, strip_conn_prefix, ConnStatus, Engine, LogChannel, LogEntry, Snapshot, ToastEvent,
     ToastKind, TrafficStats,
 };
 use crate::installer::CoreFeatures;
@@ -80,7 +80,10 @@ pub enum SortMode {
     #[default]
     Server,
     Name,
+    /// Direct TCP RTT.
     Latency,
+    /// HTTP TTFB through the node.
+    Delay,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -135,6 +138,7 @@ pub enum ModalState {
     Import,
     Subscription,
     ProfileName,
+    NewProfile,
     Confirm,
     Help,
 }
@@ -165,6 +169,7 @@ pub struct View {
     pub sort: SortMode,
     pub logs_filter: String,
     pub log_level: LogFilter,
+    pub log_channel: Option<LogChannel>,
     pub logs_paused: bool,
     pub auto_scroll: bool,
     pub frozen_logs: Option<Vec<LogEntry>>,
@@ -206,6 +211,7 @@ impl View {
             sort: SortMode::Server,
             logs_filter: String::new(),
             log_level: LogFilter::All,
+            log_channel: None,
             logs_paused: false,
             auto_scroll: true,
             frozen_logs: None,
@@ -277,7 +283,7 @@ impl View {
         let stats: TrafficStats = snapshot.traffic;
         let ping = snapshot
             .active_server()
-            .and_then(|server| snapshot.pings.get(&server.id).copied().flatten())
+            .and_then(|server| snapshot.rtt_or_delay(&server.id))
             .unwrap_or(0) as f32;
         let point = TrafficPoint {
             down: stats.down_bps as f32,
@@ -1478,10 +1484,22 @@ fn server_group(snapshot: &Snapshot, server: &Server) -> String {
         .unwrap_or_else(|| "Вручную".into())
 }
 
-fn latency_color(p: &Palette, latency: u32) -> Color32 {
-    if latency < 70 {
+fn rtt_color(p: &Palette, rtt: u32) -> Color32 {
+    if rtt < 70 {
         p.green
-    } else if latency < 140 {
+    } else if rtt < 140 {
+        p.amber
+    } else {
+        p.red
+    }
+}
+
+/// HTTP TTFB includes the tunnel, TLS and the target site, so the RTT
+/// thresholds would paint almost every node red.
+fn ttfb_color(p: &Palette, ttfb: u32) -> Color32 {
+    if ttfb < 250 {
+        p.green
+    } else if ttfb < 600 {
         p.amber
     } else {
         p.red
@@ -1842,10 +1860,8 @@ fn sidebar(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, colla
                 .active_server()
                 .map(|server| {
                     let ping = snapshot
-                        .pings
-                        .get(&server.id)
-                        .copied()
-                        .flatten()
+                        .rtt(&server.id)
+                        .or_else(|| snapshot.delay(&server.id))
                         .map(|value| format!(" · {value} мс"))
                         .unwrap_or_default();
                     format!("{}{ping}", server.display_name())
@@ -2046,10 +2062,11 @@ fn topbar(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine
                 ui,
                 p,
                 egui_phosphor::regular::ACTIVITY,
-                "Пинг",
+                "Замер",
                 BtnKind::Ghost,
                 !snapshot.config.servers.is_empty(),
             )
+            .on_hover_text("TCP RTT напрямую + HTTP TTFB через узел")
             .clicked()
             {
                 engine.ping_all();
@@ -2220,7 +2237,8 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
     let (down_value, down_unit) = rate(down.down);
     let (up_value, up_unit) = rate(down.up);
     let active = snapshot.active_server();
-    let latency = active.and_then(|server| snapshot.pings.get(&server.id).copied().flatten());
+    let rtt = active.and_then(|server| snapshot.rtt(&server.id));
+    let delay = active.and_then(|server| snapshot.delay(&server.id));
     let api_core = snapshot.config.settings.core.is_singbox_like();
 
     card_grid(ui, 4, 14.0, |ui, index| match index {
@@ -2254,15 +2272,15 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
             ui,
             p,
             egui_phosphor::regular::ACTIVITY,
-            "Задержка",
-            &latency
-                .map(|ms| ms.to_string())
-                .unwrap_or_else(|| "—".into()),
+            "RTT",
+            &rtt.map(|ms| ms.to_string()).unwrap_or_else(|| "—".into()),
             "мс",
             active
                 .map(|server| truncate(&server.display_name(), 18))
                 .unwrap_or_else(|| "нет сервера".into()),
-            "потери —".into(),
+            delay
+                .map(|ms| format!("TTFB {ms} мс"))
+                .unwrap_or_else(|| "TTFB —".into()),
             &ping_values,
             p.green,
             p.green_soft,
@@ -2484,7 +2502,7 @@ fn speed_card(
                             ui,
                             p,
                             egui_phosphor::regular::ACTIVITY,
-                            "Проверить текущее соединение",
+                            "HTTP TTFB через текущее соединение",
                         )
                         .clicked()
                         {
@@ -2878,10 +2896,11 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             ui,
             p,
             egui_phosphor::regular::ACTIVITY,
-            "Проверить пинг",
+            "Проверить задержки",
             BtnKind::Ghost,
             !snapshot.config.servers.is_empty(),
         )
+        .on_hover_text("TCP RTT напрямую и HTTP TTFB через узел")
         .clicked()
         {
             engine.ping_all();
@@ -2946,7 +2965,8 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                 view.sort = match view.sort {
                                     SortMode::Server => SortMode::Name,
                                     SortMode::Name => SortMode::Latency,
-                                    SortMode::Latency => SortMode::Server,
+                                    SortMode::Latency => SortMode::Delay,
+                                    SortMode::Delay => SortMode::Server,
                                 };
                             }
                         });
@@ -3024,12 +3044,13 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                 }
                 SortMode::Latency => visible.sort_by_key(|server| {
                     snapshot
-                        .pings
-                        .get(&server.id)
-                        .copied()
-                        .flatten()
+                        .rtt(&server.id)
+                        .or_else(|| snapshot.delay(&server.id))
                         .unwrap_or(u32::MAX)
                 }),
+                SortMode::Delay => {
+                    visible.sort_by_key(|server| snapshot.delay(&server.id).unwrap_or(u32::MAX))
+                }
             }
             if visible.is_empty() {
                 ui.add_space(10.0);
@@ -3137,7 +3158,8 @@ struct TableWidths {
     server: f32,
     protocol: f32,
     group: f32,
-    latency: f32,
+    rtt: f32,
+    ttfb: f32,
     speed: f32,
     status: f32,
 }
@@ -3145,20 +3167,23 @@ struct TableWidths {
 impl TableWidths {
     fn new(available: f32) -> Self {
         let index = 36.0;
-        let protocol = 112.0;
-        let group = 120.0;
-        let latency = 96.0;
-        let speed = 90.0;
+        let protocol = 100.0;
+        let group = 96.0;
+        let rtt = 58.0;
+        let ttfb = 74.0;
+        let speed = 84.0;
         // Status owns the right edge (like the reference); row actions sit to
         // its left inside the same column.
         let status = 196.0;
-        let server = (available - index - protocol - group - latency - speed - status).max(200.0);
+        let server =
+            (available - index - protocol - group - rtt - ttfb - speed - status).max(200.0);
         Self {
             index,
             server,
             protocol,
             group,
-            latency,
+            rtt,
+            ttfb,
             speed,
             status,
         }
@@ -3226,36 +3251,121 @@ fn table_header(ui: &mut Ui, p: &Palette, view: &mut View, widths: &TableWidths)
     }
     cell(&mut child, widths.protocol, "Протокол", false);
     cell(&mut child, widths.group, "Группа", false);
-    let latency_label = if view.sort == SortMode::Latency {
-        "Задержка ▴"
+    let rtt_label = if view.sort == SortMode::Latency {
+        "RTT ▴"
     } else {
-        "Задержка"
+        "RTT"
     };
-    let response = child.allocate_ui_with_layout(
-        Vec2::new(widths.latency, 38.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(widths.latency);
-            ui.label(RichText::new(latency_label).size(10.0).color(
-                if view.sort == SortMode::Latency {
-                    p.accent_2
-                } else {
-                    p.faint
-                },
-            ));
-        },
-    );
-    if response.response.interact(Sense::click()).clicked() {
+    let response = child
+        .allocate_ui_with_layout(
+            Vec2::new(widths.rtt, 38.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(widths.rtt);
+                ui.label(RichText::new(rtt_label).size(10.0).color(
+                    if view.sort == SortMode::Latency {
+                        p.accent_2
+                    } else {
+                        p.faint
+                    },
+                ));
+            },
+        )
+        .response
+        .on_hover_text(
+            "TCP RTT напрямую до адреса сервера: DNS и туннель не входят. \
+             При включённом TUN не измеряется; за CDN это RTT до edge.",
+        );
+    if response.interact(Sense::click()).clicked() {
         view.sort = if view.sort == SortMode::Latency {
             SortMode::Server
         } else {
             SortMode::Latency
         };
     }
+    let ttfb_label = if view.sort == SortMode::Delay {
+        "TTFB ▴"
+    } else {
+        "TTFB"
+    };
+    let response = child
+        .allocate_ui_with_layout(
+            Vec2::new(widths.ttfb, 38.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(widths.ttfb);
+                ui.label(RichText::new(ttfb_label).size(10.0).color(
+                    if view.sort == SortMode::Delay {
+                        p.accent_2
+                    } else {
+                        p.faint
+                    },
+                ));
+            },
+        )
+        .response
+        .on_hover_text(
+            "HTTP TTFB через узел: полный запрос к URL проверки, а не RTT. \
+             Включает установку туннеля, TLS и ответ целевого сайта.",
+        );
+    if response.interact(Sense::click()).clicked() {
+        view.sort = if view.sort == SortMode::Delay {
+            SortMode::Server
+        } else {
+            SortMode::Delay
+        };
+    }
     cell(&mut child, widths.speed, "Скорость", false);
     cell(&mut child, widths.status, "Статус", true);
     let (line, _) = ui.allocate_exact_size(Vec2::new(rect.width(), 1.0), Sense::hover());
     ui.painter().rect_filled(line, 0, p.line);
+}
+
+fn metric_cell(
+    ui: &mut Ui,
+    p: &Palette,
+    width: f32,
+    value: Option<u32>,
+    loading: bool,
+    via_node: bool,
+    empty_hint: &str,
+) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 57.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            if loading && value.is_none() {
+                ui.spinner();
+            } else if let Some(value) = value {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let color = if via_node {
+                        ttfb_color(p, value)
+                    } else {
+                        rtt_color(p, value)
+                    };
+                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 3.0, color);
+                    ui.label(
+                        RichText::new(format!("{value}"))
+                            .size(12.0)
+                            .color(p.muted)
+                            .family(FontFamily::Monospace),
+                    );
+                    ui.label(RichText::new("мс").size(9.5).color(p.faint));
+                });
+            } else {
+                ui.label(
+                    RichText::new("—")
+                        .size(11.0)
+                        .color(p.faint)
+                        .family(FontFamily::Monospace),
+                )
+                .on_hover_text(empty_hint);
+            }
+        },
+    );
 }
 
 fn server_row(
@@ -3433,36 +3543,23 @@ fn server_row(
         },
     );
 
-    child.allocate_ui_with_layout(
-        Vec2::new(widths.latency, 57.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(widths.latency);
-            if snapshot.loading_pings.contains(&server.id) {
-                ui.spinner();
-            } else if let Some(Some(value)) = snapshot.pings.get(&server.id) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let color = latency_color(p, *value);
-                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
-                    ui.painter().circle_filled(dot_rect.center(), 3.0, color);
-                    ui.label(
-                        RichText::new(format!("{value}"))
-                            .size(12.0)
-                            .color(p.muted)
-                            .family(FontFamily::Monospace),
-                    );
-                    ui.label(RichText::new("мс").size(9.5).color(p.faint));
-                });
-            } else {
-                ui.label(
-                    RichText::new("— мс")
-                        .size(11.0)
-                        .color(p.faint)
-                        .family(FontFamily::Monospace),
-                );
-            }
-        },
+    metric_cell(
+        &mut child,
+        p,
+        widths.rtt,
+        snapshot.rtt(&server.id),
+        snapshot.loading_pings.contains(&server.id),
+        false,
+        "RTT не измеряется при включённом TUN, а для UDP-сервера без TCP-порта его нет.",
+    );
+    metric_cell(
+        &mut child,
+        p,
+        widths.ttfb,
+        snapshot.delay(&server.id),
+        snapshot.loading_pings.contains(&server.id),
+        true,
+        "HTTP TTFB через узел появляется после подключения.",
     );
 
     child.allocate_ui_with_layout(
@@ -3535,7 +3632,10 @@ fn server_row(
                 view.server_alpn = server.alpn.join(", ");
                 view.modal = Some(ModalState::Server);
             }
-            if small_ghost(ui, p, egui_phosphor::regular::ACTIVITY, "Пинг").clicked() {
+            if small_ghost(ui, p, egui_phosphor::regular::ACTIVITY, "Замер")
+                .on_hover_text("TCP RTT напрямую и HTTP TTFB через узел")
+                .clicked()
+            {
                 engine.ping_server(&server.id);
             }
         },
@@ -3993,7 +4093,7 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
             let profile = &profiles[index - cards.len()];
             custom_profile_card(ui, p, profile, snapshot, engine);
         } else {
-            new_profile_card(ui, p, engine);
+            new_profile_card(ui, p, view);
         }
     });
     ui.add_space(14.0);
@@ -4100,16 +4200,16 @@ fn routing_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
                                     ui,
                                     p,
                                     egui_phosphor::regular::COPY_SIMPLE,
-                                    "Создать свой профиль",
+                                    "Создать свой профиль…",
                                     BtnKind::Outline,
                                 )
                                 .on_hover_text(
-                                    "Скопирует правила пресета в новый свой профиль — дальше их \
-                                     можно менять, не трогая пресет",
+                                    "Откроет выбор: скопировать правила выбранного профиля \
+                                     или начать с пустого",
                                 )
                                 .clicked()
                                 {
-                                    engine.create_custom_profile();
+                                    view.modal = Some(ModalState::NewProfile);
                                 }
                             });
                         });
@@ -4285,8 +4385,9 @@ fn routing_cards() -> [PresetCard; 3] {
             title: "Жизнь в РФ",
             text: "Сайты РФ и локальная сеть — напрямую, реклама — блок, остальное — через прокси"
                 .into(),
-            hint: "7 правил, первое совпадение выигрывает:\n\
+            hint: "8 правил, первое совпадение выигрывает:\n\
                    • приватные IP и локальные домены → напрямую\n\
+                   • Cloudflare → через прокси\n\
                    • geoip ru и category-ru → напрямую\n\
                    • category-ads-all → блок\n\
                    • Discord.exe и Telegram.exe → через прокси (нужен TUN)\n\
@@ -4438,7 +4539,7 @@ fn custom_profile_card(
 }
 
 /// Dashed-looking "create profile" card, sized like the preset cards.
-fn new_profile_card(ui: &mut Ui, p: &Palette, engine: &Engine) {
+fn new_profile_card(ui: &mut Ui, p: &Palette, view: &mut View) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 82.0), Sense::click());
     let radius = CornerRadius::same(12);
@@ -4483,7 +4584,7 @@ fn new_profile_card(ui: &mut Ui, p: &Palette, engine: &Engine) {
             );
             ui.add(
                 egui::Label::new(
-                    RichText::new("Копия текущих правил")
+                    RichText::new("Копия правил или пустой")
                         .size(11.0)
                         .color(p.faint),
                 )
@@ -4493,11 +4594,10 @@ fn new_profile_card(ui: &mut Ui, p: &Palette, engine: &Engine) {
         },
     );
     if response.clicked() {
-        engine.create_custom_profile();
+        view.modal = Some(ModalState::NewProfile);
     }
-    response.on_hover_text(
-        "Создаст ещё один профиль с копией текущих правил. Название можно изменить.",
-    );
+    response
+        .on_hover_text("Откроет выбор: скопировать текущие правила или начать с пустого профиля.");
 }
 
 fn rules_count_label(count: usize) -> String {
@@ -4578,6 +4678,19 @@ fn preset_card(ui: &mut Ui, p: &Palette, card: &PresetCard, snapshot: &Snapshot,
     }
 }
 
+fn rule_display_name(rule: &RoutingRule) -> String {
+    let name = rule.name.trim();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    let value = rule.value.trim();
+    if value.is_empty() {
+        return "Без названия".into();
+    }
+    let first = value.split(',').next().unwrap_or(value).trim();
+    format!("{}: {}", rule_kind_label(rule.kind), truncate(first, 26))
+}
+
 fn rules_header(ui: &mut Ui, p: &Palette) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
     ui.painter().rect_filled(rect, 0, p.panel_2);
@@ -4594,8 +4707,9 @@ fn rules_header(ui: &mut Ui, p: &Palette) {
     child.spacing_mut().item_spacing.x = 0.0;
     let font = FontId::new(10.0, FontFamily::Name("Medium".into()));
     for (width, text) in [
+        (160.0, "НАЗВАНИЕ"),
         (110.0, "ТИП"),
-        ((inner_width - 426.0).max(160.0), "ЗНАЧЕНИЕ"),
+        ((inner_width - 586.0).max(160.0), "ЗНАЧЕНИЕ"),
         (120.0, "ДЕЙСТВИЕ"),
         (80.0, "ВКЛЮЧЕНО"),
         (116.0, ""),
@@ -4657,6 +4771,20 @@ fn rule_row(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine, row: &Ru
     );
     child.spacing_mut().item_spacing.x = 0.0;
     child.allocate_ui_with_layout(
+        Vec2::new(160.0, 50.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(160.0);
+            let title = rule_display_name(rule);
+            ui.add(
+                egui::Label::new(theme::semibold(&title, 11.5).color(p.text))
+                    .truncate()
+                    .selectable(false),
+            )
+            .on_hover_text(title);
+        },
+    );
+    child.allocate_ui_with_layout(
         Vec2::new(110.0, 50.0),
         Layout::left_to_right(Align::Center),
         |ui| {
@@ -4675,7 +4803,7 @@ fn rule_row(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine, row: &Ru
         },
     );
     child.allocate_ui_with_layout(
-        Vec2::new((inner_width - 426.0).max(160.0), 50.0),
+        Vec2::new((inner_width - 586.0).max(160.0), 50.0),
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.set_min_width(ui.available_width());
@@ -4734,7 +4862,10 @@ fn rule_row(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine, row: &Ru
                 {
                     view.confirm = Some(Confirm {
                         title: "Удалить правило?".into(),
-                        message: format!("Правило «{}» перестанет применяться.", rule.name),
+                        message: format!(
+                            "Правило «{}» перестанет применяться.",
+                            rule_display_name(rule)
+                        ),
                         label: "Удалить".into(),
                         danger: true,
                         action: ConfirmAction::DeleteRule(rule.id.clone()),
@@ -5114,6 +5245,12 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
     let filtered: Vec<&LogEntry> = logs
         .iter()
         .filter(|entry| {
+            if view
+                .log_channel
+                .is_some_and(|channel| entry.channel != channel)
+            {
+                return false;
+            }
             let level_ok = match view.log_level {
                 LogFilter::All => true,
                 LogFilter::Debug => entry.level == "debug" || entry.level == "trace",
@@ -5128,23 +5265,40 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                 || entry.line.to_lowercase().contains(&query)
                 || entry.level.to_lowercase().contains(&query)
                 || entry.source.to_lowercase().contains(&query)
+                || entry.channel.tag().to_lowercase().contains(&query)
         })
         .collect();
     let direct = filtered
         .iter()
-        .filter(|entry| entry.route == Some(LogRoute::Direct))
+        .filter(|entry| entry.channel == LogChannel::Direct)
         .count();
     let proxied = filtered
         .iter()
-        .filter(|entry| entry.route == Some(LogRoute::Proxy))
+        .filter(|entry| entry.channel == LogChannel::Proxy)
         .count();
     let tun = filtered
         .iter()
-        .filter(|entry| entry.route == Some(LogRoute::Tun))
+        .filter(|entry| entry.channel == LogChannel::Tun)
         .count();
     let inbound = filtered
         .iter()
-        .filter(|entry| entry.route == Some(LogRoute::Inbound))
+        .filter(|entry| entry.channel == LogChannel::Inbound)
+        .count();
+    let dns = filtered
+        .iter()
+        .filter(|entry| entry.channel == LogChannel::Dns)
+        .count();
+    let process = filtered
+        .iter()
+        .filter(|entry| entry.channel == LogChannel::Process)
+        .count();
+    let system = filtered
+        .iter()
+        .filter(|entry| entry.channel == LogChannel::System)
+        .count();
+    let app = filtered
+        .iter()
+        .filter(|entry| entry.channel == LogChannel::App)
         .count();
 
     // One measured character cell drives every journal column, so the header
@@ -5185,6 +5339,54 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                             ui.label(RichText::new("Автопрокрутка").size(11.0).color(p.muted));
                         });
                     });
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        ui.label(
+                            RichText::new("КАНАЛ")
+                                .size(9.0)
+                                .color(p.faint)
+                                .family(FontFamily::Monospace),
+                        );
+                        ui.add_space(2.0);
+                        if log_chip(ui, p, "Все", view.log_channel.is_none())
+                            .on_hover_text("Показывать все каналы")
+                            .clicked()
+                        {
+                            view.log_channel = None;
+                        }
+                        for channel in LogChannel::ALL {
+                            let selected = view.log_channel == Some(channel);
+                            if log_chip(ui, p, channel.tag(), selected)
+                                .on_hover_text(channel.description())
+                                .clicked()
+                            {
+                                view.log_channel = if selected { None } else { Some(channel) };
+                            }
+                        }
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!("{} Обозначения", egui_phosphor::regular::INFO))
+                                .size(10.0)
+                                .color(p.faint),
+                        )
+                        .on_hover_text(
+                            LogChannel::ALL
+                                .iter()
+                                .map(|channel| channel.description())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+                    });
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(
+                            "IN вход · TUN туннель · PROXY/DIRECT/BLOCK маршрут · \
+                             DNS резолв · PROC процесс · SYS ядро · APP приложение",
+                        )
+                        .size(9.5)
+                        .color(p.faint),
+                    );
                 });
             let (line, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
@@ -5246,6 +5448,18 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
             if inbound > 0 {
                 summary.push_str(&format!(" · входящие {inbound}"));
             }
+            if dns > 0 {
+                summary.push_str(&format!(" · dns {dns}"));
+            }
+            if process > 0 {
+                summary.push_str(&format!(" · proc {process}"));
+            }
+            if system > 0 {
+                summary.push_str(&format!(" · sys {system}"));
+            }
+            if app > 0 {
+                summary.push_str(&format!(" · app {app}"));
+            }
             Frame::new()
                 .inner_margin(Margin::symmetric(16, 8))
                 .show(ui, |ui| {
@@ -5260,14 +5474,15 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "фильтр: {}",
+                                    "фильтр: {} · канал: {}",
                                     match view.log_level {
                                         LogFilter::All => "все",
                                         LogFilter::Debug => "отладка",
                                         LogFilter::Info => "инфо",
                                         LogFilter::Warn => "внимание",
                                         LogFilter::Error => "ошибки",
-                                    }
+                                    },
+                                    view.log_channel.map(LogChannel::tag).unwrap_or("все")
                                 ))
                                 .size(10.0)
                                 .color(p.faint)
@@ -5335,7 +5550,7 @@ impl LogGrid {
         self.char_w * 7.0
     }
 
-    fn route_w(&self) -> f32 {
+    fn channel_w(&self) -> f32 {
         self.char_w * 7.0
     }
 }
@@ -5359,15 +5574,15 @@ fn log_header(ui: &mut Ui, p: &Palette, grid: &LogGrid) {
     let x_time = rect.left() + LOG_H_PAD;
     let x_level = x_time + grid.time_w() + grid.gap;
     let x_source = x_level + grid.level_w() + grid.gap;
-    let x_route = x_source + grid.source_w() + grid.gap;
-    let x_message = x_route + grid.route_w() + grid.gap;
+    let x_channel = x_source + grid.source_w() + grid.gap;
+    let x_message = x_channel + grid.channel_w() + grid.gap;
     let font = FontId::new(9.0, FontFamily::Monospace);
     let y = rect.center().y;
     for (x, label) in [
         (x_time, "ВРЕМЯ"),
         (x_level, "УРОВЕНЬ"),
         (x_source, "ИСТОЧНИК"),
-        (x_route, "МАРШРУТ"),
+        (x_channel, "КАНАЛ"),
         (x_message, "СООБЩЕНИЕ"),
     ] {
         painter.text(
@@ -5388,7 +5603,7 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry, grid: &LogGrid, index: u
     let painter = ui.painter().clone();
 
     // Faint zebra striping: enough to follow a line across the journal, not
-    // enough to compete with the route tint or the coloured tokens.
+    // enough to compete with the channel tint or the coloured tokens.
     if index % 2 == 1 {
         painter.rect_filled(
             rect,
@@ -5400,10 +5615,10 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry, grid: &LogGrid, index: u
             },
         );
     }
-    let tint = match entry.route {
-        Some(LogRoute::Direct) => Some(p.amber_soft),
-        Some(LogRoute::Block) => Some(p.red_soft),
-        Some(LogRoute::Tun) => Some(p.cyan_soft),
+    let tint = match entry.channel {
+        LogChannel::Direct => Some(p.amber_soft),
+        LogChannel::Block => Some(p.red_soft),
+        LogChannel::Tun => Some(p.cyan_soft),
         _ => None,
     };
     if let Some(color) = tint {
@@ -5416,8 +5631,8 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry, grid: &LogGrid, index: u
     let x_time = rect.left() + LOG_H_PAD;
     let x_level = x_time + grid.time_w() + grid.gap;
     let x_source = x_level + grid.level_w() + grid.gap;
-    let x_route = x_source + grid.source_w() + grid.gap;
-    let x_message = x_route + grid.route_w() + grid.gap;
+    let x_channel = x_source + grid.source_w() + grid.gap;
+    let x_message = x_channel + grid.channel_w() + grid.gap;
     let y = rect.center().y;
     let mono = FontId::monospace(10.5);
 
@@ -5454,20 +5669,19 @@ fn log_line(ui: &mut Ui, p: &Palette, entry: &LogEntry, grid: &LogGrid, index: u
         p.faint,
     );
 
-    if let Some((tag, fg, bg)) = log_route_badge(p, entry.route) {
-        let route_rect = Rect::from_center_size(
-            egui::pos2(x_route + grid.route_w() * 0.5, y),
-            Vec2::new(grid.route_w() - 4.0, 16.0),
-        );
-        painter.rect_filled(route_rect, CornerRadius::same(4), bg);
-        painter.text(
-            route_rect.center(),
-            Align2::CENTER_CENTER,
-            tag,
-            FontId::new(9.0, FontFamily::Name("MonoMedium".into())),
-            fg,
-        );
-    }
+    let (tag, fg, bg) = log_channel_badge(p, entry.channel);
+    let channel_rect = Rect::from_center_size(
+        egui::pos2(x_channel + grid.channel_w() * 0.5, y),
+        Vec2::new(grid.channel_w() - 4.0, 16.0),
+    );
+    painter.rect_filled(channel_rect, CornerRadius::same(4), bg);
+    painter.text(
+        channel_rect.center(),
+        Align2::CENTER_CENTER,
+        tag,
+        FontId::new(9.0, FontFamily::Name("MonoMedium".into())),
+        fg,
+    );
 
     let message_left =
         x_message.min((rect.right() - LOG_H_PAD - 48.0).max(x_message - grid.char_w * 4.0));
@@ -5506,19 +5720,21 @@ fn level_soft_color(p: &Palette, level: &str) -> Color32 {
     }
 }
 
-/// The route chip uses the same accent colours as the routing pages.
-fn log_route_badge(
-    p: &Palette,
-    route: Option<LogRoute>,
-) -> Option<(&'static str, Color32, Color32)> {
-    match route? {
-        LogRoute::Direct => Some(("DIRECT", p.amber, p.amber_soft)),
-        LogRoute::Proxy => Some(("PROXY", p.green, p.green_soft)),
-        LogRoute::Block => Some(("BLOCK", p.red, p.red_soft)),
-        LogRoute::Tun => Some(("TUN", p.cyan, p.cyan_soft)),
+/// Channel chip colours. Routing decisions reuse the routing-page palette;
+/// DNS/PROC/SYS/APP get their own tints so the journal can be scanned quickly.
+fn log_channel_badge(p: &Palette, channel: LogChannel) -> (&'static str, Color32, Color32) {
+    match channel {
+        LogChannel::Direct => ("DIRECT", p.amber, p.amber_soft),
+        LogChannel::Proxy => ("PROXY", p.green, p.green_soft),
+        LogChannel::Block => ("BLOCK", p.red, p.red_soft),
+        LogChannel::Tun => ("TUN", p.cyan, p.cyan_soft),
         // Inbound lines have no route yet, so the chip just says where the
         // connection came from instead of leaving the column blank.
-        LogRoute::Inbound => Some(("IN", p.muted, p.panel_3)),
+        LogChannel::Inbound => ("IN", p.muted, p.panel_3),
+        LogChannel::Dns => ("DNS", p.accent_2, p.accent_soft),
+        LogChannel::Process => ("PROC", p.violet, p.violet_soft),
+        LogChannel::System => ("SYS", p.faint, p.panel_3),
+        LogChannel::App => ("APP", p.muted, p.panel_3),
     }
 }
 
@@ -6415,7 +6631,7 @@ fn settings_dns(
                 ui,
                 p,
                 "Автовыбор сервера",
-                "urltest: выбирать узел с минимальной задержкой",
+                "urltest: выбирать узел с минимальным HTTP TTFB",
                 |ui| {
                     switch(ui, p, &mut draft.auto_select);
                 },
@@ -6424,7 +6640,7 @@ fn settings_dns(
                 ui,
                 p,
                 "URL проверки",
-                "Используется для пинга через прокси",
+                "HTTP TTFB через узел (не RTT); RTT измеряется TCP напрямую",
                 |ui| {
                     plain_input(ui, p, &mut draft.test_url, INPUT_W);
                 },
@@ -7079,6 +7295,8 @@ fn info_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, _en
     info_transport_section(ui, p);
     ui.add_space(14.0);
     info_tun_section(ui, p);
+    ui.add_space(14.0);
+    info_sysproxy_section(ui, p);
     ui.add_space(14.0);
     info_choice_section(ui, p, snapshot);
     ui.add_space(20.0);
@@ -7949,6 +8167,92 @@ fn info_tun_section(ui: &mut Ui, p: &Palette) {
     );
 }
 
+fn info_sysproxy_section(ui: &mut Ui, p: &Palette) {
+    settings_card(
+        ui,
+        p,
+        "Системный прокси на разных ОС",
+        "Где он есть, что именно настраивает и какие программы его замечают.",
+        |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "Системный прокси — это запись в настройках ОС: «HTTP/HTTPS и SOCKS \
+                             доступны на 127.0.0.1». Сам по себе он трафик не перехватывает — \
+                             приложение должно уметь читать эти настройки.",
+                        )
+                        .size(10.5)
+                        .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    card_grid(ui, 2, 12.0, |ui, index| match index {
+                        0 => info_os_tile(
+                            ui,
+                            p,
+                            egui_phosphor::regular::WINDOWS_LOGO,
+                            "Windows",
+                            "Реестр HKCU и WinINet: HTTP/HTTPS/SOCKS указывают на локальные \
+                             порты. Работает в Edge, Chrome и WinINet/WinHTTP-приложениях; \
+                             игры и консольные утилиты часто его игнорируют.",
+                            p.accent,
+                        ),
+                        1 => info_os_tile(
+                            ui,
+                            p,
+                            egui_phosphor::regular::LINUX_LOGO,
+                            "Linux",
+                            "GNOME — gsettings (org.gnome.system.proxy), KDE — kioslaverc. \
+                             Покрывает GTK/libproxy и KDE/KIO, включая Chromium. Без GNOME/KDE \
+                             (i3, Hyprland, WSL) автонастройки нет — укажите прокси вручную.",
+                            p.amber,
+                        ),
+                        2 => info_os_tile(
+                            ui,
+                            p,
+                            egui_phosphor::regular::APPLE_LOGO,
+                            "macOS",
+                            "networksetup для всех сетевых сервисов: web, secure web и SOCKS \
+                             proxy на 127.0.0.1. Используют Safari, Chrome и приложения на \
+                             CFNetwork/URLSession. Старые ручные значения не восстанавливаются.",
+                            p.cyan,
+                        ),
+                        _ => info_os_tile(
+                            ui,
+                            p,
+                            egui_phosphor::regular::ANDROID_LOGO,
+                            "Android",
+                            "В Android-клиенте системного прокси нет: VpnService + TUN (gvisor) \
+                             забирает трафик целиком. Настройки Wi-Fi proxy приложение не меняет.",
+                            p.green,
+                        ),
+                    });
+                    ui.add_space(10.0);
+                    Frame::new()
+                        .fill(p.accent_soft)
+                        .stroke(Stroke::new(1.0, p.accent_line))
+                        .corner_radius(8)
+                        .inner_margin(Margin::symmetric(12, 9))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(
+                                RichText::new(
+                                    "Важно: curl, git, apt, многие игры и часть Electron/Java-\
+                                     приложений системный прокси не читают и идут напрямую. \
+                                     Переменные http_proxy/https_proxy приложение не выставляет. \
+                                     Для перехвата всего трафика нужен TUN.",
+                                )
+                                .size(10.0)
+                                .color(p.accent_2),
+                            );
+                        });
+                });
+        },
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn info_mode_tile(
     ui: &mut Ui,
@@ -8182,6 +8486,9 @@ pub fn modals(
                     Some(ModalState::Subscription) => subscription_modal(ui, p, view, engine),
                     Some(ModalState::Rule) => rule_modal(ui, p, view, snapshot, engine),
                     Some(ModalState::ProfileName) => profile_name_modal(ui, p, view, engine),
+                    Some(ModalState::NewProfile) => {
+                        new_profile_modal(ui, p, view, snapshot, engine)
+                    }
                     Some(ModalState::Confirm) => confirm_modal(ui, p, view, engine),
                     Some(ModalState::Help) => help_modal(ui, p, view),
                     None => {}
@@ -8549,7 +8856,9 @@ fn rule_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, en
         ui,
         p,
         "Название",
-        TextEdit::singleline(&mut rule.name).desired_width(f32::INFINITY),
+        TextEdit::singleline(&mut rule.name)
+            .hint_text("Например: «Блокировка рекламы»")
+            .desired_width(f32::INFINITY),
     );
     ui.add_space(8.0);
     ui.columns(2, |columns| {
@@ -8689,6 +8998,114 @@ fn profile_name_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine
         });
     });
     view.profile_draft = Some((id, name));
+}
+
+fn profile_choice(
+    ui: &mut Ui,
+    p: &Palette,
+    icon: &str,
+    title: &str,
+    text: &str,
+    color: Color32,
+    icon_bg: Color32,
+    choice: &mut Option<bool>,
+    value: bool,
+) {
+    let response = Frame::new()
+        .fill(p.panel_2)
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                icon_box(ui, p, icon, color, icon_bg, 22.0);
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.label(theme::semibold(title, 12.5));
+                    ui.label(RichText::new(text).size(10.5).color(p.muted));
+                });
+            });
+        })
+        .response
+        .interact(Sense::click());
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            response.rect,
+            CornerRadius::same(10),
+            Stroke::new(1.0, p.accent_line),
+            egui::StrokeKind::Inside,
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.clicked() {
+        *choice = Some(value);
+    }
+}
+
+fn new_profile_modal(
+    ui: &mut Ui,
+    p: &Palette,
+    view: &mut View,
+    snapshot: &Snapshot,
+    engine: &Engine,
+) {
+    let source = snapshot
+        .config
+        .active_custom_profile()
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| active_preset(snapshot).label().to_string());
+    let count = rules_count_label(snapshot.config.rules.len());
+    modal_title(
+        ui,
+        p,
+        "Новый профиль",
+        &format!("Источник: «{source}» — {count}. С чего начать?"),
+    );
+    let mut choice = None;
+    profile_choice(
+        ui,
+        p,
+        egui_phosphor::regular::COPY_SIMPLE,
+        "Скопировать текущие правила",
+        "Тот же набор правил и то же действие «если не совпало». Новый профиль можно менять, не трогая исходный.",
+        p.accent,
+        p.accent_soft,
+        &mut choice,
+        true,
+    );
+    ui.add_space(8.0);
+    profile_choice(
+        ui,
+        p,
+        egui_phosphor::regular::PLUS,
+        "Начать с пустого",
+        "Ноль правил. Действие «если не совпало» останется текущим; правила добавите вручную.",
+        p.cyan,
+        p.cyan_soft,
+        &mut choice,
+        false,
+    );
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Отмена").size(11.5))
+                        .fill(Color32::TRANSPARENT)
+                        .corner_radius(8)
+                        .min_size(Vec2::new(0.0, 32.0)),
+                )
+                .clicked()
+            {
+                view.modal = None;
+            }
+        });
+    });
+    if let Some(copy_rules) = choice {
+        engine.create_custom_profile(copy_rules);
+        view.modal = None;
+    }
 }
 
 fn server_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
