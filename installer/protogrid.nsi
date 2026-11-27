@@ -3,7 +3,7 @@ Unicode true
 !include "x64.nsh"
 
 !define APP_NAME "ProtoGrid"
-!define APP_VERSION "0.4.6"
+!define APP_VERSION "0.4.7"
 !define APP_EXE "ProtoGrid.exe"
 !define CORE_EXE "protogrid-core.exe"
 !define CORE_LITE_EXE "protogrid-core-lite.exe"
@@ -18,7 +18,7 @@ InstallDirRegKey HKCU "Software\ProtoGrid" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.4.6.0"
+VIProductVersion "0.4.7.0"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "FileDescription" "${APP_NAME} setup"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"

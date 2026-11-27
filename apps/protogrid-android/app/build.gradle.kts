@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.4.6"
+val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.4.7"
 val versionCodeEnv = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
 
 // Release builds are arm64-only. For an x86_64 emulator run:
@@ -148,6 +148,8 @@ dependencies {
     add("liteImplementation", files("libs/libbox-lite.aar"))
 
     implementation("androidx.core:core-ktx:1.15.0")
+    // PackageManagerCompat.getUnusedAppRestrictionsStatus returns ListenableFuture.
+    implementation("com.google.guava:listenablefuture:1.0")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 

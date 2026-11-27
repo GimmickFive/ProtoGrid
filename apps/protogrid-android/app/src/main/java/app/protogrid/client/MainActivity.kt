@@ -87,6 +87,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import androidx.core.content.PackageManagerCompat
+import androidx.core.content.UnusedAppRestrictionsConstants
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -216,6 +219,8 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     }
     var showBatteryHelp by remember { mutableStateOf(false) }
     var showAutoStartHelp by remember { mutableStateOf(false) }
+    var awaitAutoStartCheck by remember { mutableStateOf(false) }
+    var showAutoStartCheck by remember { mutableStateOf(false) }
 
     // The exemption can also be changed from the system settings app, so
     // re-read it every time the UI comes back to the foreground. Use the
@@ -226,6 +231,10 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME) {
                 batteryUnrestricted = BackgroundAccess.isBatteryUnrestricted(context)
+                if (awaitAutoStartCheck) {
+                    awaitAutoStartCheck = false
+                    showAutoStartCheck = true
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -610,12 +619,41 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                 TextButton(
                     onClick = {
                         showAutoStartHelp = false
+                        awaitAutoStartCheck = true
                         BackgroundAccess.openAutoStartSettings(context)
                     },
                 ) { Text("Открыть настройки") }
             },
             dismissButton = {
                 TextButton(onClick = { showAutoStartHelp = false }) { Text("Понятно") }
+            },
+        )
+    }
+
+    if (showAutoStartCheck) {
+        AlertDialog(
+            onDismissRequest = { showAutoStartCheck = false },
+            title = { Text("Проверка автозапуска") },
+            text = {
+                Text(
+                    "Вы включили автозапуск ProtoGrid в системных настройках? " +
+                        "Android не отдаёт приложению состояние этого переключателя, " +
+                        "поэтому подтверждение нужно один раз после возврата.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showAutoStartCheck = false }) {
+                    Text("Да, включил")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showAutoStartCheck = false
+                        autoStart = false
+                        routingSettings.autoStart = false
+                    },
+                ) { Text("Нет / не нашёл") }
             },
         )
     }
@@ -1503,6 +1541,8 @@ private fun SettingsScreen(
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                 )
+                Spacer(Modifier.height(12.dp))
+                UnusedAppRestrictionsRow()
             }
         }
 
@@ -1599,6 +1639,105 @@ private fun SettingsScreen(
         }
 
         Spacer(Modifier.height(20.dp))
+    }
+}
+
+@Composable
+private fun UnusedAppRestrictionsRow() {
+    val context = LocalContext.current
+    var status by remember { mutableStateOf<Int?>(null) }
+    var refresh by remember { mutableStateOf(0) }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { refresh++ }
+
+    LaunchedEffect(refresh) {
+        val future = PackageManagerCompat.getUnusedAppRestrictionsStatus(context)
+        future.addListener(
+            {
+                status = runCatching { future.get() }
+                    .getOrDefault(UnusedAppRestrictionsConstants.ERROR)
+            },
+            ContextCompat.getMainExecutor(context),
+        )
+    }
+
+    val enabled = status == UnusedAppRestrictionsConstants.API_30 ||
+        status == UnusedAppRestrictionsConstants.API_30_BACKPORT ||
+        status == UnusedAppRestrictionsConstants.API_31
+    val subtitle = when (status) {
+        null -> "Проверяем…"
+        UnusedAppRestrictionsConstants.DISABLED,
+        UnusedAppRestrictionsConstants.FEATURE_NOT_AVAILABLE ->
+            "Отключена — Android не будет замораживать ProtoGrid"
+        UnusedAppRestrictionsConstants.API_30,
+        UnusedAppRestrictionsConstants.API_30_BACKPORT,
+        UnusedAppRestrictionsConstants.API_31 ->
+            "Включена — Android может заморозить приложение после нескольких месяцев без запуска"
+        else -> "Не удалось проверить"
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = "Приостановка неиспользуемых",
+                color = Pg.text,
+                fontFamily = Inter,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                color = Pg.muted,
+                fontFamily = Inter,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+            )
+        }
+        if (status != null) {
+            when {
+                enabled -> {
+                    Spacer(Modifier.width(8.dp))
+                    GhostButton(
+                        text = "Отключить",
+                        onClick = {
+                            val intent = runCatching {
+                                IntentCompat.createManageUnusedAppRestrictionsIntent(
+                                    context,
+                                    context.packageName,
+                                )
+                            }.getOrNull()
+                            if (intent != null) {
+                                launcher.launch(intent)
+                            } else {
+                                BackgroundAccess.openAppDetails(context)
+                            }
+                        },
+                    )
+                }
+
+                status == UnusedAppRestrictionsConstants.DISABLED ||
+                    status == UnusedAppRestrictionsConstants.FEATURE_NOT_AVAILABLE -> {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Выкл",
+                        color = Pg.green,
+                        fontFamily = Inter,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 11.sp,
+                    )
+                }
+
+                else -> {
+                    Spacer(Modifier.width(8.dp))
+                    GhostButton(
+                        text = "Открыть",
+                        onClick = { BackgroundAccess.openAppDetails(context) },
+                    )
+                }
+            }
+        }
     }
 }
 

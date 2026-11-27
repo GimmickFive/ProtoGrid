@@ -6,6 +6,26 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.7] — 2026-11-28
+
+### Добавлено
+
+- **Android: «Приостановка неиспользуемых»** — отдельная строка в настройках
+  показывает статус `getUnusedAppRestrictionsStatus()` и ведёт в системный
+  экран, где можно выключить «Pause app activity if unused». Если ограничение
+  включено, показывается кнопка «Отключить»; если выключено — зелёный «Выкл».
+- **Android: проверка автозапуска** — после возврата из фирменного менеджера
+  приложение спрашивает «Автозапуск включён?». Ответ «Нет / не нашёл»
+  выключает тумблер, поэтому он больше не остаётся включённым после выхода
+  назад без разрешения.
+- `scripts/android-debug.sh` — сборка и установка Lite Debug рядом с релизом
+  для быстрой проверки UI через adb.
+
+### Изменено
+
+- **Android: автозапуск** — остался один тумблер и один диалог; вторая кнопка
+  «Разрешить автозапуск в системе» удалена.
+
 ## [0.4.6] — 2026-11-27
 
 ### Исправлено
@@ -337,7 +357,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.6...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.7...dev
+[0.4.7]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.7
 [0.4.6]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.6
 [0.4.5]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.5
 [0.4.4]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.4
