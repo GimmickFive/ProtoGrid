@@ -6,6 +6,20 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.11] — 2026-11-28
+
+### Исправлено
+
+- **Встроенное обновление снова работает полностью.** Проверка показала, что
+  без `REQUEST_INSTALL_PACKAGES` системный установщик открывается и сразу
+  закрывается, поэтому разрешение возвращено вместе с запросом «Установка из
+  неизвестных источников». Кнопка «Скачать и установить» снова скачивает APK и
+  доводит установку до системного диалога.
+- Play Protect снова может считать APK 0.4.11 «dropper» из-за этого разрешения.
+  Это осознанный компромисс: обновление из приложения важнее автоматической
+  проверки. Для чистой установки без предупреждения используйте `adb install`
+  или отключите проверку Play Protect.
+
 ## [0.4.10] — 2026-11-28
 
 ### Изменено
@@ -402,7 +416,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.10...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.11...dev
+[0.4.11]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.11
 [0.4.10]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.10
 [0.4.9]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.9
 [0.4.8]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.8

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.core.content.FileProvider
 import app.protogrid.client.BuildConfig
 import java.io.File
@@ -160,6 +161,24 @@ object UpdateManager {
     private fun install(context: Context, file: File) {
         if (!file.isFile) {
             _state.update { it.copy(error = "Скачанный APK не найден") }
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
+        ) {
+            runCatching {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+            _state.update {
+                it.copy(
+                    error = "Разрешите установку из этого источника, затем нажмите «Установить».",
+                )
+            }
             return
         }
         _state.update { it.copy(error = null) }
