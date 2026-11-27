@@ -2975,7 +2975,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "protogrid-core"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "base64 0.22.1",
  "percent-encoding",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "protogrid-desktop"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "arboard",
  "chrono",
@@ -3023,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "protogrid-mobile"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "jni 0.21.1",
  "protogrid-core",

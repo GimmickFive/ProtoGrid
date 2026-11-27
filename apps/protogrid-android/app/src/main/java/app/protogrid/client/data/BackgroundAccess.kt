@@ -1,9 +1,11 @@
 package app.protogrid.client.data
 
+import android.app.AppOpsManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 
@@ -21,6 +23,45 @@ object BackgroundAccess {
     fun isBatteryUnrestricted(context: Context): Boolean {
         val power = context.getSystemService(PowerManager::class.java) ?: return false
         return power.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    /**
+     * MIUI/HyperOS exposes autostart as vendor app-op 10008. Returns null on
+     * ROMs that do not have this op; there is no public Android API for it.
+     */
+    @Suppress("DEPRECATION")
+    fun autoStartAllowed(context: Context): Boolean? {
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        if (!manufacturer.contains("xiaomi") &&
+            !manufacturer.contains("redmi") &&
+            !manufacturer.contains("poco")
+        ) {
+            return null
+        }
+        return runCatching {
+            val ops = context.getSystemService(AppOpsManager::class.java) ?: return null
+            val uid = android.os.Process.myUid()
+            val pkg = context.packageName
+            val intMode = runCatching {
+                AppOpsManager::class.java
+                    .getDeclaredMethod(
+                        "checkOpNoThrow",
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        String::class.java,
+                    )
+                    .apply { isAccessible = true }
+                    .invoke(ops, 10008, uid, pkg) as Int
+            }.getOrNull()
+            val rawMode = runCatching {
+                ops.unsafeCheckOpRawNoThrow("MIUIOP(10008)", uid, pkg)
+            }.getOrNull()
+            when (intMode ?: rawMode) {
+                AppOpsManager.MODE_ALLOWED -> true
+                AppOpsManager.MODE_IGNORED, AppOpsManager.MODE_ERRORED -> false
+                else -> null
+            }
+        }.getOrNull()
     }
 
     /** Opens the direct "allow background work" prompt when the OS supports it. */

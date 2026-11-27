@@ -214,6 +214,7 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     var silentNotification by remember { mutableStateOf(routingSettings.silentNotification) }
     var notificationSpeed by remember { mutableStateOf(routingSettings.notificationSpeed) }
     var autoStart by remember { mutableStateOf(routingSettings.autoStart) }
+    var autoStartAllowed by remember { mutableStateOf(BackgroundAccess.autoStartAllowed(context)) }
     var batteryUnrestricted by remember {
         mutableStateOf(BackgroundAccess.isBatteryUnrestricted(context))
     }
@@ -231,9 +232,21 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME) {
                 batteryUnrestricted = BackgroundAccess.isBatteryUnrestricted(context)
+                autoStartAllowed = BackgroundAccess.autoStartAllowed(context)
+                ProtoGridWidget.updateAll(context)
                 if (awaitAutoStartCheck) {
                     awaitAutoStartCheck = false
-                    showAutoStartCheck = true
+                    when (autoStartAllowed) {
+                        true -> {
+                            autoStart = true
+                            routingSettings.autoStart = true
+                        }
+                        false -> {
+                            autoStart = false
+                            routingSettings.autoStart = false
+                        }
+                        null -> showAutoStartCheck = true
+                    }
                 }
             }
         }
@@ -538,6 +551,7 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                         silentNotification = silentNotification,
                         notificationSpeed = notificationSpeed,
                         autoStart = autoStart,
+                        autoStartAllowed = autoStartAllowed,
                         batteryUnrestricted = batteryUnrestricted,
                         onSilentNotification = {
                             silentNotification = it
@@ -625,7 +639,15 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                 ) { Text("Открыть настройки") }
             },
             dismissButton = {
-                TextButton(onClick = { showAutoStartHelp = false }) { Text("Понятно") }
+                TextButton(
+                    onClick = {
+                        showAutoStartHelp = false
+                        if (autoStartAllowed == false) {
+                            autoStart = false
+                            routingSettings.autoStart = false
+                        }
+                    },
+                ) { Text("Понятно") }
             },
         )
     }
@@ -996,7 +1018,9 @@ private fun OverviewScreen(
 
 @Composable
 private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
-    val release = update.release ?: return
+    val release = update.release
+    val visible = release != null || update.downloading || update.downloadedPath != null
+    if (!visible) return
 
     Panel(
         Modifier
@@ -1010,8 +1034,14 @@ private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
                     SectionLabel("Обновление")
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        text = "Доступна версия ${release.version}",
-                        color = Pg.amber,
+                        text = when {
+                            update.downloading ->
+                                "Скачивание APK · ${(update.progress * 100).toInt()}%"
+                            update.downloadedPath != null -> "APK готов к установке"
+                            release != null -> "Доступна версия ${release.version}"
+                            else -> ""
+                        },
+                        color = if (release != null) Pg.amber else Pg.text,
                         fontFamily = Inter,
                         fontWeight = FontWeight.Medium,
                         fontSize = 12.sp,
@@ -1023,6 +1053,18 @@ private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
                     fontFamily = Inter,
                     fontWeight = FontWeight.Medium,
                     fontSize = 11.sp,
+                )
+            }
+            if (update.downloading) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { update.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = Pg.accent2,
+                    trackColor = Pg.panel2,
                 )
             }
         }
@@ -1210,6 +1252,7 @@ private fun UpdateCard(state: UpdateUiState) {
                 }
                 Text(
                     text = when {
+                        state.downloading -> "${(state.progress * 100).toInt()}%"
                         release != null -> "v${release.version}"
                         state.checked && state.error == null -> "актуально"
                         else -> ""
@@ -1223,6 +1266,56 @@ private fun UpdateCard(state: UpdateUiState) {
             Spacer(Modifier.height(10.dp))
 
             when {
+                state.downloading -> {
+                    Text(
+                        text = "Скачивание APK с GitHub…",
+                        color = Pg.muted,
+                        fontFamily = Inter,
+                        fontSize = 11.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { state.progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = Pg.accent2,
+                        trackColor = Pg.panel2,
+                    )
+                }
+
+                state.downloadedPath != null -> {
+                    Text(
+                        text = "APK скачан. Установите обновление поверх текущей версии.",
+                        color = Pg.muted,
+                        fontFamily = Inter,
+                        fontSize = 11.sp,
+                    )
+                    state.error?.let { error ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = error,
+                            color = Pg.red,
+                            fontFamily = Inter,
+                            fontSize = 10.sp,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        GhostButton(
+                            text = "Проверить",
+                            onClick = { UpdateManager.check() },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        PrimaryButton(
+                            text = "Установить",
+                            onClick = { UpdateManager.installDownloaded(context) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+
                 release != null -> {
                     Text(
                         text = "Доступна версия ${release.version}.",
@@ -1260,11 +1353,27 @@ private fun UpdateCard(state: UpdateUiState) {
                         )
                     }
                     Spacer(Modifier.height(10.dp))
-                    PrimaryButton(
-                        text = "Открыть релиз на GitHub",
-                        onClick = { UpdateManager.openReleasePage(context) },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        PrimaryButton(
+                            text = "Скачать и установить",
+                            onClick = { UpdateManager.downloadAndInstall(context) },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        TextButton(
+                            onClick = { UpdateManager.openReleasePage(context) },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = Pg.accent2,
+                            ),
+                        ) {
+                            Text(
+                                text = "Что нового",
+                                fontFamily = Inter,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
                 }
 
                 state.checking -> {
@@ -1321,6 +1430,7 @@ private fun SettingsScreen(
     silentNotification: Boolean,
     notificationSpeed: Boolean,
     autoStart: Boolean,
+    autoStartAllowed: Boolean?,
     batteryUnrestricted: Boolean,
     onSilentNotification: (Boolean) -> Unit,
     onNotificationSpeed: (Boolean) -> Unit,
@@ -1433,6 +1543,30 @@ private fun SettingsScreen(
                     checked = autoStart,
                     onChange = onAutoStart,
                 )
+                if (autoStartAllowed != null) {
+                    Spacer(Modifier.height(5.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            painter = painterResource(
+                                if (autoStartAllowed) R.drawable.ic_check else R.drawable.ic_close,
+                            ),
+                            contentDescription = null,
+                            tint = if (autoStartAllowed) Pg.green else Pg.red,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = if (autoStartAllowed) {
+                                "Система: автозапуск разрешён"
+                            } else {
+                                "Система: автозапуск запрещён"
+                            },
+                            color = if (autoStartAllowed) Pg.green else Pg.red,
+                            fontFamily = Inter,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
                 if (autoStart && !batteryUnrestricted) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -1488,8 +1622,11 @@ private fun SettingsScreen(
                 GhostButton(
                     text = "Добавить виджет",
                     onClick = {
-                        pinHint = false
-                        if (!onPinWidget()) pinHint = true
+                        onPinWidget()
+                        // HyperOS may swallow the system pin dialog even when
+                        // requestPinAppWidget() returns true; always show the
+                        // manual path.
+                        pinHint = true
                     },
                     modifier = Modifier.fillMaxWidth(),
                     icon = painterResource(R.drawable.ic_add),
@@ -1497,8 +1634,8 @@ private fun SettingsScreen(
                 if (pinHint) {
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = "Лаунчер не умеет закреплять виджеты автоматически. " +
-                            "Добавьте вручную: долгое нажатие на рабочем столе → «Виджеты» → ProtoGrid.",
+                        text = "Если диалог добавления не появился, добавьте вручную: " +
+                            "долгое нажатие на рабочем столе → «Виджеты» → ProtoGrid.",
                         color = Pg.muted,
                         fontFamily = Inter,
                         fontSize = 10.sp,
@@ -1612,6 +1749,13 @@ private fun UnusedAppRestrictionsRow() {
             when {
                 enabled -> {
                     Spacer(Modifier.width(8.dp))
+                    Icon(
+                        painter = painterResource(R.drawable.ic_close),
+                        contentDescription = "Ограничение включено",
+                        tint = Pg.red,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
                     GhostButton(
                         text = "Отключить",
                         onClick = {
@@ -1633,12 +1777,11 @@ private fun UnusedAppRestrictionsRow() {
                 status == UnusedAppRestrictionsConstants.DISABLED ||
                     status == UnusedAppRestrictionsConstants.FEATURE_NOT_AVAILABLE -> {
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "Выкл",
-                        color = Pg.green,
-                        fontFamily = Inter,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 11.sp,
+                    Icon(
+                        painter = painterResource(R.drawable.ic_check),
+                        contentDescription = "Ограничение отключено",
+                        tint = Pg.green,
+                        modifier = Modifier.size(18.dp),
                     )
                 }
 
