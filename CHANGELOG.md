@@ -6,6 +6,15 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.5] — 2026-11-27
+
+### Исправлено
+
+- Удалено принудительное прокси-правило для `web.telegram.ru` и
+  `instagram.ru`: Telegram Web работает на `.org`, Instagram — на `.com`, а эти
+  `.ru`-домены к сервисам не относятся. Сохранённый пресет «Жизнь в РФ»
+  обновляется автоматически и правило из него убирается.
+
 ## [0.4.4] — 2026-11-27
 
 ### Исправлено
@@ -306,7 +315,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.4...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.5...dev
+[0.4.5]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.5
 [0.4.4]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.4
 [0.4.3]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.3
 [0.4.1]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.1

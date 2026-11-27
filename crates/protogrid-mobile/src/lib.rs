@@ -545,13 +545,6 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| rule.kind == RuleKind::Geosite && rule.value == "category-ru"));
-        assert!(rules.iter().any(|rule| {
-            rule.id == "default-forced-proxy"
-                && rule.kind == RuleKind::Domain
-                && rule.action == RuleAction::Proxy
-                && rule.value.contains("web.telegram.ru")
-                && rule.value.contains("instagram.ru")
-        }));
         assert!(!rules.iter().any(|rule| rule.kind == RuleKind::ProcessName));
         assert!(!rules.iter().any(|rule| rule.id == "default-ads"));
     }
@@ -587,13 +580,5 @@ mod tests {
             .unwrap()
             .iter()
             .any(|rule| rule["domain_suffix"] == json!([".ru", ".su", ".рф"])));
-        assert!(config["route"]["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(
-                |rule| rule["domain"] == json!(["web.telegram.ru", "instagram.ru"])
-                    && rule["outbound"] == "proxy"
-            ));
     }
 }

@@ -22,7 +22,7 @@ enum class TrafficPreset(val id: String, val label: String, val description: Str
     Bypass(
         "bypass",
         "Жизнь в РФ",
-        "RU-домены, GeoIP/GeoSite RU и локальная сеть напрямую; web.telegram.ru и instagram.ru — через прокси",
+        "RU-домены, GeoIP/GeoSite RU и локальная сеть напрямую",
     ),
     Direct("direct", "Прямой", "Без прокси"),
     Custom("custom", "Свой профиль", "Свои правила маршрутизации");
