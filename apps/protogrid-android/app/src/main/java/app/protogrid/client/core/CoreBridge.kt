@@ -36,6 +36,14 @@ object CoreBridge {
     @JvmStatic
     external fun fetchSubscription(url: String): String
 
+    /**
+     * Returns the effective rules of the selected preset as a JSON array.
+     * Used by the Android routing screen to show the read-only rule list and
+     * to copy it into a custom profile.
+     */
+    @JvmStatic
+    external fun presetRules(routingJson: String): String
+
     /** Returns a ProtoGrid-core configuration or `{ "error": "..." }`. */
     @JvmStatic
     external fun buildConfig(

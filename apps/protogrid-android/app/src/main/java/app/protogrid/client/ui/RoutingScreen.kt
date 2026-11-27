@@ -69,6 +69,7 @@ import app.protogrid.client.vpn.VpnStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -86,7 +87,7 @@ fun RoutingScreen(
 ) {
     val context = LocalContext.current
     val settings = remember { AndroidSettings(context) }
-    var mode by remember { mutableStateOf(RouteMode.Apps) }
+    var mode by remember { mutableStateOf(RouteMode.Traffic) }
     var notice by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(status) {
@@ -130,20 +131,20 @@ fun RoutingScreen(
                 .padding(3.dp),
         ) {
             Segment(
-                label = "Приложения",
-                selected = mode == RouteMode.Apps,
-                modifier = Modifier.weight(1f),
-                onClick = {
-                    mode = RouteMode.Apps
-                    notice = null
-                },
-            )
-            Segment(
                 label = "Правила",
                 selected = mode == RouteMode.Traffic,
                 modifier = Modifier.weight(1f),
                 onClick = {
                     mode = RouteMode.Traffic
+                    notice = null
+                },
+            )
+            Segment(
+                label = "Приложения",
+                selected = mode == RouteMode.Apps,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    mode = RouteMode.Apps
                     notice = null
                 },
             )
@@ -528,6 +529,41 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
     var finalAction by remember { mutableStateOf(settings.finalAction) }
     var rules by remember { mutableStateOf(settings.customRules) }
     var showAdd by remember { mutableStateOf(false) }
+    var presetRules by remember { mutableStateOf<List<TrafficRule>>(emptyList()) }
+    var presetRulesLoading by remember { mutableStateOf(true) }
+    var copyNotice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(preset) {
+        if (preset == TrafficPreset.Custom) {
+            presetRules = emptyList()
+            presetRulesLoading = false
+        } else {
+            presetRulesLoading = true
+            presetRules = withContext(Dispatchers.IO) {
+                parseTrafficRules(
+                    runCatching { CoreBridge.presetRules(settings.routingJson()) }.getOrNull(),
+                )
+            }
+            presetRulesLoading = false
+        }
+    }
+
+    fun copyPresetToCustom() {
+        if (preset == TrafficPreset.Custom) return
+        val copied = presetRules
+        val nextFinal = if (preset == TrafficPreset.Direct) {
+            TrafficAction.Direct
+        } else {
+            TrafficAction.Proxy
+        }
+        settings.customRules = copied
+        settings.finalAction = nextFinal
+        settings.trafficPreset = TrafficPreset.Custom
+        rules = copied
+        finalAction = nextFinal
+        preset = TrafficPreset.Custom
+        copyNotice = "Правила скопированы в «Свой профиль»"
+    }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -544,7 +580,39 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
             .verticalScroll(rememberScrollState())
             .padding(bottom = 8.dp),
     ) {
-        SectionLabel("Пресет")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("Пресет", Modifier.weight(1f))
+            TextButton(
+                onClick = { showAdd = true },
+                enabled = preset == TrafficPreset.Custom,
+                contentPadding = PaddingValues(horizontal = 6.dp),
+            ) {
+                Text(
+                    text = "+ Добавить",
+                    color = if (preset == TrafficPreset.Custom) Pg.accent2 else Pg.faint,
+                    fontFamily = Inter,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 11.sp,
+                )
+            }
+            TextButton(
+                onClick = { copyPresetToCustom() },
+                enabled = preset != TrafficPreset.Custom && !presetRulesLoading,
+                contentPadding = PaddingValues(horizontal = 6.dp),
+            ) {
+                Text(
+                    text = "Копировать",
+                    color = if (preset != TrafficPreset.Custom && !presetRulesLoading) {
+                        Pg.accent2
+                    } else {
+                        Pg.faint
+                    },
+                    fontFamily = Inter,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 11.sp,
+                )
+            }
+        }
         Spacer(Modifier.height(8.dp))
 
         TrafficPreset.entries.forEach { item ->
@@ -555,12 +623,23 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
                 onClick = {
                     preset = item
                     settings.trafficPreset = item
+                    copyNotice = null
                 },
             )
             Spacer(Modifier.height(6.dp))
         }
 
         Spacer(Modifier.height(8.dp))
+
+        if (copyNotice != null) {
+            Text(
+                text = copyNotice!!,
+                color = Pg.green,
+                fontFamily = Inter,
+                fontSize = 10.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
 
         if (preset == TrafficPreset.Custom) {
             SectionLabel("Финальное действие")
@@ -583,18 +662,12 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 SectionLabel("Правила", Modifier.weight(1f))
-                TextButton(
-                    onClick = { showAdd = true },
-                    contentPadding = PaddingValues(horizontal = 6.dp),
-                ) {
-                    Text(
-                        text = "+ Добавить",
-                        color = Pg.accent2,
-                        fontFamily = Inter,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 11.sp,
-                    )
-                }
+                Text(
+                    text = "${rules.size}",
+                    color = Pg.faint,
+                    fontFamily = Mono,
+                    fontSize = 10.sp,
+                )
             }
 
             if (rules.isEmpty()) {
@@ -732,23 +805,58 @@ private fun TrafficRouting(settings: AndroidSettings, modifier: Modifier) {
                 }
             }
         } else {
-            Panel(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        text = preset.description,
-                        color = Pg.text,
-                        fontFamily = Inter,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 12.sp,
-                    )
-                    Spacer(Modifier.height(3.dp))
-                    Text(
-                        text = "Правила пресета задаёт ProtoGrid-core. Для своих правил выберите «Свой профиль».",
-                        color = Pg.faint,
-                        fontFamily = Inter,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                    )
+            Text(
+                text = "Если ни одно правило не совпало — " +
+                    if (preset == TrafficPreset.Direct) "напрямую" else "через прокси",
+                color = Pg.faint,
+                fontFamily = Inter,
+                fontSize = 10.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("Правила", Modifier.weight(1f))
+                Text(
+                    text = if (presetRulesLoading) "…" else "${presetRules.size}",
+                    color = Pg.faint,
+                    fontFamily = Mono,
+                    fontSize = 10.sp,
+                )
+            }
+
+            Text(
+                text = "Правила пресета защищены. «Копировать» создаст свой профиль " +
+                    "с этими правилами.",
+                color = Pg.faint,
+                fontFamily = Inter,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+
+            if (presetRulesLoading) {
+                Text(
+                    text = "Загружаем правила пресета…",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 11.sp,
+                )
+            } else if (presetRules.isEmpty()) {
+                Panel(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(
+                            text = "У этого пресета нет дополнительных правил",
+                            color = Pg.text,
+                            fontFamily = Inter,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+            } else {
+                presetRules.forEach { rule ->
+                    RuleCard(rule = rule, onDelete = null)
+                    Spacer(Modifier.height(6.dp))
                 }
             }
         }
@@ -864,7 +972,7 @@ private fun ChoiceChip(
 }
 
 @Composable
-private fun RuleCard(rule: TrafficRule, onDelete: () -> Unit) {
+private fun RuleCard(rule: TrafficRule, onDelete: (() -> Unit)? = null) {
     val shape = RoundedCornerShape(10.dp)
     Row(
         modifier = Modifier
@@ -897,12 +1005,14 @@ private fun RuleCard(rule: TrafficRule, onDelete: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconAction(
-            painter = painterResource(R.drawable.ic_trash),
-            contentDescription = "Удалить правило",
-            onClick = onDelete,
-            tint = Pg.faint,
-        )
+        if (onDelete != null) {
+            IconAction(
+                painter = painterResource(R.drawable.ic_trash),
+                contentDescription = "Удалить правило",
+                onClick = onDelete,
+                tint = Pg.faint,
+            )
+        }
     }
 }
 
@@ -1106,6 +1216,18 @@ private fun AddRuleDialog(onDismiss: () -> Unit, onAdd: (TrafficRule) -> Unit) {
             }
         }
     }
+}
+
+private fun parseTrafficRules(raw: String?): List<TrafficRule> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.let { add(TrafficRule.fromJson(it)) }
+            }
+        }
+    }.getOrDefault(emptyList())
 }
 
 private data class GeoCache(val files: Int, val bytes: Long)

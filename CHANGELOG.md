@@ -6,6 +6,19 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.8] — 2026-11-28
+
+### Изменено
+
+- **Android «Маршруты»**: вкладка «Правила» теперь первая и открывается по
+  умолчанию; пресеты идут слева/сверху, «Жизнь в РФ» выбрана по умолчанию.
+- **Android: список правил пресета** виден под карточками, как на ПК. У
+  встроенного пресета он только для чтения, а кнопки **«+ Добавить»** и
+  **«Копировать»** стоят рядом: добавление заблокировано, копирование создаёт
+  «Свой профиль» с текущими правилами.
+- Для этого добавлен JNI-метод `CoreBridge.presetRules(routingJson)`, который
+  отдаёт эффективные правила выбранного пресета из общего Rust-ядра.
+
 ## [0.4.7] — 2026-11-28
 
 ### Добавлено
@@ -357,7 +370,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.7...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.8...dev
+[0.4.8]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.8
 [0.4.7]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.7
 [0.4.6]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.6
 [0.4.5]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.5

@@ -217,6 +217,12 @@ fn build_config_json(
     serde_json::to_string(&config).map_err(|error| error.to_string())
 }
 
+fn preset_rules_json(routing_json: &str) -> Result<String, String> {
+    let routing: RoutingInput = serde_json::from_str(routing_json).unwrap_or_default();
+    let (rules, _, _) = routing_for(&routing);
+    serde_json::to_string(&rules).map_err(|error| error.to_string())
+}
+
 fn prepare_rule_sets_json(
     routing_json: &str,
     dir: &str,
@@ -406,6 +412,28 @@ pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_prepareRuleSets
     )
 }
 
+/// Kotlin: `CoreBridge.presetRules(routingJson: String): String`
+#[no_mangle]
+pub extern "system" fn Java_app_protogrid_client_core_CoreBridge_presetRules<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    routing_json: JString<'local>,
+) -> jstring {
+    let routing_json: String = match env.get_string(&routing_json) {
+        Ok(value) => value.into(),
+        Err(error) => return new_string(&mut env, error_json(format!("JNI: {error}"))),
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| preset_rules_json(&routing_json)))
+        .unwrap_or_else(|_| Err("внутренняя ошибка правил пресета".into()));
+    new_string(
+        &mut env,
+        match result {
+            Ok(rules) => rules,
+            Err(error) => error_json(error),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +589,19 @@ mod tests {
         assert!(!full.vless_only);
         assert!(full.xhttp);
         assert!(full.openvpn);
+    }
+
+    #[test]
+    fn preset_rules_expose_the_effective_bypass_list() {
+        let raw = preset_rules_json(r#"{"preset":"bypass"}"#).unwrap();
+        let rules: Vec<RoutingRule> = serde_json::from_str(&raw).unwrap();
+        assert!(rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::Geoip && rule.value == "ru"));
+        assert!(rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::Geosite && rule.value == "category-ru"));
+        assert!(!rules.iter().any(|rule| rule.kind == RuleKind::ProcessName));
     }
 
     #[test]
