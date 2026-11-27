@@ -6,6 +6,32 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
+## [0.4.3] — 2026-11-27
+
+### Добавлено
+
+- **GeoIP/GeoSite без первого скачивания**: `geoip-ru.srs` и
+  `geosite-category-ru.srs` входят в сборку (Android — в `.so`, desktop — рядом
+  с исполняемым файлом), копируются в кэш при первом запуске и обновляются с
+  GitHub SagerNet раз в 7 дней. Если GitHub недоступен, используется зашитая
+  или последняя скачанная копия.
+- **Android**: управление туннелем с виджета, исключение из оптимизации батареи
+  и автозапуск после перезагрузки.
+- **Desktop**: обработка ссылок `protogrid://` и передача их уже запущенному
+  экземпляру.
+- **macOS**: workflow сборки `.app`/`.dmg` и упаковка GeoIP/GeoSite рядом с
+  приложением.
+- `run-phone-log.bat` — компактный просмотр `core.log` телефона через adb.
+
+### Изменено
+
+- **«Жизнь в РФ» на Android** теперь использует `geoip ru` и `category-ru`, а не
+  только суффиксы `.ru/.su/.рф`.
+- **«Жизнь в РФ» на ПК и Android**: `web.telegram.ru` и `instagram.ru`
+  принудительно идут через прокси, даже если попадают под RU-правила.
+- Кнопка «Скачать / обновить базы» на Android принудительно обновляет кэш,
+  включая базы встроенного пресета.
+
 ## [0.4.1] — 2026-11-27
 
 ### Добавлено
@@ -260,7 +286,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.1...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.4.3...dev
+[0.4.3]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.3
 [0.4.1]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.1
 [0.4.0]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.4.0
 [0.3.0]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.3.0
