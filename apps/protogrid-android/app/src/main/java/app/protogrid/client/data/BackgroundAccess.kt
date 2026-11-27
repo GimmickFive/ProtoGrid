@@ -35,6 +35,16 @@ object BackgroundAccess {
         Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
+    /** App info page: the fallback when the OEM hides the optimization list. */
+    fun appDetailsIntent(context: Context): Intent =
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun openAppDetails(context: Context): Boolean =
+        runCatching { context.startActivity(appDetailsIntent(context)) }.isSuccess
+
     /**
      * Tries the vendor autostart manager and falls back to the app's system
      * page. Returns false only if even the fallback could not be opened.
@@ -46,11 +56,7 @@ object BackgroundAccess {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (runCatching { context.startActivity(intent) }.isSuccess) return true
         }
-        val fallback = Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.parse("package:${context.packageName}"),
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return runCatching { context.startActivity(fallback) }.isSuccess
+        return openAppDetails(context)
     }
 
     private val AUTO_START_COMPONENTS = listOf(

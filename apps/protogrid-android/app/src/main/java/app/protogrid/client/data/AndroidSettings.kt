@@ -28,8 +28,9 @@ enum class TrafficPreset(val id: String, val label: String, val description: Str
     Custom("custom", "Свой профиль", "Свои правила маршрутизации");
 
     companion object {
+        /** Fresh installs start in "Жизнь в РФ"; this is the product default. */
         fun fromId(id: String?): TrafficPreset =
-            entries.firstOrNull { it.id == id } ?: Global
+            entries.firstOrNull { it.id == id } ?: Bypass
     }
 }
 

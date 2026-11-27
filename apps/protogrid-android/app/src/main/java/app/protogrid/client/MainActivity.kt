@@ -18,7 +18,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,10 +35,13 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -55,7 +57,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
@@ -70,7 +71,6 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -192,7 +192,12 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     val store = remember { ProfileStore(context) }
     val routingSettings = remember { AndroidSettings(context) }
 
-    var tab by remember { mutableStateOf(Tab.Overview) }
+    val tabs = Tab.entries
+    val pagerState = rememberPagerState(pageCount = { tabs.size })
+    val pagerScope = rememberCoroutineScope()
+    fun goToTab(target: Tab) {
+        pagerScope.launch { pagerState.animateScrollToPage(target.ordinal) }
+    }
     var profiles by remember { mutableStateOf(store.profiles()) }
     var activeId by remember { mutableStateOf(store.activeId()) }
     var subscriptions by remember { mutableStateOf(store.subscriptions()) }
@@ -206,6 +211,8 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     var batteryUnrestricted by remember {
         mutableStateOf(BackgroundAccess.isBatteryUnrestricted(context))
     }
+    var showBatteryHelp by remember { mutableStateOf(false) }
+    var showAutoStartHelp by remember { mutableStateOf(false) }
 
     // The exemption can also be changed from the system settings app, so
     // re-read it every time the UI comes back to the foreground.
@@ -345,7 +352,7 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
             else -> "Добавлено: ${result.added}"
         }
         if (result.added > 0) {
-            tab = Tab.Servers
+            goToTab(Tab.Servers)
         }
     }
 
@@ -359,7 +366,7 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
             busy = null
             if (result.added > 0) {
                 showImport = false
-                tab = Tab.Servers
+                goToTab(Tab.Servers)
                 notice = "Подписка добавлена: ${result.added} ${profilesWord(result.added)}" +
                     if (result.errors.isNotEmpty()) "\n${result.errors.first()}" else ""
             } else {
@@ -422,17 +429,16 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         val opened = runCatching {
             context.startActivity(BackgroundAccess.batteryRequestIntent(context))
         }.isSuccess
-        if (!opened) {
-            runCatching { context.startActivity(BackgroundAccess.batterySettingsIntent()) }
-        }
+        // Some ROMs do not show the direct prompt; explain the list instead.
+        if (!opened) showBatteryHelp = true
     }
 
     fun openBatterySettings() {
-        runCatching { context.startActivity(BackgroundAccess.batterySettingsIntent()) }
+        showBatteryHelp = true
     }
 
     fun openAutoStartSettings() {
-        BackgroundAccess.openAutoStartSettings(context)
+        showAutoStartHelp = true
     }
 
     LaunchedEffect(Unit) {
@@ -462,40 +468,20 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         containerColor = Pg.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = { TopBar(status) },
-        bottomBar = { BottomBar(tab) { tab = it } },
+        bottomBar = {
+            BottomBar(Tab.entries[pagerState.currentPage]) { target ->
+                pagerScope.launch { pagerState.animateScrollToPage(target.ordinal) }
+            }
+        },
     ) { padding ->
-        Box(
-            Modifier
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .pointerInput(tab) {
-                    // Горизонтальный свайп по содержимому переключает вкладки
-                    // в том же порядке, что и нижнее меню.
-                    val tabs = Tab.entries
-                    val threshold = 64.dp.toPx()
-                    var dragged = 0f
-                    detectHorizontalDragGestures(
-                        onDragStart = { dragged = 0f },
-                        onDragCancel = { dragged = 0f },
-                        onHorizontalDrag = { change, amount ->
-                            dragged += amount
-                            change.consume()
-                        },
-                        onDragEnd = {
-                            val index = tabs.indexOf(tab)
-                            when {
-                                dragged <= -threshold && index < tabs.lastIndex ->
-                                    tab = tabs[index + 1]
-                                dragged >= threshold && index > 0 ->
-                                    tab = tabs[index - 1]
-                            }
-                            dragged = 0f
-                        },
-                    )
-                },
-        ) {
-            key(tab) {
-                when (tab) {
+                .padding(padding),
+            beyondViewportPageCount = 1,
+        ) { page ->
+            when (Tab.entries[page]) {
                     Tab.Overview -> OverviewScreen(
                         status = status,
                         message = vpnMessage ?: notice,
@@ -510,10 +496,10 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                             }
                         },
                         onAdd = { openAdd() },
-                        onOpenServers = { tab = Tab.Servers },
-                        onOpenRouting = { tab = Tab.Routing },
-                        onOpenTraffic = { tab = Tab.Monitor },
-                        onOpenSettings = { tab = Tab.Settings },
+                        onOpenServers = { goToTab(Tab.Servers) },
+                        onOpenRouting = { goToTab(Tab.Routing) },
+                        onOpenTraffic = { goToTab(Tab.Monitor) },
+                        onOpenSettings = { goToTab(Tab.Settings) },
                         routingSummary = "${routingSettings.trafficPreset.label} · ${routingSettings.perAppSummary()}",
                     )
 
@@ -554,13 +540,13 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                         onAutoStart = {
                             autoStart = it
                             routingSettings.autoStart = it
+                            if (it) showAutoStartHelp = true
                         },
                         onRequestBackground = ::openBackgroundAccess,
                         onOpenBatterySettings = ::openBatterySettings,
                         onOpenAutoStartSettings = ::openAutoStartSettings,
                         onPinWidget = ::pinWidget,
                     )
-                }
             }
         }
     }
@@ -572,6 +558,65 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
             error = addError,
             onDismiss = { showImport = false },
             onSubmit = { submitInput(it) },
+        )
+    }
+
+    if (showBatteryHelp) {
+        AlertDialog(
+            onDismissRequest = { showBatteryHelp = false },
+            title = { Text("Энергосбережение") },
+            text = {
+                Text(
+                    "Android не позволяет приложению выключить это разрешение само. " +
+                        "В системном списке выберите «Все приложения» → ProtoGrid → " +
+                        "«Не оптимизировать». На Xiaomi/HyperOS это также настройки " +
+                        "приложения → Батарея → «Без ограничений».",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBatteryHelp = false
+                        runCatching {
+                            context.startActivity(BackgroundAccess.batterySettingsIntent())
+                        }
+                    },
+                ) { Text("Список оптимизации") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showBatteryHelp = false
+                        BackgroundAccess.openAppDetails(context)
+                    },
+                ) { Text("Настройки приложения") }
+            },
+        )
+    }
+
+    if (showAutoStartHelp) {
+        AlertDialog(
+            onDismissRequest = { showAutoStartHelp = false },
+            title = { Text("Автозапуск") },
+            text = {
+                Text(
+                    "ProtoGrid будет поднимать VPN после перезагрузки. На Xiaomi/HyperOS, " +
+                        "Huawei, Oppo и Vivo дополнительно включите автозапуск для ProtoGrid " +
+                        "в системном приложении безопасности. Если его нет в списке, " +
+                        "разрешите работу в фоне: настройки приложения → Батарея.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showAutoStartHelp = false
+                        BackgroundAccess.openAutoStartSettings(context)
+                    },
+                ) { Text("Открыть настройки") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAutoStartHelp = false }) { Text("Понятно") }
+            },
         )
     }
 }
@@ -1419,6 +1464,14 @@ private fun SettingsScreen(
                         if (enabled) onRequestBackground() else onOpenBatterySettings()
                     },
                 )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Выключить исключение можно только в системных настройках Android.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
                 Spacer(Modifier.height(12.dp))
                 SettingSwitch(
                     title = "Автозапуск",
@@ -1438,7 +1491,10 @@ private fun SettingsScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "На Xiaomi, Huawei, Oppo и Vivo автозапуск нужно дополнительно разрешить в приложении безопасности.",
+                    text = "Переключатель включает запуск ProtoGrid после перезагрузки. " +
+                        "На Xiaomi, Huawei, Oppo и Vivo это же нужно разрешить в приложении " +
+                        "безопасности производителя. Если ProtoGrid нет в списке, откройте " +
+                        "настройки приложения → Батарея → Без ограничений.",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 10.sp,
@@ -1446,7 +1502,7 @@ private fun SettingsScreen(
                 )
                 Spacer(Modifier.height(10.dp))
                 GhostButton(
-                    text = "Настройки автозапуска",
+                    text = "Разрешить автозапуск в системе",
                     onClick = onOpenAutoStartSettings,
                     modifier = Modifier.fillMaxWidth(),
                 )

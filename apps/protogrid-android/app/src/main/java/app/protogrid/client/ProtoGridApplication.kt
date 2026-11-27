@@ -3,6 +3,7 @@ package app.protogrid.client
 import android.app.Application
 import android.os.Build
 import android.util.Log
+import app.protogrid.client.widget.ProtoGridWidget
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
 import org.json.JSONObject
@@ -13,6 +14,9 @@ class ProtoGridApplication : Application() {
         super.onCreate()
         instance = this
         setupLibbox()
+        // Existing widgets keep the old RemoteViews after an APK update until
+        // the next tunnel state change; refresh them once on app start.
+        runCatching { ProtoGridWidget.updateAll(this) }
     }
 
     private fun setupLibbox() {
