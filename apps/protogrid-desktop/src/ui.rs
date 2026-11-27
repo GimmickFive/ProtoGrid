@@ -2887,10 +2887,8 @@ fn servers_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, 
         )
         .clicked()
         {
-            let server = Server::new(Protocol::Vless);
-            view.server_alpn = server.alpn.join(", ");
-            view.server_draft = Some(server);
-            view.modal = Some(ModalState::Server);
+            view.import_text.clear();
+            view.modal = Some(ModalState::Import);
         }
         if top_button(
             ui,
@@ -3684,16 +3682,14 @@ fn subscriptions_page(
                 ui,
                 p,
                 egui_phosphor::regular::PLUS,
-                "Добавить подписку",
+                "Добавить",
                 BtnKind::Primary,
                 true,
             )
             .clicked()
             {
-                view.subscription_edit = None;
-                view.subscription_name.clear();
-                view.subscription_url.clear();
-                view.modal = Some(ModalState::Subscription);
+                view.import_text.clear();
+                view.modal = Some(ModalState::Import);
             }
         },
     );
@@ -3710,19 +3706,15 @@ fn subscriptions_page(
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("Добавить подписку")
-                                .color(Color32::WHITE)
-                                .size(11.5),
+                            RichText::new("Добавить").color(Color32::WHITE).size(11.5),
                         )
                         .fill(p.accent)
                         .corner_radius(8),
                     )
                     .clicked()
                 {
-                    view.subscription_edit = None;
-                    view.subscription_name.clear();
-                    view.subscription_url.clear();
-                    view.modal = Some(ModalState::Subscription);
+                    view.import_text.clear();
+                    view.modal = Some(ModalState::Import);
                 }
             },
         );
@@ -3998,10 +3990,10 @@ fn add_subscription_tile(ui: &mut Ui, p: &Palette, view: &mut View) {
     let hint_font = FontId::new(11.5, FontFamily::Proportional);
     let label = ui
         .painter()
-        .layout_no_wrap("Добавить подписку".to_owned(), label_font, fg);
+        .layout_no_wrap("Добавить".to_owned(), label_font, fg);
     let hint =
         ui.painter()
-            .layout_no_wrap("URL или vless:// ссылка".to_owned(), hint_font, p.faint);
+            .layout_no_wrap("URL подписки или ссылка".to_owned(), hint_font, p.faint);
     let x = rect.left() + 50.0;
     ui.painter().galley(
         egui::pos2(x, rect.center().y - label.size().y * 0.5),
@@ -4018,9 +4010,8 @@ fn add_subscription_tile(ui: &mut Ui, p: &Palette, view: &mut View) {
     );
     if response.clicked() {
         view.subscription_edit = None;
-        view.subscription_name.clear();
-        view.subscription_url.clear();
-        view.modal = Some(ModalState::Subscription);
+        view.import_text.clear();
+        view.modal = Some(ModalState::Import);
     }
 }
 
@@ -8481,7 +8472,7 @@ pub fn modals(
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .auto_shrink([false, true])
                 .show(ui, |ui| match view.modal {
-                    Some(ModalState::Import) => import_modal(ui, p, view, engine),
+                    Some(ModalState::Import) => import_modal(ui, p, view, snapshot, engine),
                     Some(ModalState::Server) => server_modal(ui, p, view, snapshot, engine),
                     Some(ModalState::Subscription) => subscription_modal(ui, p, view, engine),
                     Some(ModalState::Rule) => rule_modal(ui, p, view, snapshot, engine),
@@ -8624,24 +8615,53 @@ fn help_modal(ui: &mut Ui, p: &Palette, view: &mut View) {
     });
 }
 
-fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
+fn import_is_subscription(text: &str) -> bool {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    !trimmed.is_empty()
+        && !trimmed.contains(['\n', '\r'])
+        && (lower.starts_with("http://") || lower.starts_with("https://"))
+}
+
+fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
+    let core = snapshot.config.settings.core;
+    let openvpn = snapshot
+        .core(core)
+        .map(|info| info.features.openvpn)
+        .unwrap_or(matches!(core, CoreKind::Protogrid));
     modal_title(
         ui,
         p,
-        "Импорт серверов",
-        "Ссылки v2rayN, base64-подписка, Clash YAML или профиль .ovpn.",
+        "Добавить",
+        "Ссылка на сервер, подписка, Clash YAML или профиль .ovpn — формат определится сам.",
     );
+    let placeholder = if openvpn {
+        "vless://…  vmess://…  trojan://…  ss://…\nhysteria2://…  tuic://…  openvpn://…\nhttps://…/sub  ·  Clash YAML  ·  .ovpn\nМожно вставить несколько ссылок сразу"
+    } else {
+        "vless://…  vmess://…  trojan://…  ss://…\nhysteria2://…  tuic://…\nhttps://…/sub  ·  Clash YAML\nМожно вставить несколько ссылок сразу"
+    };
     field_area(
         ui,
         p,
-        "Ссылки или подписка",
+        "Ссылка",
         8,
-        TextEdit::multiline(&mut view.import_text).hint_text(
-            "vless://...\nvmess://...\ntrojan://...\nss://...\nhysteria2://...\ntuic://...\nopenvpn://...\n.ovpn (вставить целиком или открыть файл)",
-        ),
+        TextEdit::multiline(&mut view.import_text).hint_text(placeholder),
+    );
+    let subscription = import_is_subscription(&view.import_text);
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(if subscription {
+            "Похоже на подписку: серверы загрузятся по HTTPS и будут обновляться автоматически."
+        } else if view.import_text.trim().is_empty() {
+            "Вставьте ссылку, профиль .ovpn или URL подписки."
+        } else {
+            "Будет добавлен сервер, несколько ссылок, Clash YAML или профиль .ovpn."
+        })
+        .size(10.0)
+        .color(if subscription { p.accent_2 } else { p.faint }),
     );
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui
             .add(
                 egui::Button::new(
@@ -8667,8 +8687,8 @@ fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
             .add(
                 egui::Button::new(
                     RichText::new(format!(
-                        "{}  Открыть .ovpn",
-                        egui_phosphor::regular::FOLDER_OPEN
+                        "{}  QR из изображения",
+                        egui_phosphor::regular::QR_CODE
                     ))
                     .size(11.0)
                     .color(p.muted),
@@ -8678,6 +8698,36 @@ fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
                 .corner_radius(8),
             )
             .clicked()
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Изображения", &["png", "jpg", "jpeg", "bmp", "webp"])
+                .pick_file()
+            {
+                match crate::qr::decode_image(&path) {
+                    Ok(text) => {
+                        view.import_text = text;
+                        view.toast("QR-код распознан", ToastKind::Success);
+                    }
+                    Err(error) => view.toast(error, ToastKind::Error),
+                }
+            }
+        }
+        if openvpn
+            && ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!(
+                            "{}  Открыть .ovpn",
+                            egui_phosphor::regular::FOLDER_OPEN
+                        ))
+                        .size(11.0)
+                        .color(p.muted),
+                    )
+                    .fill(p.panel_2)
+                    .stroke(Stroke::new(1.0, p.line))
+                    .corner_radius(8),
+                )
+                .clicked()
         {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("OpenVPN", &["ovpn", "conf"])
@@ -8696,21 +8746,46 @@ fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
                 }
             }
         }
-        ui.label(
-            RichText::new("VLESS · VMess · Trojan · SS · Hysteria2 · TUIC · OpenVPN")
-                .size(9.0)
-                .color(p.faint),
-        );
     });
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(if openvpn {
+            "VLESS · VMess · Trojan · SS · Hysteria2 · TUIC · OpenVPN · Clash YAML"
+        } else {
+            "VLESS · VMess · Trojan · SS · Hysteria2 · TUIC · Clash YAML"
+        })
+        .size(9.0)
+        .color(p.faint),
+    );
     ui.add_space(14.0);
     ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new("Создать сервер вручную")
+                        .size(10.5)
+                        .color(p.accent_2),
+                )
+                .frame(false),
+            )
+            .clicked()
+        {
+            let server = Server::new(Protocol::Vless);
+            view.server_alpn = server.alpn.join(", ");
+            view.server_draft = Some(server);
+            view.modal = Some(ModalState::Server);
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
                 .add(
                     egui::Button::new(
-                        RichText::new("Импортировать")
-                            .size(11.5)
-                            .color(Color32::WHITE),
+                        RichText::new(if subscription {
+                            "Добавить подписку"
+                        } else {
+                            "Импортировать"
+                        })
+                        .size(11.5)
+                        .color(Color32::WHITE),
                     )
                     .fill(p.accent)
                     .corner_radius(8)
@@ -8718,12 +8793,18 @@ fn import_modal(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine) {
                 )
                 .clicked()
             {
-                match engine.import_links(&view.import_text) {
-                    Ok(added) => {
-                        view.toast(format!("Добавлено серверов: {added}"), ToastKind::Success);
-                        view.modal = None;
+                if subscription {
+                    engine.add_subscription(String::new(), view.import_text.trim().to_string());
+                    view.modal = None;
+                    view.toast("Загружаем подписку…", ToastKind::Info);
+                } else {
+                    match engine.import_links(&view.import_text) {
+                        Ok(added) => {
+                            view.toast(format!("Добавлено серверов: {added}"), ToastKind::Success);
+                            view.modal = None;
+                        }
+                        Err(error) => view.toast(error, ToastKind::Error),
                     }
-                    Err(error) => view.toast(error, ToastKind::Error),
                 }
             }
             if ui

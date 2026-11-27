@@ -1,6 +1,7 @@
 package app.protogrid.client.data
 
 import android.content.Context
+import app.protogrid.client.BuildConfig
 import app.protogrid.client.core.CoreBridge
 import org.json.JSONArray
 import org.json.JSONObject
@@ -55,6 +56,7 @@ class ProfileStore(context: Context) {
         buildList {
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
+                if (!supportedByCore(item)) continue
                 val id = item.optString("id")
                 if (id.isBlank()) continue
                 add(
@@ -109,7 +111,7 @@ class ProfileStore(context: Context) {
                     array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
                 }
             }
-        }
+        }.toMutableList()
 
         val existing = storedServers()
         val known = mutableSetOf<String>()
@@ -118,12 +120,20 @@ class ProfileStore(context: Context) {
         }
 
         var added = 0
+        var skipped = 0
         for (index in 0 until incoming.length()) {
             val item = incoming.optJSONObject(index) ?: continue
+            if (!supportedByCore(item)) {
+                skipped++
+                continue
+            }
             if (known.add(keyOf(item))) {
                 existing.put(item)
                 added++
             }
+        }
+        if (skipped > 0) {
+            errors += "Пропущено серверов: $skipped — Lite поддерживает только VLESS/Reality по TCP"
         }
 
         if (added > 0) {
@@ -298,13 +308,26 @@ class ProfileStore(context: Context) {
             lastFetchError = it
             return null
         }
-        val servers = parsed.optJSONArray("servers") ?: JSONArray()
+        val rawServers = parsed.optJSONArray("servers") ?: JSONArray()
         val errors = buildList {
             parsed.optJSONArray("errors")?.let { array ->
                 for (index in 0 until array.length()) {
                     array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
                 }
             }
+        }.toMutableList()
+        val servers = JSONArray()
+        var skipped = 0
+        for (index in 0 until rawServers.length()) {
+            val item = rawServers.optJSONObject(index) ?: continue
+            if (!supportedByCore(item)) {
+                skipped++
+                continue
+            }
+            servers.put(item)
+        }
+        if (skipped > 0) {
+            errors += "Пропущено серверов: $skipped — Lite поддерживает только VLESS/Reality по TCP"
         }
         return Fetched(
             servers = servers,
@@ -312,6 +335,14 @@ class ProfileStore(context: Context) {
             userinfo = parsed.optJSONObject("userinfo"),
             displayUrl = parsed.optString("display_url"),
         )
+    }
+
+    /** The Lite libbox only registers VLESS over plain TCP. */
+    private fun supportedByCore(item: JSONObject): Boolean {
+        if (!BuildConfig.LITE_CORE) return true
+        val protocol = item.optString("protocol").lowercase()
+        val transport = item.optString("transport").ifBlank { "tcp" }.lowercase()
+        return protocol == "vless" && transport == "tcp"
     }
 
     /**
@@ -398,7 +429,9 @@ class ProfileStore(context: Context) {
         val counts = mutableMapOf<String, Int>()
         val servers = storedServers()
         for (index in 0 until servers.length()) {
-            val id = subscriptionIdOf(servers.optJSONObject(index) ?: continue)
+            val item = servers.optJSONObject(index) ?: continue
+            if (!supportedByCore(item)) continue
+            val id = subscriptionIdOf(item)
             if (id.isNotBlank()) counts[id] = (counts[id] ?: 0) + 1
         }
         return counts

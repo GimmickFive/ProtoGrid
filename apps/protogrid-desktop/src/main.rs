@@ -6,6 +6,7 @@ mod brand;
 mod engine;
 mod flags;
 mod installer;
+mod qr;
 mod single_instance;
 mod theme;
 mod ui;

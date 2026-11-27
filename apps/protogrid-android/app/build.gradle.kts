@@ -120,6 +120,11 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 
+    // QR: camera scanning through ZXing's capture activity and offline image
+    // decoding through the same core library.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("com.google.zxing:core:3.5.3")
+
     implementation(platform("androidx.compose:compose-bom:2025.04.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")

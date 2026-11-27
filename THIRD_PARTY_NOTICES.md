@@ -28,6 +28,13 @@ GPL-3.0 (см. `apps/protogrid-android/LICENSE`). В репозитории и �
 - Исходники Android-оболочки и JNI-моста (`crates/protogrid-mobile`) входят в
   этот репозиторий; исходники libbox — upstream `v1.14.4` + `docs/patches`.
 
+## ZXing (Android QR)
+
+- `com.journeyapps:zxing-android-embedded` и `com.google.zxing:core` —
+  **Apache License 2.0**, <https://github.com/journeyapps/zxing-android-embedded>.
+- Используются только в Android-клиенте: сканирование QR камерой и разбор QR
+  с изображения. На десктопе QR разбирает Rust-библиотека `rqrr`.
+
 ## wintun
 
 - `wintun.dll` не входит в репозиторий и берётся из официального архива
