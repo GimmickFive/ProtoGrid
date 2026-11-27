@@ -6,6 +6,7 @@ mod brand;
 mod engine;
 mod flags;
 mod installer;
+mod single_instance;
 mod theme;
 mod ui;
 mod updates;
@@ -19,6 +20,11 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    let _single_instance = match single_instance::acquire() {
+        Some(guard) => guard,
+        // The running instance was asked to show its window.
+        None => return Ok(()),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ProtoGrid")

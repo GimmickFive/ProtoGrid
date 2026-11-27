@@ -1558,6 +1558,7 @@ redirect-gateway def1\n";
         let server = import_profile(MINIMAL, None).unwrap();
         let capabilities = CoreCapabilities {
             openvpn: true,
+            vless_only: false,
             ..Default::default()
         };
         let config = build_config_with_capabilities(

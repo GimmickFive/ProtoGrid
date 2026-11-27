@@ -1,5 +1,7 @@
 package app.protogrid.client.core
 
+import app.protogrid.client.BuildConfig
+
 /**
  * JNI bridge into `crates/protogrid-mobile`.
  *
@@ -9,7 +11,16 @@ package app.protogrid.client.core
 object CoreBridge {
     init {
         System.loadLibrary("protogrid_mobile")
+        setLiteMode(BuildConfig.LITE_CORE)
     }
+
+    /**
+     * Tells the shared Rust core whether this APK links the Lite libbox.
+     * Lite only registers VLESS over TCP, so the config builder must reject
+     * every other protocol and transport before the core tries to run them.
+     */
+    @JvmStatic
+    external fun setLiteMode(enabled: Boolean)
 
     /** Returns `{ "servers": [...], "errors": [...] }`. */
     @JvmStatic

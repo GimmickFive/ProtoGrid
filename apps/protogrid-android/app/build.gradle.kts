@@ -7,11 +7,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.2.2"
+val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.3.0"
 val versionCodeEnv = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
 
 // Release builds are arm64-only. For an x86_64 emulator run:
-//   PROTOGRID_ABIS=x86_64 ./gradlew :app:assembleRelease
+//   PROTOGRID_ABIS=x86_64 ./gradlew :app:assembleStandardRelease :app:assembleLiteRelease
 val abis = (System.getenv("PROTOGRID_ABIS") ?: "arm64-v8a")
     .split(',')
     .map(String::trim)
@@ -27,6 +27,25 @@ val releaseKeyPassword = System.getenv("PROTOGRID_KEY_PASSWORD")
 android {
     namespace = "app.protogrid.client"
     compileSdk = 35
+
+    // Two cores, two APKs: `standard` links the full ProtoGrid-core, `lite`
+    // links the same fork built with `protogrid_lite` (VLESS/Reality over TCP
+    // only). The lite build gets its own applicationId so both can be
+    // installed side by side and update independently.
+    flavorDimensions += "core"
+
+    productFlavors {
+        create("standard") {
+            dimension = "core"
+            buildConfigField("boolean", "LITE_CORE", "false")
+        }
+        create("lite") {
+            dimension = "core"
+            applicationIdSuffix = ".lite"
+            versionNameSuffix = "-lite"
+            buildConfigField("boolean", "LITE_CORE", "true")
+        }
+    }
 
     defaultConfig {
         applicationId = "app.protogrid.client"
@@ -92,7 +111,10 @@ kotlin {
 }
 
 dependencies {
-    implementation(files("libs/libbox.aar"))
+    // The AAR is selected by flavor: the release script/CI builds both from
+    // the same patched sing-box tree before Gradle runs.
+    add("standardImplementation", files("libs/libbox.aar"))
+    add("liteImplementation", files("libs/libbox-lite.aar"))
 
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.1")

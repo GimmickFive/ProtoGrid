@@ -8,8 +8,9 @@
 1. Поднять версию один раз — в `Cargo.toml`, `[workspace.package].version`.
    Крейты наследуют её через `version.workspace = true`.
 2. Обновить `APP_VERSION` и `VIProductVersion` в `installer/protogrid.nsi`.
-3. Если менялся форк — поднять `VERSION` в `scripts/build-fork.sh` и `ldflags`
-   в `.github/workflows/ci.yml` (`1.14.4-protogrid.N`).
+3. Если менялся форк — поднять `VERSION` и `LITE_VERSION` в
+   `scripts/build-fork.sh` и `ldflags` в `.github/workflows/ci.yml`
+   (`1.14.4-protogrid.N` / `1.14.4-protogrid.N-lite.M`).
 4. Добавить запись в `CHANGELOG.md`: секция `## [X.Y.Z] — YYYY-MM-DD`, ссылки
    внизу файла.
 5. Обновить README, если изменились возможности, требования или ограничения.
@@ -77,8 +78,10 @@ ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh
 
 - десктоп — `ProtoGrid-<версия>-windows-x64-setup.exe` и
   `ProtoGrid-<версия>-windows-x64-portable.zip`;
-- Android — `ProtoGrid-<версия>-arm64-v8a.apk` (при сборке под эмулятор —
-  `ProtoGrid-<версия>-x86_64.apk`).
+- Android — `ProtoGrid-<версия>-arm64-v8a.apk` (обычное ядро) и
+  `ProtoGrid-<версия>-lite-arm64-v8a.apk` (ProtoGrid-core Lite), при сборке
+  под эмулятор — `ProtoGrid-<версия>-x86_64.apk` и
+  `ProtoGrid-<версия>-lite-x86_64.apk`.
 
 Релиз с ассетами APK может иметь тег `vX.Y.Z` (как в 0.2.1) или
 `android-vX.Y.Z`; десктопная проверка теги `android-*` игнорирует. GitHub

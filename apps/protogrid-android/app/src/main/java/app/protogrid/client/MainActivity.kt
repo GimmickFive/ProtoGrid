@@ -146,6 +146,9 @@ private enum class Tab {
  * together with the APK, so there is no separate core download here. */
 private const val CORE_VERSION = "1.14.4"
 
+/** Display name of the core linked into this flavor's libbox.aar. */
+private val CORE_LABEL = if (BuildConfig.LITE_CORE) "ProtoGrid-core Lite" else "ProtoGrid-core"
+
 @Composable
 private fun ProtoGridApp() {
     val context = LocalContext.current
@@ -619,7 +622,7 @@ private fun OverviewScreen(
                     )
                     Spacer(Modifier.weight(1f))
                     Text(
-                        text = "ProtoGrid-core $CORE_VERSION",
+                        text = "$CORE_LABEL $CORE_VERSION",
                         color = Pg.faint,
                         fontFamily = Mono,
                         fontSize = 9.sp,
@@ -735,7 +738,7 @@ private fun OverviewScreen(
             StatTile(
                 label = "Ядро",
                 value = CORE_VERSION,
-                hint = "ProtoGrid-core",
+                hint = CORE_LABEL,
                 modifier = Modifier.weight(1f),
                 valueMono = true,
             )
@@ -833,7 +836,7 @@ private fun UpdateCard(state: UpdateUiState) {
                         fontSize = 14.sp,
                     )
                     Text(
-                        text = "Ядро ProtoGrid-core $CORE_VERSION входит в APK",
+                        text = "Ядро $CORE_LABEL $CORE_VERSION входит в APK",
                         color = Pg.faint,
                         fontFamily = Inter,
                         fontSize = 10.sp,
@@ -1126,7 +1129,7 @@ private fun SettingsScreen(
                 Spacer(Modifier.height(10.dp))
                 InfoRow("Версия", BuildConfig.VERSION_NAME)
                 Spacer(Modifier.height(6.dp))
-                InfoRow("Ядро", "ProtoGrid-core $CORE_VERSION")
+                InfoRow("Ядро", "$CORE_LABEL $CORE_VERSION")
             }
         }
 
@@ -1900,7 +1903,7 @@ private fun MonitorScreen(status: VpnStatus) {
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Трафик через ProtoGrid-core",
+                    text = "Трафик через $CORE_LABEL",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,

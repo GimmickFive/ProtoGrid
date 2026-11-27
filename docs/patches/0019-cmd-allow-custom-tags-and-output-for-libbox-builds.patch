@@ -1,0 +1,70 @@
+From 36f1847fd5d26d7e2af3f4b6de1dafaf93c75b8b Mon Sep 17 00:00:00 2001
+From: ProtoGrid <dev@protogrid.local>
+Date: Fri, 27 Nov 2026 14:09:58 +0300
+Subject: [PATCH] cmd: allow custom tags and output for libbox builds
+
+---
+ cmd/internal/build_libbox/main.go | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/cmd/internal/build_libbox/main.go b/cmd/internal/build_libbox/main.go
+index 5b2d9e2..24e093d 100644
+--- a/cmd/internal/build_libbox/main.go
++++ b/cmd/internal/build_libbox/main.go
+@@ -20,6 +20,9 @@ var (
+ 	debugEnabled bool
+ 	target       string
+ 	platform     string
++	buildTags    string
++	outputName   string
++	legacyAAR    bool
+ 	// withTailscale bool
+ )
+ 
+@@ -27,6 +30,9 @@ func init() {
+ 	flag.BoolVar(&debugEnabled, "debug", false, "enable debug")
+ 	flag.StringVar(&target, "target", "android", "target platform")
+ 	flag.StringVar(&platform, "platform", "", "specify platform")
++	flag.StringVar(&buildTags, "tags", "", "override the default build tags (comma-separated)")
++	flag.StringVar(&outputName, "output", "", "output AAR name for the main variant")
++	flag.BoolVar(&legacyAAR, "legacy", true, "also build the SDK 21 legacy AAR")
+ 	// flag.BoolVar(&withTailscale, "with-tailscale", false, "build tailscale for iOS and tvOS")
+ }
+ 
+@@ -165,18 +171,32 @@ func buildAndroid() {
+ 
+ 	// Build main variant (SDK 24)
+ 	mainTags := append([]string{}, sharedTags...)
++	if buildTags != "" {
++		mainTags = strings.Split(buildTags, ",")
++	}
+ 	// mainTags = append(mainTags, memcTags...)
+ 	if debugEnabled {
+ 		mainTags = append(mainTags, debugTags...)
+ 	}
++	mainOutput := "libbox.aar"
++	if outputName != "" {
++		mainOutput = outputName
++	}
+ 	buildAndroidVariant(AndroidBuildConfig{
+ 		AndroidAPI: 24,
+-		OutputName: "libbox.aar",
++		OutputName: mainOutput,
+ 		Tags:       mainTags,
+ 	}, bindTarget)
+ 
++	if !legacyAAR {
++		return
++	}
++
+ 	// Build legacy variant (SDK 21, no naive outbound)
+ 	legacyTags := filterTags(sharedTags, "with_naive_outbound")
++	if buildTags != "" {
++		legacyTags = strings.Split(buildTags, ",")
++	}
+ 	// legacyTags = append(legacyTags, memcTags...)
+ 	if debugEnabled {
+ 		legacyTags = append(legacyTags, debugTags...)
+-- 
+2.34.1
+

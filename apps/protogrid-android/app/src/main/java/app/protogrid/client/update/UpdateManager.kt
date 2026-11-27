@@ -340,6 +340,10 @@ object UpdateManager {
             val name = item.optString("name")
             val url = item.optString("browser_download_url")
             if (!name.endsWith(".apk", ignoreCase = true) || url.isBlank()) continue
+            // The same release carries `ProtoGrid-<ver>-<abi>.apk` and
+            // `ProtoGrid-<ver>-lite-<abi>.apk`; never offer the other core.
+            val liteAsset = name.contains("-lite-", ignoreCase = true)
+            if (liteAsset != BuildConfig.LITE_CORE) continue
             val asset = UpdateAsset(
                 name = name,
                 url = url,

@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   apk:
-    name: Build signed arm64 APK
+    name: Build signed arm64 APKs
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -45,21 +45,35 @@ jobs:
           cache-dependency-path: forks/sing-box/go.sum
 
       - name: Cache libbox
-        id: cache-libbox
         uses: actions/cache@v4
         with:
-          path: forks/sing-box/libbox.aar
+          path: |
+            forks/sing-box/libbox.aar
+            forks/sing-box/libbox-lite.aar
           key: libbox-arm64-${{ hashFiles('docs/patches/*.patch') }}
 
+      - name: Check cached libbox
+        id: libbox
+        run: |
+          if [ -f forks/sing-box/libbox.aar ] && [ -f forks/sing-box/libbox-lite.aar ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build libbox for arm64
-        if: steps.cache-libbox.outputs.cache-hit != 'true'
+        if: steps.libbox.outputs.ready != 'true'
         working-directory: forks/sing-box
         run: |
           export ANDROID_NDK_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/28.0.13004108"
           export CGO_LDFLAGS_ALLOW='-l:.*'
           make lib_install
-          go run ./cmd/internal/build_libbox -target android -platform android/arm64
-          ls -lh libbox.aar
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
+            -output libbox.aar
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64 \
+            -tags "protogrid_lite,with_utls,with_clash_api,with_gvisor" \
+            -output libbox-lite.aar -legacy=false
+          ls -lh libbox.aar libbox-lite.aar
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,6 +98,7 @@ jobs:
         run: |
           mkdir -p apps/protogrid-android/app/libs
           cp forks/sing-box/libbox.aar apps/protogrid-android/app/libs/libbox.aar
+          cp forks/sing-box/libbox-lite.aar apps/protogrid-android/app/libs/libbox-lite.aar
 
       - name: Resolve version
         run: |
@@ -107,7 +122,7 @@ jobs:
             echo "::warning::PROTOGRID_KEYSTORE_BASE64 is not set; using the debug key"
           fi
 
-      - name: Build release APK
+      - name: Build release APKs
         working-directory: apps/protogrid-android
         env:
           PROTOGRID_KEYSTORE_PASSWORD: ${{ secrets.PROTOGRID_KEYSTORE_PASSWORD }}
@@ -118,13 +133,16 @@ jobs:
             export PROTOGRID_KEYSTORE="$PWD/app/release.keystore"
           fi
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon
+          ./gradlew :app:assembleStandardRelease :app:assembleLiteRelease --no-daemon
 
-      - name: Collect APK
+      - name: Collect APKs
         run: |
-          SOURCE=$(find apps/protogrid-android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          test -n "$SOURCE"
-          cp "$SOURCE" "ProtoGrid-${VERSION_NAME}-arm64-v8a.apk"
+          STANDARD=$(find apps/protogrid-android/app/build/outputs/apk/standard/release -name "*.apk" | head -n 1)
+          LITE=$(find apps/protogrid-android/app/build/outputs/apk/lite/release -name "*.apk" | head -n 1)
+          test -n "$STANDARD"
+          test -n "$LITE"
+          cp "$STANDARD" "ProtoGrid-${VERSION_NAME}-arm64-v8a.apk"
+          cp "$LITE" "ProtoGrid-${VERSION_NAME}-lite-arm64-v8a.apk"
           ls -lh ProtoGrid-*.apk
 
       - uses: actions/upload-artifact@v4

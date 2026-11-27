@@ -6,7 +6,46 @@
 Ветка `dev` — разработка, `main` — только релизы. Запись попадает сюда в момент
 выпуска, порядок действий — в [docs/releasing.md](docs/releasing.md).
 
-## [Unreleased]
+## [0.3.0] — 2026-11-27
+
+### Добавлено
+
+- **ProtoGrid-core Lite** — второй вариант ProtoGrid-core, отдельная сборка форка
+  только для VLESS/Reality по TCP. Сохранены TUN, mixed-вход, direct/block/selector
+  и Clash API, поэтому работают и VPN-режим, и системный прокси; остальные протоколы
+  и транспорты в бинарник не попадают. В настройках у пункта ProtoGrid появился
+  переключатель «Обычный / Lite». Собирается вместе с полным ядром
+  (`scripts/build-fork.sh`), лежит рядом с приложением (`protogrid-core-lite.exe`).
+- **Android Lite** — вместе с обычным APK теперь собирается и публикуется
+  `ProtoGrid-<версия>-lite-arm64-v8a.apk` с лёгким ядром. У Lite-сборки
+  отдельный `applicationId` (`app.protogrid.client.lite`) и название
+  «ProtoGrid Lite», поэтому оба варианта можно устанавливать рядом; проверка
+  обновлений выбирает ассет своего варианта. `scripts/build-android.sh` и
+  workflow собирают полный и Lite `libbox` из одного дерева форка.
+
+### Изменено
+
+- Пресет «Жизнь в РФ»: добавлено правило **«Cloudflare через прокси»** — официальные
+  IPv4/IPv6-диапазоны Cloudflare (`104.16.0.0/13`, `172.64.0.0/13`, `2606:4700::/32` и др.)
+  уходят в прокси до `GeoIP: ru` и `GeoSite: category-ru`. Сайты за Cloudflare из РФ режутся
+  после ~19 КБ, и раньше `.ru`-домены за CF попадали в DIRECT и не открывались.
+  Прошлые конфиги с пресетом обновляются автоматически и остаются «Жизнью в РФ».
+- Маршрутизация: правило `resolve` перед пользовательскими правилами — домены из
+  mixed/socks теперь тоже проверяются IP-правилами (иначе Cloudflare → proxy работал
+  только в TUN, а браузер через системный прокси уходил в DIRECT по `category-ru`).
+- TUN: ядро теперь останавливается штатно через marker-файл (`PROTOGRID_SHUTDOWN_FILE`),
+  поэтому sing-box сам закрывает TUN, а не оставляет Wintun-адаптер в состоянии удаления.
+  Принудительное завершение осталось только запасным вариантом. Запуск больше не
+  блокируется, если Windows всё ещё показывает старый интерфейс: приложение пробует
+  запустить ядро, а при ошибке чистит Wintun-устройство и повторяет попытку. Перед
+  запуском и после остановки зависшее устройство `protogrid_tun` дополнительно
+  удаляется через `pnputil /remove-device`.
+- Windows: ядро запускается в Job Object с `KILL_ON_JOB_CLOSE`, поэтому при аварийном
+  завершении ProtoGrid не остаётся осиротевший `protogrid-core.exe`.
+- Один экземпляр приложения на Windows, Linux и macOS: повторный запуск не создаёт
+  второй процесс, а поднимает и фокусирует уже открытое окно — в том числе если оно
+  свёрнуто или скрыто в трее. На Windows для этого используется именованный mutex и
+  событие активации, на Linux/macOS — локальный Unix-сокет в каталоге приложения.
 
 ## [0.2.2] — 2026-11-26
 
@@ -166,7 +205,8 @@
 - Журнал дублировал префикс ядра в каждой строке.
 - Портативный профиль больше не попадает в zip-архив.
 
-[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.2.2...dev
+[Unreleased]: https://github.com/GimmickFive/ProtoGrid/compare/v0.3.0...dev
+[0.3.0]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.3.0
 [0.2.2]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.2.2
 [0.2.1]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.2.1
 [0.2.0]: https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.2.0
