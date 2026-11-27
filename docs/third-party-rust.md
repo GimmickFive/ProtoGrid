@@ -3,7 +3,7 @@
 Сгенерировано из `Cargo.lock` скриптом `scripts/third-party.py`.
 Не редактировать вручную.
 
-Всего пакетов: 514.
+Всего пакетов: 520.
 
 | Пакет | Версия | Лицензия |
 |---|---|---|
@@ -125,6 +125,9 @@
 | `futures-macro` | 0.3.34 | MIT OR Apache-2.0 |
 | `futures-task` | 0.3.34 | MIT OR Apache-2.0 |
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 |
+| `g2gen` | 1.2.2 | MIT/Apache-2.0 |
+| `g2p` | 1.2.2 | MIT/Apache-2.0 |
+| `g2poly` | 1.2.2 | MIT/Apache-2.0 |
 | `gdk` | 0.18.2 | MIT |
 | `gdk-pixbuf` | 0.18.5 | MIT |
 | `gdk-pixbuf-sys` | 0.18.0 | MIT |
@@ -178,6 +181,7 @@
 | `idna` | 1.1.0 | MIT OR Apache-2.0 |
 | `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT |
 | `image` | 0.25.10 | MIT OR Apache-2.0 |
+| `image-webp` | 0.2.4 | MIT OR Apache-2.0 |
 | `indexmap` | 2.14.2 | Apache-2.0 OR MIT |
 | `inout` | 0.1.4 | MIT OR Apache-2.0 |
 | `ipnet` | 2.12.2 | MIT OR Apache-2.0 |
@@ -210,6 +214,7 @@
 | `litrs` | 1.1.0 | MIT OR Apache-2.0 |
 | `lock_api` | 0.4.14 | MIT OR Apache-2.0 |
 | `log` | 0.4.35 | MIT OR Apache-2.0 |
+| `lru` | 0.18.5 | MIT |
 | `lru-slab` | 0.1.3 | MIT OR Apache-2.0 OR Zlib |
 | `lzma-rs` | 0.3.0 | MIT |
 | `lzma-sys` | 0.1.20 | MIT/Apache-2.0 |
@@ -311,6 +316,7 @@
 | `rfd` | 0.14.1 | MIT |
 | `ring` | 0.17.14 | Apache-2.0 AND ISC |
 | `ron` | 0.12.3 | MIT OR Apache-2.0 |
+| `rqrr` | 0.11.0 | (MIT OR Apache-2.0) AND ISC |
 | `rustc-hash` | 1.1.0 | Apache-2.0/MIT |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 |

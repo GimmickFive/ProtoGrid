@@ -92,6 +92,7 @@ import app.protogrid.client.data.AndroidSettings
 import app.protogrid.client.data.ProfileStore
 import app.protogrid.client.data.ProfileSummary
 import app.protogrid.client.data.SubscriptionInfo
+import app.protogrid.client.qr.QrImage
 import app.protogrid.client.ui.BrandLogo
 import app.protogrid.client.ui.GhostButton
 import app.protogrid.client.ui.IconAction
@@ -118,6 +119,8 @@ import app.protogrid.client.vpn.TrafficPoint
 import app.protogrid.client.vpn.VpnState
 import app.protogrid.client.vpn.VpnStatus
 import app.protogrid.client.widget.ProtoGridWidget
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -149,6 +152,14 @@ private const val CORE_VERSION = "1.14.4"
 /** Display name of the core linked into this flavor's libbox.aar. */
 private val CORE_LABEL = if (BuildConfig.LITE_CORE) "ProtoGrid-core Lite" else "ProtoGrid-core"
 
+/** A single http(s) URL is a subscription; everything else is a share link/profile. */
+private fun isSubscriptionLink(text: String): Boolean {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty() || trimmed.contains('\n') || trimmed.contains('\r')) return false
+    return trimmed.startsWith("http://", ignoreCase = true) ||
+        trimmed.startsWith("https://", ignoreCase = true)
+}
+
 @Composable
 private fun ProtoGridApp() {
     val context = LocalContext.current
@@ -160,6 +171,7 @@ private fun ProtoGridApp() {
     var activeId by remember { mutableStateOf(store.activeId()) }
     var subscriptions by remember { mutableStateOf(store.subscriptions()) }
     var showImport by remember { mutableStateOf(false) }
+    var addError by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var silentNotification by remember { mutableStateOf(routingSettings.silentNotification) }
@@ -169,6 +181,13 @@ private fun ProtoGridApp() {
     val vpnMessage by VpnState.message.collectAsState()
     val update by UpdateManager.state.collectAsState()
     val activeProfile = profiles.firstOrNull { it.id == activeId } ?: profiles.firstOrNull()
+    LaunchedEffect(profiles, activeId) {
+        if (profiles.isNotEmpty() && profiles.none { it.id == activeId }) {
+            val first = profiles.first().id
+            activeId = first
+            store.setActive(first)
+        }
+    }
     val reconnectScope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -263,12 +282,22 @@ private fun ProtoGridApp() {
         }
     }
 
+    fun openAdd() {
+        addError = null
+        showImport = true
+    }
+
     fun importText(text: String) {
         val result = store.importText(text)
         reload()
+        if (result.added == 0 && result.errors.isNotEmpty()) {
+            addError = result.errors.joinToString("\n")
+            return
+        }
+        addError = null
         showImport = false
         notice = when {
-            result.errors.isNotEmpty() -> result.errors.joinToString("\n")
+            result.errors.isNotEmpty() -> result.errors.first()
             result.added == 0 -> "Новых серверов не найдено"
             else -> "Добавлено: ${result.added}"
         }
@@ -279,6 +308,7 @@ private fun ProtoGridApp() {
 
     fun addSubscription(url: String, name: String) {
         if (busy != null) return
+        addError = null
         busy = "Загружаем подписку…"
         reconnectScope.launch {
             val result = withContext(Dispatchers.IO) { store.addSubscription(url, name) }
@@ -290,8 +320,21 @@ private fun ProtoGridApp() {
                 notice = "Подписка добавлена: ${result.added} ${profilesWord(result.added)}" +
                     if (result.errors.isNotEmpty()) "\n${result.errors.first()}" else ""
             } else {
-                notice = result.errors.firstOrNull() ?: "В подписке не найдено серверов"
+                addError = result.errors.firstOrNull() ?: "В подписке не найдено серверов"
             }
+        }
+    }
+
+    fun submitInput(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) {
+            addError = "Вставьте ссылку или подписку"
+            return
+        }
+        if (isSubscriptionLink(trimmed)) {
+            addSubscription(trimmed, "")
+        } else {
+            importText(trimmed)
         }
     }
 
@@ -365,6 +408,7 @@ private fun ProtoGridApp() {
                         message = vpnMessage ?: notice,
                         profiles = profiles,
                         activeProfile = activeProfile,
+                        update = update,
                         onToggle = {
                             if (status == VpnStatus.Connected || status == VpnStatus.Connecting) {
                                 ProtoGridVpnService.stop(context)
@@ -372,10 +416,11 @@ private fun ProtoGridApp() {
                                 connect()
                             }
                         },
-                        onAdd = { showImport = true },
+                        onAdd = { openAdd() },
                         onOpenServers = { tab = Tab.Servers },
-                        onSelect = ::select,
-                        onDelete = ::delete,
+                        onOpenRouting = { tab = Tab.Routing },
+                        onOpenTraffic = { tab = Tab.Monitor },
+                        onOpenSettings = { tab = Tab.Settings },
                         routingSummary = "${routingSettings.trafficPreset.label} · ${routingSettings.perAppSummary()}",
                     )
 
@@ -384,7 +429,7 @@ private fun ProtoGridApp() {
                         subscriptions = subscriptions,
                         activeId = activeProfile?.id,
                         busy = busy,
-                        onAdd = { showImport = true },
+                        onAdd = { openAdd() },
                         onSelect = ::select,
                         onDelete = ::delete,
                         onRefreshSubscription = ::refreshSubscription,
@@ -421,9 +466,10 @@ private fun ProtoGridApp() {
     if (showImport) {
         AddDialog(
             busy = busy,
+            lite = BuildConfig.LITE_CORE,
+            error = addError,
             onDismiss = { showImport = false },
-            onImport = ::importText,
-            onAddSubscription = ::addSubscription,
+            onSubmit = { submitInput(it) },
         )
     }
 }
@@ -487,8 +533,8 @@ private fun BottomBar(tab: Tab, onSelect: (Tab) -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             NavItem(
-                label = "Обзор",
-                icon = R.drawable.ic_grid,
+                label = "Подключение",
+                icon = R.drawable.ic_power,
                 selected = tab == Tab.Overview,
                 modifier = Modifier.weight(1f),
                 onClick = { onSelect(Tab.Overview) },
@@ -501,14 +547,14 @@ private fun BottomBar(tab: Tab, onSelect: (Tab) -> Unit) {
                 onClick = { onSelect(Tab.Servers) },
             )
             NavItem(
-                label = "Маршрут",
+                label = "Маршруты",
                 icon = R.drawable.ic_route,
                 selected = tab == Tab.Routing,
                 modifier = Modifier.weight(1f),
                 onClick = { onSelect(Tab.Routing) },
             )
             NavItem(
-                label = "Монитор",
+                label = "Трафик",
                 icon = R.drawable.ic_chart,
                 selected = tab == Tab.Monitor,
                 modifier = Modifier.weight(1f),
@@ -555,7 +601,7 @@ private fun NavItem(
             color = color,
             fontFamily = Inter,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            fontSize = 9.sp,
+            fontSize = if (label.length > 9) 8.sp else 9.sp,
             maxLines = 1,
         )
     }
@@ -567,11 +613,13 @@ private fun OverviewScreen(
     message: String?,
     profiles: List<ProfileSummary>,
     activeProfile: ProfileSummary?,
+    update: UpdateUiState,
     onToggle: () -> Unit,
     onAdd: () -> Unit,
     onOpenServers: () -> Unit,
-    onSelect: (ProfileSummary) -> Unit,
-    onDelete: (ProfileSummary) -> Unit,
+    onOpenRouting: () -> Unit,
+    onOpenTraffic: () -> Unit,
+    onOpenSettings: () -> Unit,
     routingSummary: String,
 ) {
     Column(
@@ -583,7 +631,7 @@ private fun OverviewScreen(
         Row(verticalAlignment = Alignment.Bottom) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = "Обзор",
+                    text = "Подключение",
                     color = Pg.text,
                     fontFamily = Inter,
                     fontWeight = FontWeight.Bold,
@@ -592,18 +640,12 @@ private fun OverviewScreen(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Состояние подключения",
+                    text = "Сервер, маршрут и состояние туннеля",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,
                 )
             }
-            Text(
-                text = "v${BuildConfig.VERSION_NAME}",
-                color = Pg.faint,
-                fontFamily = Mono,
-                fontSize = 10.sp,
-            )
         }
 
         Spacer(Modifier.height(18.dp))
@@ -619,13 +661,6 @@ private fun OverviewScreen(
                         fontFamily = Inter,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 18.sp,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        text = "$CORE_LABEL $CORE_VERSION",
-                        color = Pg.faint,
-                        fontFamily = Mono,
-                        fontSize = 9.sp,
                     )
                 }
 
@@ -649,9 +684,25 @@ private fun OverviewScreen(
                 )
                 Spacer(Modifier.height(14.dp))
 
-                SectionLabel(
-                    if (activeProfile != null) "Активный сервер" else "Сервер не выбран",
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionLabel(
+                        if (activeProfile != null) "Активный сервер" else "Сервер не выбран",
+                        Modifier.weight(1f),
+                    )
+                    if (profiles.isNotEmpty()) {
+                        Text(
+                            text = if (activeProfile != null) "Сменить →" else "Выбрать →",
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenServers)
+                                .padding(horizontal = 6.dp, vertical = 3.dp),
+                            color = Pg.accent2,
+                            fontFamily = Inter,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
 
                 if (activeProfile != null) {
@@ -680,7 +731,11 @@ private fun OverviewScreen(
                     )
                 } else {
                     Text(
-                        text = "Добавьте share-ссылку или подписку, чтобы выбрать сервер",
+                        text = if (BuildConfig.LITE_CORE) {
+                            "Добавьте VLESS-ссылку или подписку, чтобы выбрать сервер"
+                        } else {
+                            "Добавьте share-ссылку или подписку, чтобы выбрать сервер"
+                        },
                         color = Pg.muted,
                         fontFamily = Inter,
                         fontSize = 12.sp,
@@ -688,16 +743,32 @@ private fun OverviewScreen(
                 }
 
                 Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onOpenRouting)
+                        .padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     SectionLabel("Маршрут")
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = routingSummary,
+                        modifier = Modifier.weight(1f),
                         color = Pg.muted,
                         fontFamily = Inter,
                         fontSize = 10.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "→",
+                        color = Pg.accent2,
+                        fontFamily = Inter,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 12.sp,
                     )
                 }
 
@@ -717,10 +788,12 @@ private fun OverviewScreen(
                 if (activeProfile == null) {
                     Spacer(Modifier.height(10.dp))
                     GhostButton(
-                        text = "Добавить сервер",
-                        onClick = onAdd,
+                        text = if (profiles.isEmpty()) "Добавить сервер" else "Выбрать сервер",
+                        onClick = if (profiles.isEmpty()) onAdd else onOpenServers,
                         modifier = Modifier.fillMaxWidth(),
-                        icon = painterResource(R.drawable.ic_add),
+                        icon = painterResource(
+                            if (profiles.isEmpty()) R.drawable.ic_add else R.drawable.ic_servers,
+                        ),
                     )
                 }
             }
@@ -728,93 +801,221 @@ private fun OverviewScreen(
 
         Spacer(Modifier.height(14.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            StatTile(
-                label = "Серверы",
-                value = profiles.size.toString(),
-                hint = "в конфигурации",
-                modifier = Modifier.weight(1f),
-            )
-            StatTile(
-                label = "Ядро",
-                value = CORE_VERSION,
-                hint = CORE_LABEL,
-                modifier = Modifier.weight(1f),
-                valueMono = true,
-            )
-        }
+        UpdateBanner(update) { onOpenSettings() }
 
-        Spacer(Modifier.height(20.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "Серверы",
-                modifier = Modifier.weight(1f),
-                color = Pg.text,
-                fontFamily = Inter,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 17.sp,
-            )
-            Text(
-                text = "Все →",
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onOpenServers)
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                color = Pg.accent2,
-                fontFamily = Inter,
-                fontWeight = FontWeight.Medium,
-                fontSize = 12.sp,
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-
-        if (profiles.isEmpty()) {
-            Panel(Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text = "Пока нет серверов",
-                        color = Pg.text,
-                        fontFamily = Inter,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Вставьте одну или несколько share-ссылок",
-                        color = Pg.faint,
-                        fontFamily = Inter,
-                        fontSize = 11.sp,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(Modifier.height(14.dp))
-                    PrimaryButton(
-                        text = "Добавить сервер",
-                        onClick = onAdd,
-                        icon = painterResource(R.drawable.ic_add),
-                    )
-                }
-            }
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                profiles.take(3).forEach { profile ->
-                    ServerRow(
-                        profile = profile,
-                        selected = profile.id == activeProfile?.id,
-                        onSelect = { onSelect(profile) },
-                        onDelete = { onDelete(profile) },
-                    )
-                }
-            }
-        }
+        SessionSummary(status, onOpenTraffic)
 
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
+    val release = update.release
+    val visible = release != null || update.downloading || update.downloadedPath != null
+    if (!visible) return
+
+    Panel(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onOpen),
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    SectionLabel("Обновление")
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = when {
+                            update.downloading ->
+                                "Скачивание APK · ${(update.progress * 100).toInt()}%"
+                            update.downloadedPath != null -> "APK готов к установке"
+                            release != null -> "Доступна версия ${release.version}"
+                            else -> ""
+                        },
+                        color = if (release != null) Pg.amber else Pg.text,
+                        fontFamily = Inter,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 12.sp,
+                    )
+                }
+                Text(
+                    text = "Открыть →",
+                    color = Pg.accent2,
+                    fontFamily = Inter,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 11.sp,
+                )
+            }
+            if (update.downloading) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { update.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = Pg.accent2,
+                    trackColor = Pg.panel2,
+                )
+            }
+        }
+    }
+
+    Spacer(Modifier.height(14.dp))
+}
+
+@Composable
+private fun SessionSummary(status: VpnStatus, onOpen: () -> Unit) {
+    val points by TrafficMonitor.points.collectAsState()
+    val downTotal by TrafficMonitor.downTotal.collectAsState()
+    val upTotal by TrafficMonitor.upTotal.collectAsState()
+    val connectionCount by TrafficMonitor.connections.collectAsState()
+    val startedAt by TrafficMonitor.startedAt.collectAsState()
+
+    val active = status == VpnStatus.Connected
+    val last = points.lastOrNull() ?: TrafficPoint(0, 0)
+    val elapsed = startedAt?.let { (System.currentTimeMillis() - it).coerceAtLeast(0L) } ?: 0L
+
+    if (!active && startedAt == null) {
+        Panel(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(onClick = onOpen),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionLabel("Трафик сессии")
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "нет подключения →",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+        return
+    }
+
+    Panel(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onOpen),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("Трафик сессии")
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "Открыть →",
+                    color = Pg.accent2,
+                    fontFamily = Inter,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 11.sp,
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Row {
+                Column(Modifier.weight(1f)) {
+                    SectionLabel("Скачивание", color = Pg.cyan)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = if (active) formatRate(last.down) else "—",
+                        color = Pg.cyan,
+                        fontFamily = Mono,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1,
+                    )
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.End,
+                ) {
+                    SectionLabel("Отправка", color = Pg.accent2)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = if (active) formatRate(last.up) else "—",
+                        color = Pg.accent2,
+                        fontFamily = Mono,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SessionMetric(
+                    label = "Получено",
+                    value = if (active) formatBytes(downTotal) else "—",
+                    modifier = Modifier.weight(1f),
+                )
+                SessionMetric(
+                    label = "Отправлено",
+                    value = if (active) formatBytes(upTotal) else "—",
+                    modifier = Modifier.weight(1f),
+                )
+                SessionMetric(
+                    label = "Сессия",
+                    value = if (active) formatDuration(elapsed) else "—",
+                    modifier = Modifier.weight(1f),
+                )
+                SessionMetric(
+                    label = "Соединения",
+                    value = if (active) connectionCount.toString() else "—",
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            if (!active) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "Подключитесь, чтобы видеть скорость и объём трафика.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionMetric(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        Text(
+            text = label,
+            color = Pg.faint,
+            fontFamily = Inter,
+            fontSize = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = value,
+            color = Pg.text,
+            fontFamily = Mono,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -836,7 +1037,7 @@ private fun UpdateCard(state: UpdateUiState) {
                         fontSize = 14.sp,
                     )
                     Text(
-                        text = "Ядро $CORE_LABEL $CORE_VERSION входит в APK",
+                        text = "Ядро обновляется вместе с приложением",
                         color = Pg.faint,
                         fontFamily = Inter,
                         fontSize = 10.sp,
@@ -1043,18 +1244,12 @@ private fun SettingsScreen(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Уведомления, виджет и приложение",
+                    text = "Уведомления, виджет, обновления и приложение",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,
                 )
             }
-            Text(
-                text = "v${BuildConfig.VERSION_NAME}",
-                color = Pg.faint,
-                fontFamily = Mono,
-                fontSize = 10.sp,
-            )
         }
 
         Spacer(Modifier.height(18.dp))
@@ -1196,6 +1391,11 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
+private enum class ServerSection(val label: String) {
+    Servers("Серверы"),
+    Subscriptions("Подписки"),
+}
+
 @Composable
 private fun ServersScreen(
     profiles: List<ProfileSummary>,
@@ -1209,6 +1409,16 @@ private fun ServersScreen(
     onDeleteSubscription: (SubscriptionInfo) -> Unit,
     onAutoUpdate: (SubscriptionInfo, Boolean) -> Unit,
 ) {
+    var section by remember {
+        mutableStateOf(
+            if (profiles.isEmpty() && subscriptions.isNotEmpty()) {
+                ServerSection.Subscriptions
+            } else {
+                ServerSection.Servers
+            },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1227,11 +1437,7 @@ private fun ServersScreen(
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = "${profiles.size} ${profilesWord(profiles.size)}" +
-                        if (subscriptions.isNotEmpty()) {
-                            " · ${subscriptions.size} ${subscriptionWord(subscriptions.size)}"
-                        } else {
-                            ""
-                        },
+                        if (BuildConfig.LITE_CORE) " · только VLESS/TCP" else "",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,
@@ -1244,6 +1450,14 @@ private fun ServersScreen(
             )
         }
 
+        Spacer(Modifier.height(12.dp))
+        ServerSectionTabs(
+            section = section,
+            serverCount = profiles.size,
+            subscriptionCount = subscriptions.size,
+            onSelect = { section = it },
+        )
+
         Spacer(Modifier.height(16.dp))
 
         LazyColumn(
@@ -1251,38 +1465,82 @@ private fun ServersScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(bottom = 16.dp),
         ) {
-            if (subscriptions.isNotEmpty()) {
-                item(key = "subscriptions-label") {
-                    SectionLabel("Подписки")
+            when (section) {
+                ServerSection.Servers -> {
+                    if (profiles.isEmpty()) {
+                        item(key = "empty-servers") {
+                            EmptyServers(onAdd)
+                        }
+                    } else {
+                        items(profiles, key = { it.id }) { profile ->
+                            ServerRow(
+                                profile = profile,
+                                selected = profile.id == activeId,
+                                onSelect = { onSelect(profile) },
+                                onDelete = { onDelete(profile) },
+                            )
+                        }
+                    }
                 }
-                items(subscriptions, key = { "sub-${it.id}" }) { sub ->
-                    SubscriptionCard(
-                        sub = sub,
-                        busy = busy != null,
-                        onRefresh = { onRefreshSubscription(sub) },
-                        onDelete = { onDeleteSubscription(sub) },
-                        onAutoUpdate = { onAutoUpdate(sub, it) },
-                    )
-                }
-                item(key = "servers-label") {
-                    Spacer(Modifier.height(6.dp))
-                    SectionLabel("Серверы")
+
+                ServerSection.Subscriptions -> {
+                    if (subscriptions.isEmpty()) {
+                        item(key = "empty-subscriptions") {
+                            EmptySubscriptions(onAdd)
+                        }
+                    } else {
+                        items(subscriptions, key = { "sub-${it.id}" }) { sub ->
+                            SubscriptionCard(
+                                sub = sub,
+                                busy = busy != null,
+                                onRefresh = { onRefreshSubscription(sub) },
+                                onDelete = { onDeleteSubscription(sub) },
+                                onAutoUpdate = { onAutoUpdate(sub, it) },
+                            )
+                        }
+                    }
                 }
             }
+        }
+    }
+}
 
-            if (profiles.isEmpty()) {
-                item(key = "empty-servers") {
-                    EmptyServers(onAdd)
-                }
-            } else {
-                items(profiles, key = { it.id }) { profile ->
-                    ServerRow(
-                        profile = profile,
-                        selected = profile.id == activeId,
-                        onSelect = { onSelect(profile) },
-                        onDelete = { onDelete(profile) },
-                    )
-                }
+@Composable
+private fun ServerSectionTabs(
+    section: ServerSection,
+    serverCount: Int,
+    subscriptionCount: Int,
+    onSelect: (ServerSection) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(9.dp))
+            .background(Pg.bg2)
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        ServerSection.entries.forEach { item ->
+            val selected = item == section
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(if (selected) Pg.accentSoft else Color.Transparent)
+                    .clickable { onSelect(item) }
+                    .padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = when (item) {
+                        ServerSection.Servers -> "${item.label} · $serverCount"
+                        ServerSection.Subscriptions -> "${item.label} · $subscriptionCount"
+                    },
+                    color = if (selected) Pg.accent2 else Pg.muted,
+                    fontFamily = Inter,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                    fontSize = 11.sp,
+                )
             }
         }
     }
@@ -1492,7 +1750,11 @@ private fun EmptyServers(onAdd: () -> Unit) {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = "Добавьте share-ссылки, подписку или .ovpn: vless, vmess, trojan, ss, hy2",
+                text = if (BuildConfig.LITE_CORE) {
+                    "Добавьте VLESS-ссылку или подписку. Lite работает только с VLESS/Reality по TCP."
+                } else {
+                    "Добавьте share-ссылки, подписку или .ovpn: vless, vmess, trojan, ss, hy2"
+                },
                 color = Pg.faint,
                 fontFamily = Inter,
                 fontSize = 11.sp,
@@ -1510,22 +1772,124 @@ private fun EmptyServers(onAdd: () -> Unit) {
 }
 
 @Composable
+private fun EmptySubscriptions(onAdd: () -> Unit) {
+    Panel(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 36.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(Pg.panel2),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_add),
+                    contentDescription = null,
+                    tint = Pg.faint,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = "Пока нет подписок",
+                color = Pg.text,
+                fontFamily = Inter,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Добавьте https-ссылку — серверы загрузятся и будут обновляться автоматически.",
+                color = Pg.faint,
+                fontFamily = Inter,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton(
+                text = "Добавить подписку",
+                onClick = onAdd,
+                icon = painterResource(R.drawable.ic_add),
+            )
+        }
+    }
+}
+
+@Composable
 private fun AddDialog(
     busy: String?,
+    lite: Boolean,
+    error: String?,
     onDismiss: () -> Unit,
-    onImport: (String) -> Unit,
-    onAddSubscription: (String, String) -> Unit,
+    onSubmit: (String) -> Unit,
 ) {
-    var mode by remember { mutableStateOf(AddMode.Links) }
     var text by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
-    var fileError by remember { mutableStateOf<String?>(null) }
+    var localError by remember { mutableStateOf<String?>(null) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val locked = busy != null
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val subscription = isSubscriptionLink(text)
+    val hasCamera = remember {
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+    }
+    val scanOptions = remember {
+        ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt("Наведите камеру на QR-код")
+            .setBeepEnabled(false)
+            .setOrientationLocked(false)
+    }
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val contents = result.contents?.trim().orEmpty()
+        if (contents.isNotEmpty()) {
+            text = contents
+            localError = null
+        }
+    }
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            scanLauncher.launch(scanOptions)
+        } else {
+            localError = "Нет разрешения на камеру"
+        }
+    }
+    fun startScan() {
+        localError = null
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            scanLauncher.launch(scanOptions)
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val decoded = withContext(Dispatchers.IO) { QrImage.decode(context, uri) }
+                if (decoded.isNullOrBlank()) {
+                    localError = "QR-код на изображении не найден"
+                } else {
+                    text = decoded
+                    localError = null
+                }
+            }
+        }
+    }
+    val configPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
         if (uri != null) {
             val content = runCatching {
                 context.contentResolver.openInputStream(uri)
@@ -1533,10 +1897,10 @@ private fun AddDialog(
                     ?.use { it.readText() }
             }.getOrNull()
             if (content.isNullOrBlank()) {
-                fileError = "Не удалось прочитать выбранный файл"
+                localError = "Не удалось прочитать выбранный файл"
             } else {
-                fileError = null
-                onImport(content)
+                localError = null
+                onSubmit(content)
             }
         }
     }
@@ -1563,11 +1927,7 @@ private fun AddDialog(
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = when (mode) {
-                            AddMode.Links -> "Одна или несколько share-ссылок"
-                            AddMode.Subscription -> "Серверы загрузятся из подписки"
-                            AddMode.OpenVpn -> "Импорт файла .ovpn"
-                        },
+                        text = "Ссылка, подписка или конфиг",
                         color = Pg.faint,
                         fontFamily = Inter,
                         fontSize = 11.sp,
@@ -1582,96 +1942,86 @@ private fun AddDialog(
 
             Spacer(Modifier.height(14.dp))
 
-            AddModeTabs(mode) { mode = it }
+            PgField(
+                value = text,
+                onValueChange = {
+                    text = it
+                    localError = null
+                },
+                placeholder = if (lite) {
+                    "vless://…\nhttps://…/sub"
+                } else {
+                    "vless://…  vmess://…  trojan://…  ss://…\nhysteria2://…  tuic://…  openvpn://…\nhttps://…/sub  ·  Clash YAML  ·  .ovpn"
+                },
+                minLines = 5,
+                maxLines = 8,
+            )
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = when {
+                    subscription -> "Похоже на подписку: серверы загрузятся по HTTPS и будут обновляться автоматически."
+                    text.isNotBlank() -> "Будет добавлен сервер или несколько ссылок."
+                    lite -> "Lite принимает только VLESS/Reality по TCP."
+                    else -> "Формат определится сам: ссылка, подписка, Clash YAML или .ovpn."
+                },
+                color = if (subscription) Pg.accent2 else Pg.faint,
+                fontFamily = Inter,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+            )
 
-            when (mode) {
-                AddMode.Links -> {
-                    PgField(
-                        value = text,
-                        onValueChange = { text = it },
-                        placeholder = "vless://…\nvmess://…\ntrojan://…\nss://…  hy2://…",
-                        minLines = 5,
-                        maxLines = 8,
-                    )
-                }
+            Spacer(Modifier.height(8.dp))
 
-                AddMode.Subscription -> {
-                    PgField(
-                        value = name,
-                        onValueChange = { name = it },
-                        placeholder = "Название (необязательно)",
-                        singleLine = true,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    PgField(
-                        value = url,
-                        onValueChange = { url = it },
-                        placeholder = "https://…/sub/…",
-                        singleLine = true,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "Только https. Серверы и трафик подписки обновляются автоматически.",
-                        color = Pg.faint,
-                        fontFamily = Inter,
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp,
-                    )
-                }
+            TextButton(
+                onClick = {
+                    val pasted = clipboard.getText()?.text?.trim().orEmpty()
+                    if (pasted.isNotBlank()) {
+                        text = pasted
+                        localError = null
+                    } else {
+                        localError = "Буфер обмена пуст"
+                    }
+                },
+                enabled = !locked,
+                colors = ButtonDefaults.textButtonColors(contentColor = Pg.accent2),
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    text = "Вставить из буфера",
+                    fontFamily = Inter,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp,
+                )
+            }
 
-                AddMode.OpenVpn -> {
-                    Text(
-                        text = "Выберите файл .ovpn. Поддерживаются профили со встроенными сертификатами и ключами (inline), без внешних файлов.",
-                        color = Pg.muted,
-                        fontFamily = Inter,
-                        fontSize = 11.sp,
-                        lineHeight = 16.sp,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    GhostButton(
-                        text = "Выбрать .ovpn",
-                        onClick = {
-                            fileError = null
-                            picker.launch(arrayOf("*/*"))
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        icon = painterResource(R.drawable.ic_add),
-                    )
-                    fileError?.let { error ->
-                        Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (hasCamera) {
+                    TextButton(
+                        onClick = { startScan() },
+                        enabled = !locked,
+                        colors = ButtonDefaults.textButtonColors(contentColor = Pg.accent2),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+                    ) {
                         Text(
-                            text = error,
-                            color = Pg.red,
+                            text = "Сканировать QR",
                             fontFamily = Inter,
-                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 12.sp,
                         )
                     }
                 }
-            }
-
-            Spacer(Modifier.height(4.dp))
-
-            if (mode != AddMode.OpenVpn) {
                 TextButton(
                     onClick = {
-                        val pasted = clipboard.getText()?.text?.trim().orEmpty()
-                        if (pasted.isNotBlank()) {
-                            if (pasted.startsWith("http://", true) || pasted.startsWith("https://", true)) {
-                                mode = AddMode.Subscription
-                                url = pasted
-                            } else {
-                                text = pasted
-                            }
-                        }
+                        localError = null
+                        imagePicker.launch("image/*")
                     },
                     enabled = !locked,
                     colors = ButtonDefaults.textButtonColors(contentColor = Pg.accent2),
                     contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
                 ) {
                     Text(
-                        text = "Вставить из буфера",
+                        text = "QR из фото",
                         fontFamily = Inter,
                         fontWeight = FontWeight.Medium,
                         fontSize = 12.sp,
@@ -1679,7 +2029,32 @@ private fun AddDialog(
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
+            if (!lite) {
+                Spacer(Modifier.height(8.dp))
+                GhostButton(
+                    text = "Добавить конфиг .ovpn",
+                    onClick = {
+                        localError = null
+                        configPicker.launch(arrayOf("*/*"))
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    icon = painterResource(R.drawable.ic_add),
+                )
+            }
+
+            val shownError = localError ?: error
+            if (!shownError.isNullOrBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = shownError,
+                    color = Pg.red,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(
@@ -1696,69 +2071,9 @@ private fun AddDialog(
                 }
                 Spacer(Modifier.weight(1f))
                 PrimaryButton(
-                    text = busy ?: when (mode) {
-                        AddMode.Links -> "Импортировать"
-                        AddMode.Subscription -> "Добавить подписку"
-                        AddMode.OpenVpn -> "Выбрать файл"
-                    },
-                    onClick = {
-                        when (mode) {
-                            AddMode.Links -> onImport(text)
-                            AddMode.Subscription -> onAddSubscription(url, name)
-                            AddMode.OpenVpn -> {
-                                fileError = null
-                                picker.launch(arrayOf("*/*"))
-                            }
-                        }
-                    },
-                    enabled = !locked && when (mode) {
-                        AddMode.Links -> text.isNotBlank()
-                        AddMode.Subscription -> url.isNotBlank()
-                        AddMode.OpenVpn -> true
-                    },
-                )
-            }
-        }
-    }
-}
-
-private enum class AddMode {
-    Links,
-    Subscription,
-    OpenVpn,
-}
-
-@Composable
-private fun AddModeTabs(mode: AddMode, onSelect: (AddMode) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(Pg.bg2)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        listOf(
-            AddMode.Links to "Ссылки",
-            AddMode.Subscription to "Подписка",
-            AddMode.OpenVpn to "OpenVPN",
-        ).forEach { (id, label) ->
-            val selected = mode == id
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (selected) Pg.accentSoft else Color.Transparent)
-                    .clickable { onSelect(id) }
-                    .padding(vertical = 8.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = label,
-                    color = if (selected) Pg.accent2 else Pg.muted,
-                    fontFamily = Inter,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                    fontSize = 11.sp,
+                    text = busy ?: if (subscription) "Добавить подписку" else "Импортировать",
+                    onClick = { onSubmit(text) },
+                    enabled = !locked && text.isNotBlank(),
                 )
             }
         }
@@ -1894,7 +2209,7 @@ private fun MonitorScreen(status: VpnStatus) {
         Row(verticalAlignment = Alignment.Bottom) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = "Мониторинг",
+                    text = "Трафик",
                     color = Pg.text,
                     fontFamily = Inter,
                     fontWeight = FontWeight.Bold,
@@ -1903,18 +2218,12 @@ private fun MonitorScreen(status: VpnStatus) {
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Трафик через $CORE_LABEL",
+                    text = "Скорость и объём через $CORE_LABEL",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,
                 )
             }
-            Text(
-                text = "v${BuildConfig.VERSION_NAME}",
-                color = Pg.faint,
-                fontFamily = Mono,
-                fontSize = 10.sp,
-            )
         }
 
         Spacer(Modifier.height(18.dp))
@@ -2168,17 +2477,6 @@ private fun profilesWord(count: Int): String {
         mod10 == 1 -> "профиль"
         mod10 in 2..4 -> "профиля"
         else -> "профилей"
-    }
-}
-
-private fun subscriptionWord(count: Int): String {
-    val mod100 = count % 100
-    val mod10 = count % 10
-    return when {
-        mod100 in 11..14 -> "подписок"
-        mod10 == 1 -> "подписка"
-        mod10 in 2..4 -> "подписки"
-        else -> "подписок"
     }
 }
 
