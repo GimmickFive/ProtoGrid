@@ -102,7 +102,7 @@ fun RoutingScreen(
         Row(verticalAlignment = Alignment.Bottom) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = "Маршрутизация",
+                    text = "Маршруты",
                     color = Pg.text,
                     fontFamily = Inter,
                     fontWeight = FontWeight.Bold,
@@ -117,12 +117,6 @@ fun RoutingScreen(
                     fontSize = 12.sp,
                 )
             }
-            Text(
-                text = "1.14.4",
-                color = Pg.faint,
-                fontFamily = Mono,
-                fontSize = 10.sp,
-            )
         }
 
         Spacer(Modifier.height(16.dp))
@@ -136,7 +130,7 @@ fun RoutingScreen(
                 .padding(3.dp),
         ) {
             Segment(
-                label = "По приложениям",
+                label = "Приложения",
                 selected = mode == RouteMode.Apps,
                 modifier = Modifier.weight(1f),
                 onClick = {
@@ -145,7 +139,7 @@ fun RoutingScreen(
                 },
             )
             Segment(
-                label = "По трафику",
+                label = "Правила",
                 selected = mode == RouteMode.Traffic,
                 modifier = Modifier.weight(1f),
                 onClick = {

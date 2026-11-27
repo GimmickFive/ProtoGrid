@@ -261,7 +261,7 @@ class ProtoGridVpnService :
 
     // --- PlatformInterface ----------------------------------------------------
 
-    override fun localDNSTransport(): LocalDNSTransport? = null
+    override fun localDNSTransport(): LocalDNSTransport? = AndroidLocalResolver
 
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
 

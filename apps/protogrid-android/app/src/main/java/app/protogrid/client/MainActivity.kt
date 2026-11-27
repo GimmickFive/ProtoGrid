@@ -878,6 +878,30 @@ private fun SessionSummary(status: VpnStatus, onOpen: () -> Unit) {
     val last = points.lastOrNull() ?: TrafficPoint(0, 0)
     val elapsed = startedAt?.let { (System.currentTimeMillis() - it).coerceAtLeast(0L) } ?: 0L
 
+    if (!active && startedAt == null) {
+        Panel(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(onClick = onOpen),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionLabel("Трафик сессии")
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "нет подключения →",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+        return
+    }
+
     Panel(
         Modifier
             .fillMaxWidth()
@@ -1013,7 +1037,7 @@ private fun UpdateCard(state: UpdateUiState) {
                         fontSize = 14.sp,
                     )
                     Text(
-                        text = "Ядро $CORE_LABEL $CORE_VERSION входит в APK",
+                        text = "Ядро обновляется вместе с приложением",
                         color = Pg.faint,
                         fontFamily = Inter,
                         fontSize = 10.sp,
@@ -1413,7 +1437,6 @@ private fun ServersScreen(
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = "${profiles.size} ${profilesWord(profiles.size)}" +
-                        " · ${subscriptions.size} ${subscriptionWord(subscriptions.size)}" +
                         if (BuildConfig.LITE_CORE) " · только VLESS/TCP" else "",
                     color = Pg.faint,
                     fontFamily = Inter,
@@ -1427,15 +1450,13 @@ private fun ServersScreen(
             )
         }
 
-        if (subscriptions.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
-            ServerSectionTabs(
-                section = section,
-                serverCount = profiles.size,
-                subscriptionCount = subscriptions.size,
-                onSelect = { section = it },
-            )
-        }
+        Spacer(Modifier.height(12.dp))
+        ServerSectionTabs(
+            section = section,
+            serverCount = profiles.size,
+            subscriptionCount = subscriptions.size,
+            onSelect = { section = it },
+        )
 
         Spacer(Modifier.height(16.dp))
 
@@ -2456,17 +2477,6 @@ private fun profilesWord(count: Int): String {
         mod10 == 1 -> "профиль"
         mod10 in 2..4 -> "профиля"
         else -> "профилей"
-    }
-}
-
-private fun subscriptionWord(count: Int): String {
-    val mod100 = count % 100
-    val mod10 = count % 10
-    return when {
-        mod100 in 11..14 -> "подписок"
-        mod10 == 1 -> "подписка"
-        mod10 in 2..4 -> "подписки"
-        else -> "подписок"
     }
 }
 
