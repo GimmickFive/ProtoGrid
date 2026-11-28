@@ -1,0 +1,110 @@
+From bdaa9e70ab6f3936b1ef4dbd98bff94738d4c07d Mon Sep 17 00:00:00 2001
+From: ProtoGrid <dev@protogrid.local>
+Date: Sat, 28 Nov 2026 03:08:58 +0300
+Subject: [PATCH] dialer: pin TCP receive buffer on Windows
+
+Windows caps a connection's receive window at the socket buffer size. When system receive-window auto-tuning is disabled (a common result of "optimizer" tools, corporate images and old VPN clients), every stream is limited to 64 KiB / RTT - about 12 Mbit/s at 45 ms - no matter how fast the link is. Most speed tests open several parallel connections, so only single-stream downloads and 4K video suffer.
+
+Set SO_RCVBUF to 4 MiB on outbound TCP sockets before connect. Windows then negotiates window scaling and honours the requested size even when auto-tuning is disabled. The buffer is allocated on demand; 4 MiB covers ~700 Mbit/s at 45 ms RTT and ~1.1 Gbit/s at 30 ms. The control runs through net.Dialer.Control, which is also honoured by the tfo-go path, so it applies to every tunneled TCP connection.
+
+No-op outside Windows: Linux and macOS already grow the window with the bandwidth-delay product, and pinning SO_RCVBUF there would only disable that.
+---
+ common/dialer/default.go        |  4 +++
+ common/dialer/rcvbuf_other.go   | 13 +++++++++
+ common/dialer/rcvbuf_windows.go | 49 +++++++++++++++++++++++++++++++++
+ 3 files changed, 66 insertions(+)
+ create mode 100644 common/dialer/rcvbuf_other.go
+ create mode 100644 common/dialer/rcvbuf_windows.go
+
+diff --git a/common/dialer/default.go b/common/dialer/default.go
+index 75fac2f..d9c4edc 100644
+--- a/common/dialer/default.go
++++ b/common/dialer/default.go
+@@ -195,6 +195,10 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
+ 		dialer.Control = control.Append(dialer.Control, control.DisableUDPFragment())
+ 		listener.Control = control.Append(listener.Control, control.DisableUDPFragment())
+ 	}
++	// Windows only: pin the receive window for tunneled TCP connections. See
++	// rcvbuf_windows.go — disabled system auto-tuning otherwise caps every
++	// stream at 64 KiB, which is ~12 Mbit/s at 45 ms RTT. No-op elsewhere.
++	dialer.Control = control.Append(dialer.Control, setReceiveBufferControl)
+ 	var (
+ 		dialer4    = dialer
+ 		udpDialer4 = dialer
+diff --git a/common/dialer/rcvbuf_other.go b/common/dialer/rcvbuf_other.go
+new file mode 100644
+index 0000000..9443218
+--- /dev/null
++++ b/common/dialer/rcvbuf_other.go
+@@ -0,0 +1,13 @@
++//go:build !windows
++
++package dialer
++
++import "syscall"
++
++// setReceiveBufferControl is a no-op outside Windows. Linux and macOS tune the
++// receive window automatically and grow it with the bandwidth-delay product;
++// pinning SO_RCVBUF there would only disable that autotuning and cap the
++// window at the value we choose.
++func setReceiveBufferControl(network, address string, conn syscall.RawConn) error {
++	return nil
++}
+diff --git a/common/dialer/rcvbuf_windows.go b/common/dialer/rcvbuf_windows.go
+new file mode 100644
+index 0000000..aafb153
+--- /dev/null
++++ b/common/dialer/rcvbuf_windows.go
+@@ -0,0 +1,49 @@
++//go:build windows
++
++package dialer
++
++import (
++	"syscall"
++
++	"golang.org/x/sys/windows"
++)
++
++// receiveBufferSize is the fixed TCP receive buffer for tunneled connections.
++//
++// Windows caps a connection's receive window at the socket buffer size. When
++// receive window auto-tuning is disabled — a common result of "optimizer"
++// tools, corporate images and old VPN clients — the default 64 KiB buffer
++// limits a single stream to 64 KiB / RTT, i.e. ~12 Mbit/s at 45 ms, no matter
++// how fast the link is. Most speed tests open several parallel connections, so
++// the problem only shows up on single-stream downloads.
++//
++// Setting SO_RCVBUF before connect makes Windows negotiate window scaling and
++// use the requested size even when auto-tuning is disabled (Microsoft:
++// "the stack will use the size specified"). 4 MiB covers ~700 Mbit/s at 45 ms
++// and ~1.1 Gbit/s at 30 ms of RTT. The buffer is allocated on demand, so idle
++// connections cost nothing; lower this constant if the client is expected to
++// keep hundreds of flows on a RAM-constrained machine.
++const receiveBufferSize = 4 << 20
++
++// setReceiveBufferControl pins SO_RCVBUF on every outbound TCP socket. It is
++// appended to net.Dialer.Control, so it runs before connect and also works on
++// the tfo-go path (dialSerial builds its control function from d.Control).
++func setReceiveBufferControl(network, address string, conn syscall.RawConn) error {
++	switch network {
++	case "tcp", "tcp4", "tcp6":
++	default:
++		return nil
++	}
++	var sockErr error
++	if err := conn.Control(func(fd uintptr) {
++		sockErr = windows.SetsockoptInt(
++			windows.Handle(fd),
++			windows.SOL_SOCKET,
++			windows.SO_RCVBUF,
++			receiveBufferSize,
++		)
++	}); err != nil {
++		return err
++	}
++	return sockErr
++}
+-- 
+2.34.1
+
