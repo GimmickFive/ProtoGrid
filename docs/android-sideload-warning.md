@@ -63,8 +63,15 @@ APK установщику.
 - **0.4.9** — без встроенного установщика, Play Protect чистый, обновление
   через браузер/GitHub.
 - **0.4.11+** — обновление из приложения работает, но установку через
-  системный установщик Play Protect блокирует; ставьте через `adb install`
-  или отключите проверку Play Protect.
+  системный установщик Play Protect блокирует. Обычный `adb install` 0.4.11
+  тоже падает с `INSTALL_FAILED_VERIFICATION_FAILURE`; помогает временное
+  отключение проверки adb-установок:
+  ```bash
+  adb shell settings put global verifier_verify_adb_installs 0
+  adb install -r ProtoGrid-0.4.11-lite-arm64-v8a.apk
+  adb shell settings put global verifier_verify_adb_installs 1
+  ```
+  После установки настройку можно вернуть обратно.
 - **Play/RuStore/F-Droid** — единственный способ получить и удобные
   обновления, и отсутствие предупреждения.
 
