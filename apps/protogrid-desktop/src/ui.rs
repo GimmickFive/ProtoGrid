@@ -3880,6 +3880,10 @@ fn subscription_card(
                         let response = ui.add(
                             egui::Label::new(RichText::new(text).size(10.5).color(color))
                                 .truncate()
+                                // An error gets its own tooltip below; the
+                                // built-in "show full text" one would stack on
+                                // top of it.
+                                .show_tooltip_when_elided(sub.last_error.is_none())
                                 .selectable(false),
                         );
                         if let Some(error) = &sub.last_error {
@@ -4778,6 +4782,9 @@ fn rule_row(ui: &mut Ui, p: &Palette, view: &mut View, engine: &Engine, row: &Ru
             ui.add(
                 egui::Label::new(theme::semibold(&title, 11.5).color(p.text))
                     .truncate()
+                    // `Label` already shows its own tooltip when elided; keep a
+                    // single one from the explicit `on_hover_text` below.
+                    .show_tooltip_when_elided(false)
                     .selectable(false),
             )
             .on_hover_text(title);
@@ -5317,19 +5324,6 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         search_box(ui, p, &mut view.logs_filter, "Фильтр по тексту…", 260.0);
-                        ui.add_space(2.0);
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        for (filter, label) in [
-                            (LogFilter::All, "Все"),
-                            (LogFilter::Debug, "Отладка"),
-                            (LogFilter::Info, "Инфо"),
-                            (LogFilter::Warn, "Внимание"),
-                            (LogFilter::Error, "Ошибки"),
-                        ] {
-                            if log_chip(ui, p, label, view.log_level == filter).clicked() {
-                                view.log_level = filter;
-                            }
-                        }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let mut auto_scroll = view.auto_scroll;
                             if switch_small(ui, p, &mut auto_scroll) {
@@ -5341,14 +5335,26 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
-                        ui.label(
-                            RichText::new("КАНАЛ")
-                                .size(9.0)
-                                .color(p.faint)
-                                .family(FontFamily::Monospace),
-                        );
+                        log_group_label(ui, p, "УРОВЕНЬ");
                         ui.add_space(2.0);
-                        if log_chip(ui, p, "Все", view.log_channel.is_none())
+                        for (filter, label) in [
+                            (LogFilter::All, "Все уровни"),
+                            (LogFilter::Debug, "Отладка"),
+                            (LogFilter::Info, "Инфо"),
+                            (LogFilter::Warn, "Внимание"),
+                            (LogFilter::Error, "Ошибки"),
+                        ] {
+                            if log_chip(ui, p, label, view.log_level == filter).clicked() {
+                                view.log_level = filter;
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        log_group_label(ui, p, "КАНАЛ");
+                        ui.add_space(2.0);
+                        if log_chip(ui, p, "Все каналы", view.log_channel.is_none())
                             .on_hover_text("Показывать все каналы")
                             .clicked()
                         {
@@ -5473,7 +5479,7 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "фильтр: {} · канал: {}",
+                                    "уровень: {} · канал: {}",
                                     match view.log_level {
                                         LogFilter::All => "все",
                                         LogFilter::Debug => "отладка",
@@ -5491,6 +5497,15 @@ fn logs_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot, eng
                     });
                 });
         });
+}
+
+fn log_group_label(ui: &mut Ui, p: &Palette, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(9.0)
+            .color(p.faint)
+            .family(FontFamily::Monospace),
+    );
 }
 
 fn log_chip(ui: &mut Ui, p: &Palette, text: &str, selected: bool) -> egui::Response {
