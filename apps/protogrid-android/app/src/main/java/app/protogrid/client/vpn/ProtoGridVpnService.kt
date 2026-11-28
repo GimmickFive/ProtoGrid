@@ -22,6 +22,7 @@ import app.protogrid.client.MainActivity
 import app.protogrid.client.R
 import app.protogrid.client.core.CoreBridge
 import app.protogrid.client.data.AndroidSettings
+import app.protogrid.client.data.BackgroundAccess
 import app.protogrid.client.data.PerAppMode
 import app.protogrid.client.data.ProfileStore
 import io.nekohasekai.libbox.BridgeOptions
@@ -72,6 +73,9 @@ class ProtoGridVpnService :
     @Volatile
     private var stopping = false
 
+    @Volatile
+    private var starting = false
+
     private var commandServer: CommandServer? = null
     private var tunFd: ParcelFileDescriptor? = null
     private var clashApiSecret: String = ""
@@ -84,13 +88,26 @@ class ProtoGridVpnService :
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopTunnel()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                // With the system's "Always-on VPN" enabled the system owns the
+                // connection: a manual stop would only trigger a reconnect.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn()) {
+                    updateNotification(getString(R.string.notification_connected))
+                    return START_STICKY
+                }
+                stopTunnel()
+                return START_NOT_STICKY
+            }
+            ACTION_REFRESH_NOTIFICATION -> {
+                applyNotificationSettings()
+                return START_NOT_STICKY
+            }
         }
 
         stopping = false
         startForegroundNotification(getString(R.string.notification_connecting))
+        refreshAlwaysOnState()
         try {
             ensureCommandServer()
         } catch (error: Throwable) {
@@ -123,8 +140,15 @@ class ProtoGridVpnService :
         commandServer = server
     }
 
-    private suspend fun startTunnel() {
+    private suspend fun startTunnel(force: Boolean = false) {
         if (stopping) return
+        // BootReceiver and the system's always-on VPN can both start us at
+        // boot. Only one tunnel may own the TUN descriptor.
+        if (!force && (starting ||
+                (VpnState.status.value == VpnStatus.Connected && tunFd != null))) {
+            return
+        }
+        starting = true
         try {
             VpnState.update(VpnStatus.Connecting)
             updateNotification(getString(R.string.notification_connecting))
@@ -180,6 +204,8 @@ class ProtoGridVpnService :
             startWidgetUpdates()
         } catch (error: Throwable) {
             fail(error.message ?: error.toString())
+        } finally {
+            starting = false
         }
     }
 
@@ -242,6 +268,20 @@ class ProtoGridVpnService :
         tunFd = null
     }
 
+    /**
+     * Android has no public API to read the always-on VPN setting from an
+     * Activity. Inside VpnService isAlwaysOn() is public from API 29; on older
+     * versions the secure setting is still readable.
+     */
+    private fun refreshAlwaysOnState() {
+        val enabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            isAlwaysOn()
+        } else {
+            BackgroundAccess.alwaysOnPackage(this) == packageName
+        }
+        VpnState.setAlwaysOn(enabled)
+    }
+
     // --- CommandServerHandler -------------------------------------------------
 
     override fun serviceStop() {
@@ -249,7 +289,7 @@ class ProtoGridVpnService :
     }
 
     override fun serviceReload() {
-        scope.launch { startTunnel() }
+        scope.launch { startTunnel(force = true) }
     }
 
     override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus()
@@ -553,11 +593,24 @@ class ProtoGridVpnService :
         }
     }
 
+    /** Applies switched notification settings without reconnecting the tunnel. */
+    private fun applyNotificationSettings() {
+        createNotificationChannel()
+        startNotificationUpdates()
+        val text = if (VpnState.status.value == VpnStatus.Connected) {
+            getString(R.string.notification_connected)
+        } else {
+            getString(R.string.notification_connecting)
+        }
+        updateNotification(text)
+    }
+
     /** Keeps the 4x1 widget's proxy totals fresh while the tunnel is up. */
     private fun startWidgetUpdates() {
         widgetJob?.cancel()
         widgetJob = scope.launch {
             while (isActive) {
+                refreshAlwaysOnState()
                 ProtoGridWidget.updateAll(this@ProtoGridVpnService)
                 delay(WIDGET_UPDATE_MS)
             }
@@ -626,6 +679,19 @@ class ProtoGridVpnService :
         private val RATE_UNITS = arrayOf("Б", "КБ", "МБ", "ГБ")
 
         const val ACTION_STOP = "app.protogrid.client.action.STOP"
+        const val ACTION_REFRESH_NOTIFICATION = "app.protogrid.client.action.REFRESH_NOTIFICATION"
+
+        /** Rebuilds the foreground notification when its settings change. */
+        fun refreshNotification(context: Context) {
+            val status = VpnState.status.value
+            if (status != VpnStatus.Connected && status != VpnStatus.Connecting) return
+            runCatching {
+                context.startService(
+                    Intent(context, ProtoGridVpnService::class.java)
+                        .setAction(ACTION_REFRESH_NOTIFICATION),
+                )
+            }
+        }
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

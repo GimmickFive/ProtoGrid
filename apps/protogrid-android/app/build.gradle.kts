@@ -1,14 +1,12 @@
 import org.gradle.api.GradleException
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.io.File
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.4.11"
+val versionNameEnv = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.5.0-beta"
 val versionCodeEnv = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
 
 // Release builds are arm64-only. For an x86_64 emulator run:
@@ -31,7 +29,7 @@ val requireReleaseKey = System.getenv("PROTOGRID_REQUIRE_RELEASE_KEY") == "1"
 
 android {
     namespace = "app.protogrid.client"
-    compileSdk = 35
+    compileSdk = 37
 
     // Two cores, two APKs: `standard` links the full ProtoGrid-core, `lite`
     // links the same fork built with `protogrid_lite` (VLESS/Reality over TCP
@@ -58,6 +56,9 @@ android {
         targetSdk = 35
         versionCode = versionCodeEnv
         versionName = versionNameEnv
+        // The updater must look for the APK built with these ABIs, not just
+        // for whichever ABI the device prefers.
+        buildConfigField("String", "BUILD_ABIS", "\"${abis.joinToString(",")}\"")
         ndk {
             abiFilters.addAll(abis)
         }
@@ -116,6 +117,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        resValues = true
     }
 
     packaging {
@@ -135,30 +137,22 @@ android {
     }
 }
 
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
-    }
-}
-
 dependencies {
     // The AAR is selected by flavor: the release script/CI builds both from
     // the same patched sing-box tree before Gradle runs.
     add("standardImplementation", files("libs/libbox.aar"))
     add("liteImplementation", files("libs/libbox-lite.aar"))
 
-    implementation("androidx.core:core-ktx:1.15.0")
-    // PackageManagerCompat.getUnusedAppRestrictionsStatus returns ListenableFuture.
-    implementation("com.google.guava:listenablefuture:1.0")
-    implementation("androidx.activity:activity-compose:1.10.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
+    implementation("androidx.core:core-ktx:1.19.1")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     // QR: camera scanning through ZXing's capture activity and offline image
     // decoding through the same core library.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.google.zxing:core:3.5.3")
 
-    implementation(platform("androidx.compose:compose-bom:2025.04.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")

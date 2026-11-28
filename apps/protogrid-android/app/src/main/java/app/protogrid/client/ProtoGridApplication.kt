@@ -3,6 +3,7 @@ package app.protogrid.client
 import android.app.Application
 import android.os.Build
 import android.util.Log
+import app.protogrid.client.vpn.TrafficMonitor
 import app.protogrid.client.widget.ProtoGridWidget
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
@@ -13,6 +14,9 @@ class ProtoGridApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // The VPN service may be restarted by the system after the process was
+        // killed; restore chart history before any UI or widget reads it.
+        TrafficMonitor.restore(this)
         setupLibbox()
         // Existing widgets keep the old RemoteViews after an APK update until
         // the next tunnel state change; refresh them once on app start.

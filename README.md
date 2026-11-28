@@ -2,7 +2,7 @@
 
 **ProtoGrid** — нативный кроссплатформенный клиент для прокси на Rust. Интерфейс построен на **egui/eframe**: без WebView, HTML, JavaScript и Node.js. Приложение само генерирует конфигурации и запускает **sing-box** или **Xray-core**, а вы управляете серверами, подписками, маршрутизацией и режимом подключения из одного окна.
 
-**Статус:** публичная бета.
+**Статус:** публичная бета [v0.5.0-beta](https://github.com/GimmickFive/ProtoGrid/releases/tag/v0.5.0-beta).
 
 **Сайт:** <https://gimmickfive.github.io/ProtoGrid/> · **Релизы:** <https://github.com/GimmickFive/ProtoGrid/releases>
 
@@ -23,7 +23,7 @@
 - **Подписки**: base64, списки ссылок, Clash/Clash.Meta YAML, трафик и срок из `subscription-userinfo`, автообновление раз в 12 часов. Ссылка подписки принимается только по HTTPS, чтобы токен не уходил открытым текстом.
 - **Настройки**: экспорт и импорт JSON с настройками, правилами и профилями маршрутизации. Серверы, UUID, пароли и токены подписок в файл не попадают.
 - **Три ядра, у ProtoGrid два варианта**: ProtoGrid-core (обычный — XHTTP/MASQUE/XDRIVE, и Lite — только VLESS/Reality по TCP с TUN и mixed), sing-box и Xray-core — у каждого свой бинарник и путь, автоопределение версии; стоковые ядра можно скачать с GitHub.
-- **Обновления**: проверка новых релизов ProtoGrid, sing-box и Xray-core на GitHub при запуске и по кнопке. Файл скачивается только после подтверждения, с проверкой размера и SHA-256; Android-клиент скачивает APK и открывает системный установщик. ProtoGrid-core входит в сборку и обновляется вместе с приложением.
+- **Обновления**: проверка новых релизов ProtoGrid, sing-box и Xray-core на GitHub при запуске и по кнопке. Файл скачивается только после подтверждения, с проверкой размера и SHA-256; Android-клиент открывает страницу релиза, APK ставится вручную. ProtoGrid-core входит в сборку и обновляется вместе с приложением.
 - **OpenVPN**: через штатный endpoint sing-box 1.14+ (`with_openvpn`), только на sing-box-подобных ядрах; внешний бинарник `openvpn` не нужен.
 - **Подключение**: системный прокси (Windows / GNOME / KDE / macOS), TUN (sing-box), локальные HTTP/SOCKS-порты.
 - **Маршрутизация**: пресеты «Жизнь в РФ / Глобальный прокси / Прямой», несколько собственных профилей (копия текущего набора правил или пустой), правила по доменам, IP/CIDR, GeoIP, GeoSite и процессам. Стартовый слепок `geoip-ru`/`category-ru` входит в сборку (Android — в `.so`, desktop — рядом с exe), обновляется из GitHub раз в 7 дней; при недоступности сети используется зашитая/упакованная или последняя скачанная копия.
@@ -145,7 +145,7 @@ cd apps/protogrid-android
 ./gradlew :app:assembleStandardRelease :app:assembleLiteRelease
 ```
 
-APK прикрепляются к GitHub Release workflow `.github/workflows/android.yml` по тегу `android-v*` — обычный и Lite. Нужны JDK 17, Android SDK 35 и платформа 24 (libbox собирается с `-androidapi 24`), NDK 28.0.13004108, Go 1.27 и `cargo-ndk`; подпись и секреты описаны в [apps/protogrid-android/README.md](apps/protogrid-android/README.md).
+APK прикрепляются к GitHub Release workflow `.github/workflows/android.yml` по тегу `android-v*` — обычный и Lite. Нужны JDK 17, Android SDK 37 (Build Tools 36.0.0) и платформа 24 (libbox собирается с `-androidapi 24`), NDK 28.0.13004108, Go 1.27 и `cargo-ndk`; подпись и секреты описаны в [apps/protogrid-android/README.md](apps/protogrid-android/README.md).
 
 Ту же цепочку можно запустить одной командой: `ANDROID_HOME=/path/to/sdk ./scripts/build-android.sh`. Для x86_64-эмулятора — `./scripts/build-android.sh x86_64`.
 

@@ -31,7 +31,7 @@ jobs:
       - name: Install Android SDK, build tools and NDK
         run: |
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" "platforms;android-24" "build-tools;35.0.0" "ndk;28.0.13004108"
+          sdkmanager "platforms;android-37" "platforms;android-24" "build-tools;36.0.0" "ndk;28.0.13004108"
 
       - name: Build ProtoGrid-core from sing-box v1.14.4 + patches
         run: |

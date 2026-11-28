@@ -5,8 +5,8 @@
 #   ANDROID_HOME=/path/to/android-sdk ./scripts/build-android.sh [arm64-v8a|x86_64]
 #
 # arm64-v8a is the release ABI; x86_64 is for the Android emulator.
-# Requires JDK 17, Android SDK 35 and platform 24, NDK 28.0.13004108, Go 1.27,
-# Rust with the matching target and cargo-ndk.
+# Requires JDK 17, Android SDK 37 (Build Tools 36.0.0) and platform 24,
+# NDK 28.0.13004108, Go 1.27, Rust with the matching target and cargo-ndk.
 #
 # Two libbox AARs are produced from the same patched sing-box tree:
 #   app/libs/libbox.aar       -> :app:assembleStandardRelease

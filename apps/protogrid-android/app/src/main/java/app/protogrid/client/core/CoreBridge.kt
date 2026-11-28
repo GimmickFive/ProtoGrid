@@ -1,5 +1,6 @@
 package app.protogrid.client.core
 
+import android.util.Log
 import app.protogrid.client.BuildConfig
 
 /**
@@ -11,8 +12,14 @@ import app.protogrid.client.BuildConfig
 object CoreBridge {
     init {
         System.loadLibrary("protogrid_mobile")
-        setLiteMode(BuildConfig.LITE_CORE)
+        // Older bundled x86_64 libraries (used by the emulator) may not export
+        // setLiteMode yet. Do not let a missing optional JNI symbol poison the
+        // whole class: parseLinks/buildConfig are still available.
+        runCatching { setLiteMode(BuildConfig.LITE_CORE) }
+            .onFailure { Log.w(TAG, "setLiteMode is unavailable in the bundled core", it) }
     }
+
+    private const val TAG = "ProtoGridCore"
 
     /**
      * Tells the shared Rust core whether this APK links the Lite libbox.

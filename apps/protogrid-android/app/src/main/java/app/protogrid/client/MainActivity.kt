@@ -4,11 +4,13 @@ import android.Manifest
 import android.app.Activity
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -87,9 +90,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
-import androidx.core.content.IntentCompat
-import androidx.core.content.PackageManagerCompat
-import androidx.core.content.UnusedAppRestrictionsConstants
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -184,7 +184,28 @@ private const val CORE_VERSION = "1.14.4"
 /** Display name of the core linked into this flavor's libbox.aar. */
 private val CORE_LABEL = if (BuildConfig.LITE_CORE) "ProtoGrid-core Lite" else "ProtoGrid-core"
 
+private enum class AutonomyAction { APP_SETTINGS, VPN_SETTINGS, VPN_PERMISSION }
+
+private data class AutonomyIssue(
+    val label: String,
+    val action: AutonomyAction,
+)
+
+/** Legacy (Android 9 and below) fallback: hidden system setting, false if unset or unreadable. */
+private fun isAlwaysOnVpnEnabled(context: Context): Boolean =
+    runCatching {
+        Settings.Secure.getString(context.contentResolver, "always_on_vpn_app") ==
+            context.packageName
+    }.getOrDefault(false)
+
 /** A single http(s) URL is a subscription; everything else is a share link/profile. */
+private fun areNotificationsAllowed(context: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+
 private fun isSubscriptionLink(text: String): Boolean {
     val trimmed = text.trim()
     if (trimmed.isEmpty() || trimmed.contains('\n') || trimmed.contains('\r')) return false
@@ -215,13 +236,57 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     var notificationSpeed by remember { mutableStateOf(routingSettings.notificationSpeed) }
     var autoStart by remember { mutableStateOf(routingSettings.autoStart) }
     var autoStartAllowed by remember { mutableStateOf(BackgroundAccess.autoStartAllowed(context)) }
-    var batteryUnrestricted by remember {
-        mutableStateOf(BackgroundAccess.isBatteryUnrestricted(context))
+    var notificationsAllowed by remember { mutableStateOf(areNotificationsAllowed(context)) }
+    // Android 10+: only VpnService.isAlwaysOn() is reliable, and it is exposed
+    // by the running service as a flow (refreshed every few seconds). Older
+    // versions still allow reading the hidden secure setting from an Activity.
+    val serviceAlwaysOn by VpnState.alwaysOn.collectAsState()
+    var legacyAlwaysOn by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && isAlwaysOnVpnEnabled(context),
+        )
     }
-    var showBatteryHelp by remember { mutableStateOf(false) }
+    val alwaysOnVpn: Boolean? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) serviceAlwaysOn else legacyAlwaysOn
+    var vpnPermissionGranted by remember { mutableStateOf(VpnService.prepare(context) == null) }
     var showAutoStartHelp by remember { mutableStateOf(false) }
     var awaitAutoStartCheck by remember { mutableStateOf(false) }
     var showAutoStartCheck by remember { mutableStateOf(false) }
+    // Previous value, kept until the autostart dialog is actually confirmed.
+    // Without it a swipe/back dismiss leaves the toggle enabled in prefs even
+    // though the user never agreed to the vendor settings step.
+    var pendingAutoStart by remember { mutableStateOf<Boolean?>(null) }
+
+    // Everything that prevents the tunnel from coming back up on its own.
+    // Shown as red plates at the very top of the home screen. Notifications
+    // are intentionally not here: the foreground service runs without them,
+    // the user simply cannot see the status or stop button in the shade.
+    val autonomyIssues = buildList {
+        if (!vpnPermissionGranted) {
+            add(AutonomyIssue("Разрешение VPN не выдано", AutonomyAction.VPN_PERMISSION))
+        }
+        if (alwaysOnVpn == false) {
+            add(AutonomyIssue("«Всегда включённый VPN» выключен", AutonomyAction.VPN_SETTINGS))
+        }
+        if (!autoStart) {
+            add(AutonomyIssue("Автозапуск выключен", AutonomyAction.APP_SETTINGS))
+        }
+        if (autoStartAllowed == false) {
+            add(AutonomyIssue("Автозапуск запрещён системой", AutonomyAction.APP_SETTINGS))
+        }
+    }
+
+    fun commitAutoStart() {
+        pendingAutoStart = null
+    }
+
+    fun rollbackAutoStart() {
+        pendingAutoStart?.let { previous ->
+            autoStart = previous
+            routingSettings.autoStart = previous
+        }
+        pendingAutoStart = null
+    }
 
     // The exemption can also be changed from the system settings app, so
     // re-read it every time the UI comes back to the foreground. Use the
@@ -231,8 +296,15 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME) {
-                batteryUnrestricted = BackgroundAccess.isBatteryUnrestricted(context)
+                // These prefs can be changed by the service or cleared outside
+                // this composition; keep the switches in sync on every return.
+                silentNotification = routingSettings.silentNotification
+                notificationSpeed = routingSettings.notificationSpeed
+                autoStart = routingSettings.autoStart
                 autoStartAllowed = BackgroundAccess.autoStartAllowed(context)
+                notificationsAllowed = areNotificationsAllowed(context)
+                legacyAlwaysOn = isAlwaysOnVpnEnabled(context)
+                vpnPermissionGranted = VpnService.prepare(context) == null
                 ProtoGridWidget.updateAll(context)
                 if (awaitAutoStartCheck) {
                     awaitAutoStartCheck = false
@@ -240,10 +312,12 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                         true -> {
                             autoStart = true
                             routingSettings.autoStart = true
+                            commitAutoStart()
                         }
                         false -> {
                             autoStart = false
                             routingSettings.autoStart = false
+                            commitAutoStart()
                         }
                         null -> showAutoStartCheck = true
                     }
@@ -276,7 +350,8 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
     val vpnPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
+        vpnPermissionGranted = result.resultCode == Activity.RESULT_OK
+        if (vpnPermissionGranted) {
             ProtoGridVpnService.start(context)
         } else {
             notice = "Разрешение на VPN не выдано"
@@ -285,15 +360,15 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { }
+    ) { granted ->
+        notificationsAllowed = granted || areNotificationsAllowed(context)
+        if (!notificationsAllowed) {
+            notice = "Без разрешения на уведомления VPN не сможет показать статус"
+        }
+    }
 
     LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!areNotificationsAllowed(context)) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
@@ -452,16 +527,11 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         )
     }
 
-    fun openBackgroundAccess() {
+    fun openVpnSettings() {
         val opened = runCatching {
-            context.startActivity(BackgroundAccess.batteryRequestIntent(context))
+            context.startActivity(BackgroundAccess.vpnSettingsIntent(context))
         }.isSuccess
-        // Some ROMs do not show the direct prompt; explain the list instead.
-        if (!opened) showBatteryHelp = true
-    }
-
-    fun openBatterySettings() {
-        showBatteryHelp = true
+        if (!opened) notice = "Не удалось открыть настройки VPN"
     }
 
     LaunchedEffect(Unit) {
@@ -523,6 +593,9 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                         onOpenRouting = { goToTab(Tab.Routing) },
                         onOpenTraffic = { goToTab(Tab.Monitor) },
                         onOpenSettings = { goToTab(Tab.Settings) },
+                        onOpenVpnSettings = ::openVpnSettings,
+                        onRequestVpnPermission = { connect() },
+                        autonomyIssues = autonomyIssues,
                         routingSummary = "${routingSettings.trafficPreset.label} · ${routingSettings.perAppSummary()}",
                     )
 
@@ -552,22 +625,36 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                         notificationSpeed = notificationSpeed,
                         autoStart = autoStart,
                         autoStartAllowed = autoStartAllowed,
-                        batteryUnrestricted = batteryUnrestricted,
+                        notificationsAllowed = notificationsAllowed,
+                        alwaysOnVpn = alwaysOnVpn,
                         onSilentNotification = {
                             silentNotification = it
                             routingSettings.silentNotification = it
+                            ProtoGridVpnService.refreshNotification(context)
                         },
                         onNotificationSpeed = {
                             notificationSpeed = it
                             routingSettings.notificationSpeed = it
+                            ProtoGridVpnService.refreshNotification(context)
                         },
-                        onAutoStart = {
-                            autoStart = it
-                            routingSettings.autoStart = it
-                            if (it) showAutoStartHelp = true
+                        onAutoStart = { enabled ->
+                            pendingAutoStart = autoStart
+                            autoStart = enabled
+                            routingSettings.autoStart = enabled
+                            if (enabled) {
+                                showAutoStartHelp = true
+                            } else {
+                                pendingAutoStart = null
+                            }
                         },
-                        onRequestBackground = ::openBackgroundAccess,
-                        onOpenBatterySettings = ::openBatterySettings,
+                        onRequestNotifications = {
+                            runCatching {
+                                context.startActivity(
+                                    BackgroundAccess.notificationSettingsIntent(context),
+                                )
+                            }
+                        },
+                        onOpenVpnSettings = ::openVpnSettings,
                         onPinWidget = ::pinWidget,
                     )
             }
@@ -584,49 +671,19 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
         )
     }
 
-    if (showBatteryHelp) {
-        AlertDialog(
-            onDismissRequest = { showBatteryHelp = false },
-            title = { Text("Энергосбережение") },
-            text = {
-                Text(
-                    "Android не позволяет приложению выключить это разрешение само. " +
-                        "В системном списке выберите «Все приложения» → ProtoGrid → " +
-                        "«Не оптимизировать». На Xiaomi/HyperOS это также настройки " +
-                        "приложения → Батарея → «Без ограничений».",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showBatteryHelp = false
-                        runCatching {
-                            context.startActivity(BackgroundAccess.batterySettingsIntent())
-                        }
-                    },
-                ) { Text("Список оптимизации") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showBatteryHelp = false
-                        BackgroundAccess.openAppDetails(context)
-                    },
-                ) { Text("Настройки приложения") }
-            },
-        )
-    }
-
     if (showAutoStartHelp) {
         AlertDialog(
-            onDismissRequest = { showAutoStartHelp = false },
+            onDismissRequest = {
+                showAutoStartHelp = false
+                rollbackAutoStart()
+            },
             title = { Text("Автозапуск") },
             text = {
                 Text(
                     "ProtoGrid будет поднимать VPN после перезагрузки. На Xiaomi/HyperOS, " +
                         "Huawei, Oppo и Vivo дополнительно включите автозапуск для ProtoGrid " +
-                        "в системном приложении безопасности. Если его нет в списке, " +
-                        "разрешите работу в фоне: настройки приложения → Батарея.",
+                        "в системном приложении безопасности. Если пункта нет в списке, " +
+                        "откройте настройки приложения и найдите «Автозапуск».",
                 )
             },
             confirmButton = {
@@ -642,9 +699,12 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                 TextButton(
                     onClick = {
                         showAutoStartHelp = false
+                        // On MIUI we can actually read the vendor switch, so a
+                        // known "denied" state means the toggle was a lie.
                         if (autoStartAllowed == false) {
-                            autoStart = false
-                            routingSettings.autoStart = false
+                            rollbackAutoStart()
+                        } else {
+                            commitAutoStart()
                         }
                     },
                 ) { Text("Понятно") }
@@ -654,7 +714,10 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
 
     if (showAutoStartCheck) {
         AlertDialog(
-            onDismissRequest = { showAutoStartCheck = false },
+            onDismissRequest = {
+                showAutoStartCheck = false
+                rollbackAutoStart()
+            },
             title = { Text("Проверка автозапуска") },
             text = {
                 Text(
@@ -664,16 +727,18 @@ private fun ProtoGridApp(deepLink: String? = null, onDeepLinkConsumed: () -> Uni
                 )
             },
             confirmButton = {
-                TextButton(onClick = { showAutoStartCheck = false }) {
-                    Text("Да, включил")
-                }
+                TextButton(
+                    onClick = {
+                        showAutoStartCheck = false
+                        commitAutoStart()
+                    },
+                ) { Text("Да, включил") }
             },
             dismissButton = {
                 TextButton(
                     onClick = {
                         showAutoStartCheck = false
-                        autoStart = false
-                        routingSettings.autoStart = false
+                        rollbackAutoStart()
                     },
                 ) { Text("Нет / не нашёл") }
             },
@@ -827,6 +892,9 @@ private fun OverviewScreen(
     onOpenRouting: () -> Unit,
     onOpenTraffic: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenVpnSettings: () -> Unit,
+    onRequestVpnPermission: () -> Unit,
+    autonomyIssues: List<AutonomyIssue>,
     routingSummary: String,
 ) {
     Column(
@@ -835,6 +903,13 @@ private fun OverviewScreen(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 18.dp),
     ) {
+        AutonomyWarnings(
+            autonomyIssues,
+            onOpenSettings,
+            onOpenVpnSettings,
+            onRequestVpnPermission,
+        )
+
         Row(verticalAlignment = Alignment.Bottom) {
             Column(Modifier.weight(1f)) {
                 Text(
@@ -1017,10 +1092,71 @@ private fun OverviewScreen(
 }
 
 @Composable
+private fun AutonomyWarnings(
+    issues: List<AutonomyIssue>,
+    onOpenSettings: () -> Unit,
+    onOpenVpnSettings: () -> Unit,
+    onRequestVpnPermission: () -> Unit,
+) {
+    if (issues.isEmpty()) return
+
+    Text(
+        text = "ДЛЯ АВТОНОМНОЙ РАБОТЫ",
+        color = Pg.red,
+        fontFamily = Mono,
+        fontWeight = FontWeight.Medium,
+        fontSize = 10.sp,
+        letterSpacing = 1.1.sp,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    issues.forEach { issue ->
+        val action = when (issue.action) {
+            AutonomyAction.APP_SETTINGS -> onOpenSettings
+            AutonomyAction.VPN_SETTINGS -> onOpenVpnSettings
+            AutonomyAction.VPN_PERMISSION -> onRequestVpnPermission
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Pg.red.copy(alpha = 0.09f))
+                .border(1.dp, Pg.red.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                .clickable(onClick = action)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = null,
+                tint = Pg.red,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = issue.label,
+                color = Pg.red,
+                fontFamily = Inter,
+                fontWeight = FontWeight.Medium,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "Настроить →",
+                color = Pg.accent2,
+                fontFamily = Inter,
+                fontWeight = FontWeight.Medium,
+                fontSize = 10.sp,
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+    Spacer(Modifier.height(6.dp))
+}
+
+@Composable
 private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
-    val release = update.release
-    val visible = release != null || update.downloading || update.downloadedPath != null
-    if (!visible) return
+    val release = update.release ?: return
 
     Panel(
         Modifier
@@ -1034,14 +1170,8 @@ private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
                     SectionLabel("Обновление")
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        text = when {
-                            update.downloading ->
-                                "Скачивание APK · ${(update.progress * 100).toInt()}%"
-                            update.downloadedPath != null -> "APK готов к установке"
-                            release != null -> "Доступна версия ${release.version}"
-                            else -> ""
-                        },
-                        color = if (release != null) Pg.amber else Pg.text,
+                        text = "Доступна версия ${release.version}",
+                        color = Pg.amber,
                         fontFamily = Inter,
                         fontWeight = FontWeight.Medium,
                         fontSize = 12.sp,
@@ -1053,18 +1183,6 @@ private fun UpdateBanner(update: UpdateUiState, onOpen: () -> Unit) {
                     fontFamily = Inter,
                     fontWeight = FontWeight.Medium,
                     fontSize = 11.sp,
-                )
-            }
-            if (update.downloading) {
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    progress = { update.progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = Pg.accent2,
-                    trackColor = Pg.panel2,
                 )
             }
         }
@@ -1244,7 +1362,7 @@ private fun UpdateCard(state: UpdateUiState) {
                         fontSize = 14.sp,
                     )
                     Text(
-                        text = "Ядро обновляется вместе с приложением",
+                        text = "Проверка: ${state.variant}. Ядро обновляется вместе с приложением",
                         color = Pg.faint,
                         fontFamily = Inter,
                         fontSize = 10.sp,
@@ -1252,7 +1370,6 @@ private fun UpdateCard(state: UpdateUiState) {
                 }
                 Text(
                     text = when {
-                        state.downloading -> "${(state.progress * 100).toInt()}%"
                         release != null -> "v${release.version}"
                         state.checked && state.error == null -> "актуально"
                         else -> ""
@@ -1266,56 +1383,6 @@ private fun UpdateCard(state: UpdateUiState) {
             Spacer(Modifier.height(10.dp))
 
             when {
-                state.downloading -> {
-                    Text(
-                        text = "Скачивание APK с GitHub…",
-                        color = Pg.muted,
-                        fontFamily = Inter,
-                        fontSize = 11.sp,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    LinearProgressIndicator(
-                        progress = { state.progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = Pg.accent2,
-                        trackColor = Pg.panel2,
-                    )
-                }
-
-                state.downloadedPath != null -> {
-                    Text(
-                        text = "APK скачан. Установите обновление поверх текущей версии.",
-                        color = Pg.muted,
-                        fontFamily = Inter,
-                        fontSize = 11.sp,
-                    )
-                    state.error?.let { error ->
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = error,
-                            color = Pg.red,
-                            fontFamily = Inter,
-                            fontSize = 10.sp,
-                        )
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        GhostButton(
-                            text = "Проверить",
-                            onClick = { UpdateManager.check() },
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        PrimaryButton(
-                            text = "Установить",
-                            onClick = { UpdateManager.installDownloaded(context) },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-
                 release != null -> {
                     Text(
                         text = "Доступна версия ${release.version}.",
@@ -1353,27 +1420,11 @@ private fun UpdateCard(state: UpdateUiState) {
                         )
                     }
                     Spacer(Modifier.height(10.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        PrimaryButton(
-                            text = "Скачать и установить",
-                            onClick = { UpdateManager.downloadAndInstall(context) },
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        TextButton(
-                            onClick = { UpdateManager.openReleasePage(context) },
-                            colors = ButtonDefaults.textButtonColors(
-                                contentColor = Pg.accent2,
-                            ),
-                        ) {
-                            Text(
-                                text = "Что нового",
-                                fontFamily = Inter,
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 11.sp,
-                            )
-                        }
-                    }
+                    PrimaryButton(
+                        text = "Открыть релиз v${release.version} на GitHub",
+                        onClick = { UpdateManager.openReleasePage(context) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
 
                 state.checking -> {
@@ -1431,12 +1482,13 @@ private fun SettingsScreen(
     notificationSpeed: Boolean,
     autoStart: Boolean,
     autoStartAllowed: Boolean?,
-    batteryUnrestricted: Boolean,
+    notificationsAllowed: Boolean,
+    alwaysOnVpn: Boolean?,
     onSilentNotification: (Boolean) -> Unit,
     onNotificationSpeed: (Boolean) -> Unit,
     onAutoStart: (Boolean) -> Unit,
-    onRequestBackground: () -> Unit,
-    onOpenBatterySettings: () -> Unit,
+    onRequestNotifications: () -> Unit,
+    onOpenVpnSettings: () -> Unit,
     onPinWidget: () -> Boolean,
 ) {
     var pinHint by remember { mutableStateOf(false) }
@@ -1458,7 +1510,7 @@ private fun SettingsScreen(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Фоновая работа, уведомления, виджет и обновления",
+                    text = "Постоянная работа, уведомления, виджет и обновления",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 12.sp,
@@ -1470,76 +1522,66 @@ private fun SettingsScreen(
 
         Panel(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                SectionLabel("Уведомление VPN")
+                SectionLabel("Постоянная работа")
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "Постоянное уведомление показывает, что туннель запущен, " +
-                        "и даёт быстрый доступ к отключению.",
+                    text = "Android удерживает VPN сам, пока сервис показывает уведомление. " +
+                        "Чтобы туннель поднимался после перезагрузки, включите системный " +
+                        "«Всегда включённый VPN».",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                 )
-                Spacer(Modifier.height(12.dp))
-                SettingSwitch(
-                    title = "Тихий режим",
-                    subtitle = "Без звука и всплывающих окон — уведомление остаётся только в шторке.",
-                    checked = silentNotification,
-                    onChange = onSilentNotification,
+                Spacer(Modifier.height(8.dp))
+                when (alwaysOnVpn) {
+                    true -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_check),
+                                contentDescription = null,
+                                tint = Pg.green,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Системный «Всегда включённый VPN» включён",
+                                color = Pg.green,
+                                fontFamily = Inter,
+                                fontSize = 10.sp,
+                            )
+                        }
+                    }
+
+                    false -> Text(
+                        text = "«Всегда включённый VPN» выключен — после перезагрузки " +
+                            "туннель поднимет только автозапуск.",
+                        color = Pg.amber,
+                        fontFamily = Inter,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+
+                    null -> Text(
+                        text = "Android не даёт приложению проверить «Всегда включённый VPN». " +
+                            "Откройте настройки VPN и убедитесь, что переключатель включён.",
+                        color = Pg.faint,
+                        fontFamily = Inter,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                GhostButton(
+                    text = "Открыть настройки VPN",
+                    onClick = onOpenVpnSettings,
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(14.dp))
                 SettingSwitch(
-                    title = "Скорость в тексте",
-                    subtitle = "Показывать текущие скорости скачивания и отправки в уведомлении.",
-                    checked = notificationSpeed,
-                    onChange = onNotificationSpeed,
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "Уведомление пересоздаётся при подключении: после изменения " +
-                        "этих настроек переподключите VPN.",
-                    color = Pg.faint,
-                    fontFamily = Inter,
-                    fontSize = 10.sp,
-                    lineHeight = 14.sp,
-                )
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        Panel(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                SectionLabel("Фоновая работа")
-                Spacer(Modifier.height(12.dp))
-                SettingSwitch(
-                    title = "Не ограничивать в фоне",
-                    subtitle = if (batteryUnrestricted) {
-                        "Android не будет останавливать VPN для экономии заряда"
-                    } else {
-                        "Запросить у системы исключение из энергосбережения"
-                    },
-                    checked = batteryUnrestricted,
-                    onChange = { enabled ->
-                        if (enabled) onRequestBackground() else onOpenBatterySettings()
-                    },
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = "Исключение выдаётся только в системных настройках Android. " +
-                        "На Xiaomi/HyperOS «Без ограничений» в настройках приложения и " +
-                        "«Не оптимизировать» в списке Android — разные переключатели; " +
-                        "этот тумблер показывает второй. После изменения вернитесь в " +
-                        "приложение — статус обновится.",
-                    color = Pg.faint,
-                    fontFamily = Inter,
-                    fontSize = 10.sp,
-                    lineHeight = 14.sp,
-                )
-                Spacer(Modifier.height(12.dp))
-                SettingSwitch(
                     title = "Автозапуск",
-                    subtitle = "Подключать VPN после перезагрузки устройства",
+                    subtitle = "Резервный запуск после перезагрузки, если системный " +
+                        "«Всегда включённый VPN» выключен",
                     checked = autoStart,
                     onChange = onAutoStart,
                 )
@@ -1567,29 +1609,81 @@ private fun SettingsScreen(
                         )
                     }
                 }
-                if (autoStart && !batteryUnrestricted) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "Без исключения из энергосбережения система может остановить VPN после перезагрузки.",
-                        color = Pg.amber,
-                        fontFamily = Inter,
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp,
-                    )
-                }
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "Переключатель включает запуск ProtoGrid после перезагрузки. " +
-                        "На Xiaomi, Huawei, Oppo и Vivo это же нужно разрешить в приложении " +
-                        "безопасности производителя. Если ProtoGrid нет в списке, откройте " +
-                        "настройки приложения → Батарея → Без ограничений.",
+                    text = "На Xiaomi, Huawei, Oppo и Vivo автозапуск дополнительно " +
+                        "разрешают в приложении безопасности производителя. Если пункта " +
+                        "нет в списке, откройте настройки приложения и найдите «Автозапуск».",
                     color = Pg.faint,
                     fontFamily = Inter,
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                 )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Если на такой прошивке туннель всё же отключается, включите " +
+                        "«Без ограничений» в системных настройках ProtoGrid → Батарея.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        Panel(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                SectionLabel("Уведомление VPN")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Постоянное уведомление показывает, что туннель запущен, " +
+                        "и даёт быстрый доступ к отключению.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+                if (!notificationsAllowed) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Уведомления запрещены в настройках Android — VPN не сможет показать статус. ",
+                        color = Pg.amber,
+                        fontFamily = Inter,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    GhostButton(
+                        text = "Разрешить уведомления",
+                        onClick = onRequestNotifications,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
-                UnusedAppRestrictionsRow()
+                SettingSwitch(
+                    title = "Тихий режим",
+                    subtitle = "Без звука и всплывающих окон — уведомление остаётся только в шторке.",
+                    checked = silentNotification,
+                    onChange = onSilentNotification,
+                )
+                Spacer(Modifier.height(14.dp))
+                SettingSwitch(
+                    title = "Скорость в тексте",
+                    subtitle = "Показывать текущие скорости скачивания и отправки в уведомлении.",
+                    checked = notificationSpeed,
+                    onChange = onNotificationSpeed,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "Настройки применяются к текущему уведомлению сразу; " +
+                        "если VPN не подключён, они вступят в силу при подключении.",
+                    color = Pg.faint,
+                    fontFamily = Inter,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
             }
         }
 
@@ -1655,23 +1749,6 @@ private fun SettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
-        Panel(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                SectionLabel("Навигация")
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "Разделы переключаются нижним меню или свайпом по экрану: " +
-                        "влево — следующий раздел, вправо — предыдущий.",
-                    color = Pg.muted,
-                    fontFamily = Inter,
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                )
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
         UpdateCard(update)
 
         Spacer(Modifier.height(14.dp))
@@ -1693,111 +1770,6 @@ private fun SettingsScreen(
 }
 
 @Composable
-private fun UnusedAppRestrictionsRow() {
-    val context = LocalContext.current
-    var status by remember { mutableStateOf<Int?>(null) }
-    var refresh by remember { mutableStateOf(0) }
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { refresh++ }
-
-    LaunchedEffect(refresh) {
-        val future = PackageManagerCompat.getUnusedAppRestrictionsStatus(context)
-        future.addListener(
-            {
-                status = runCatching { future.get() }
-                    .getOrDefault(UnusedAppRestrictionsConstants.ERROR)
-            },
-            ContextCompat.getMainExecutor(context),
-        )
-    }
-
-    val enabled = status == UnusedAppRestrictionsConstants.API_30 ||
-        status == UnusedAppRestrictionsConstants.API_30_BACKPORT ||
-        status == UnusedAppRestrictionsConstants.API_31
-    val subtitle = when (status) {
-        null -> "Проверяем…"
-        UnusedAppRestrictionsConstants.DISABLED,
-        UnusedAppRestrictionsConstants.FEATURE_NOT_AVAILABLE ->
-            "Отключена — Android не будет замораживать ProtoGrid"
-        UnusedAppRestrictionsConstants.API_30,
-        UnusedAppRestrictionsConstants.API_30_BACKPORT,
-        UnusedAppRestrictionsConstants.API_31 ->
-            "Включена — Android может заморозить приложение после нескольких месяцев без запуска"
-        else -> "Не удалось проверить"
-    }
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = "Приостановка неиспользуемых",
-                color = Pg.text,
-                fontFamily = Inter,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = subtitle,
-                color = Pg.muted,
-                fontFamily = Inter,
-                fontSize = 11.sp,
-                lineHeight = 15.sp,
-            )
-        }
-        if (status != null) {
-            when {
-                enabled -> {
-                    Spacer(Modifier.width(8.dp))
-                    Icon(
-                        painter = painterResource(R.drawable.ic_close),
-                        contentDescription = "Ограничение включено",
-                        tint = Pg.red,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    GhostButton(
-                        text = "Отключить",
-                        onClick = {
-                            val intent = runCatching {
-                                IntentCompat.createManageUnusedAppRestrictionsIntent(
-                                    context,
-                                    context.packageName,
-                                )
-                            }.getOrNull()
-                            if (intent != null) {
-                                launcher.launch(intent)
-                            } else {
-                                BackgroundAccess.openAppDetails(context)
-                            }
-                        },
-                    )
-                }
-
-                status == UnusedAppRestrictionsConstants.DISABLED ||
-                    status == UnusedAppRestrictionsConstants.FEATURE_NOT_AVAILABLE -> {
-                    Spacer(Modifier.width(8.dp))
-                    Icon(
-                        painter = painterResource(R.drawable.ic_check),
-                        contentDescription = "Ограничение отключено",
-                        tint = Pg.green,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-
-                else -> {
-                    Spacer(Modifier.width(8.dp))
-                    GhostButton(
-                        text = "Открыть",
-                        onClick = { BackgroundAccess.openAppDetails(context) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun SettingSwitch(
     title: String,
     subtitle: String,
@@ -1805,7 +1777,11 @@ private fun SettingSwitch(
     onChange: (Boolean) -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+        Column(
+            Modifier
+                .weight(1f)
+                .clickable { onChange(!checked) },
+        ) {
             Text(
                 text = title,
                 color = Pg.text,

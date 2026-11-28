@@ -17,15 +17,21 @@ import app.protogrid.client.vpn.ProtoGridVpnService
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action !in BOOT_ACTIONS) return
-        if (!AndroidSettings(context).autoStart) return
+        Log.i(TAG, "onReceive: ${intent.action}")
+        if (!AndroidSettings(context).autoStart) {
+            Log.i(TAG, "autostart skipped: disabled")
+            return
+        }
         if (VpnService.prepare(context) != null) {
             Log.w(TAG, "autostart skipped: VPN permission is missing")
             return
         }
-        if (ProfileStore(context).profiles().isEmpty()) {
+        val profiles = ProfileStore(context).profiles()
+        if (profiles.isEmpty()) {
             Log.w(TAG, "autostart skipped: no servers")
             return
         }
+        Log.i(TAG, "starting tunnel with ${profiles.size} server(s)")
         runCatching { ProtoGridVpnService.start(context) }
             .onFailure { Log.w(TAG, "autostart failed", it) }
     }

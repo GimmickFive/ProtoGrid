@@ -6,24 +6,33 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.os.PowerManager
 import android.provider.Settings
 
 /**
  * System screens behind the "background work" settings.
  *
  * Android has no runtime permission for autostart: BOOT_COMPLETED is a normal
- * permission granted at install, while battery optimization exemptions are
- * requested through a system dialog. Some vendor ROMs additionally hide an
- * autostart whitelist in their own security apps, so a fallback list of known
- * activities is provided for those.
+ * permission granted at install. The foreground VPN service is already exempt
+ * from Doze, so no battery optimization dialog is needed. Some vendor ROMs
+ * additionally hide an autostart whitelist in their own security apps, so a
+ * fallback list of known activities is provided for those.
  */
 object BackgroundAccess {
-    /** True when Android is allowed to keep the tunnel alive in Doze. */
-    fun isBatteryUnrestricted(context: Context): Boolean {
-        val power = context.getSystemService(PowerManager::class.java) ?: return false
-        return power.isIgnoringBatteryOptimizations(context.packageName)
-    }
+    /**
+     * System VPN screen where the user turns on "Always-on VPN". Android then
+     * keeps the tunnel running and restores it after a reboot on its own.
+     */
+    fun vpnSettingsIntent(context: Context): Intent =
+        Intent(Settings.ACTION_VPN_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    /**
+     * Package selected as always-on VPN. Readable on Android 10 and below;
+     * from Android 12 the key is hidden and a normal app gets SecurityException,
+     * so callers must treat null as "unknown".
+     */
+    fun alwaysOnPackage(context: Context): String? = runCatching {
+        Settings.Secure.getString(context.contentResolver, "always_on_vpn_app")
+    }.getOrNull()
 
     /**
      * MIUI/HyperOS exposes autostart as vendor app-op 10008. Returns null on
@@ -64,16 +73,14 @@ object BackgroundAccess {
         }.getOrNull()
     }
 
-    /** Opens the direct "allow background work" prompt when the OS supports it. */
-    fun batteryRequestIntent(context: Context): Intent =
-        Intent(
-            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-            Uri.parse("package:${context.packageName}"),
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-    /** Battery optimization list, used to revoke the exemption manually. */
-    fun batterySettingsIntent(): Intent =
-        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+    /**
+     * System notification settings. A second POST_NOTIFICATIONS prompt is
+     * suppressed by Android after the user denied it once, so the only
+     * reliable way back is this screen.
+     */
+    fun notificationSettingsIntent(context: Context): Intent =
+        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     /** App info page: the fallback when the OEM hides the optimization list. */

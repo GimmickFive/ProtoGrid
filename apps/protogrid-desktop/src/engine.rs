@@ -426,6 +426,32 @@ pub struct TrafficStats {
     pub totals_known: bool,
 }
 
+/// One chart sample. Kept in the engine so the history keeps filling while the
+/// window is hidden in the tray (egui does not render `ui()` then).
+#[derive(Clone, Copy, Default)]
+pub struct TrafficPoint {
+    pub down: f32,
+    pub up: f32,
+    pub conns: f32,
+    pub proxy_down: f32,
+    pub proxy_up: f32,
+    pub direct_down: f32,
+    pub direct_up: f32,
+    pub ping: f32,
+}
+
+/// Session byte totals. When the core exposes exact counters these mirror them;
+/// otherwise the traffic monitor integrates sampled rates with its own clock.
+#[derive(Clone, Copy, Default)]
+pub struct TrafficTotals {
+    pub down: f64,
+    pub up: f64,
+    pub proxy_down: f64,
+    pub proxy_up: f64,
+    pub direct_down: f64,
+    pub direct_up: f64,
+}
+
 pub struct Inner {
     pub config: AppConfig,
     pub status: ConnStatus,
@@ -468,11 +494,24 @@ pub struct Inner {
     pub toasts: Vec<ToastEvent>,
     pub revision: u64,
     pub traffic: TrafficStats,
+    pub traffic_totals: TrafficTotals,
+    pub traffic_history: VecDeque<TrafficPoint>,
 }
 
 impl Inner {
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Starts a fresh chart session. The leading zero points keep sparklines
+    /// full-width from the first frame instead of growing from a single pixel.
+    fn reset_traffic(&mut self) {
+        self.traffic = TrafficStats::default();
+        self.traffic_totals = TrafficTotals::default();
+        self.traffic_history.clear();
+        for _ in 0..120 {
+            self.traffic_history.push_back(TrafficPoint::default());
+        }
     }
 
     fn core_info(&self, kind: CoreKind) -> Option<&CoreInfo> {
@@ -529,6 +568,8 @@ impl Inner {
             data_dir: self.data_dir.to_string_lossy().to_string(),
             config_path: self.config_path.to_string_lossy().to_string(),
             traffic: self.traffic,
+            traffic_totals: self.traffic_totals,
+            traffic_history: self.traffic_history.clone(),
         }
     }
 }
@@ -558,6 +599,8 @@ pub struct Snapshot {
     pub data_dir: String,
     pub config_path: String,
     pub traffic: TrafficStats,
+    pub traffic_totals: TrafficTotals,
+    pub traffic_history: VecDeque<TrafficPoint>,
 }
 
 impl Snapshot {
@@ -571,10 +614,18 @@ impl Snapshot {
         self.pings.get(id).copied().flatten()
     }
 
-    /// RTT when available, otherwise the through-node TTFB. Used only for the
-    /// overview sparkline, where mixing the two is acceptable.
-    pub fn rtt_or_delay(&self, id: &str) -> Option<u32> {
-        self.rtt(id).or_else(|| self.delay(id))
+    /// Last `range` chart samples, used by both the overview and charts pages.
+    pub fn traffic_points(&self, range: u64) -> VecDeque<TrafficPoint> {
+        let take = (range as usize).min(self.traffic_history.len());
+        self.traffic_history
+            .iter()
+            .skip(self.traffic_history.len().saturating_sub(take))
+            .copied()
+            .collect()
+    }
+
+    pub fn last_traffic_point(&self) -> TrafficPoint {
+        self.traffic_history.back().copied().unwrap_or_default()
     }
 
     pub fn core(&self, kind: CoreKind) -> Option<&CoreInfo> {
@@ -938,6 +989,8 @@ impl Engine {
             toasts: Vec::new(),
             revision: 0,
             traffic: TrafficStats::default(),
+            traffic_totals: TrafficTotals::default(),
+            traffic_history: VecDeque::new(),
         }));
         {
             let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -3200,7 +3253,7 @@ fn set_error(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, message: String) ->
         guard.connected_at = None;
         guard.active_core = None;
         guard.warning = None;
-        guard.traffic = TrafficStats::default();
+        guard.reset_traffic();
         guard.touch();
     }
     push_log(inner, ctx, "app", Some("error"), message.clone());
@@ -3495,7 +3548,7 @@ async fn stop_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context, silent: bool)
         guard.active_core = None;
         guard.error = None;
         guard.warning = None;
-        guard.traffic = TrafficStats::default();
+        guard.reset_traffic();
         guard.touch();
     }
     if !silent {
@@ -3678,6 +3731,10 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
         let mut proxy_share: Option<f64> = None;
         let (mut proxy_down_total, mut proxy_up_total) = (0_u64, 0_u64);
         let (mut direct_down_total, mut direct_up_total) = (0_u64, 0_u64);
+        // Totals and chart samples belong to the engine, not to the rendered
+        // frame: a window hidden in the tray must not freeze the history.
+        let mut totals = TrafficTotals::default();
+        let mut last_totals_at: Option<Instant> = None;
         loop {
             tokio::time::sleep(Duration::from_millis(1000)).await;
             let snapshot = {
@@ -3689,19 +3746,32 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
                     {
                         drop(guard);
                         let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.traffic = TrafficStats::default();
+                        guard.reset_traffic();
                         guard.touch();
                         ctx.request_repaint();
                     }
                     return;
                 }
+                let ping = guard
+                    .config
+                    .active_server()
+                    .and_then(|server| {
+                        guard
+                            .rtts
+                            .get(&server.id)
+                            .copied()
+                            .flatten()
+                            .or_else(|| guard.pings.get(&server.id).copied().flatten())
+                    })
+                    .unwrap_or(0) as f32;
                 (
                     guard.config.settings.core,
                     guard.config.settings.clash_api_port,
                     guard.config.settings.clash_api_secret.clone(),
+                    ping,
                 )
             };
-            let (core, port, secret) = snapshot;
+            let (core, port, secret, ping) = snapshot;
             let (sys_down, sys_up) = system.sample();
             let mut stats = TrafficStats::default();
             let mut have_stats = false;
@@ -3826,12 +3896,47 @@ fn spawn_traffic_monitor(inner: Arc<Mutex<Inner>>, ctx: egui::Context, run_id: u
                 clash_misses = 0;
             }
             last_stats = Some(stats);
+            let now = Instant::now();
+            let elapsed = last_totals_at
+                .map(|at| now.duration_since(at).as_secs_f64())
+                .unwrap_or(1.0)
+                .clamp(0.0, 5.0);
+            last_totals_at = Some(now);
+            if stats.totals_known {
+                totals.down = stats.total_down as f64;
+                totals.up = stats.total_up as f64;
+                totals.proxy_down = stats.proxy_down_total as f64;
+                totals.proxy_up = stats.proxy_up_total as f64;
+                totals.direct_down = stats.direct_down_total as f64;
+                totals.direct_up = stats.direct_up_total as f64;
+            } else {
+                totals.down += stats.down_bps as f64 * elapsed;
+                totals.up += stats.up_bps as f64 * elapsed;
+                totals.proxy_down += stats.proxy_down_bps as f64 * elapsed;
+                totals.proxy_up += stats.proxy_up_bps as f64 * elapsed;
+                totals.direct_down += stats.direct_down_bps as f64 * elapsed;
+                totals.direct_up += stats.direct_up_bps as f64 * elapsed;
+            }
             {
                 let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.run_id != run_id {
                     return;
                 }
                 guard.traffic = stats;
+                guard.traffic_totals = totals;
+                guard.traffic_history.push_back(TrafficPoint {
+                    down: stats.down_bps as f32,
+                    up: stats.up_bps as f32,
+                    conns: stats.conns as f32,
+                    proxy_down: stats.proxy_down_bps as f32,
+                    proxy_up: stats.proxy_up_bps as f32,
+                    direct_down: stats.direct_down_bps as f32,
+                    direct_up: stats.direct_up_bps as f32,
+                    ping,
+                });
+                while guard.traffic_history.len() > 900 {
+                    guard.traffic_history.pop_front();
+                }
                 guard.touch();
             }
             ctx.request_repaint();
@@ -4107,6 +4212,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         guard.active_core = Some(settings.core);
         guard.pid = None;
         guard.connected_at = None;
+        guard.reset_traffic();
         guard.touch();
         guard.run_id
     };
@@ -4266,6 +4372,7 @@ async fn connect_core(inner: &Arc<Mutex<Inner>>, ctx: &egui::Context) -> Result<
         guard.error = None;
         guard.warning = warning;
         guard.proxy_set = proxy_set;
+        guard.reset_traffic();
         guard.touch();
     }
     push_log(

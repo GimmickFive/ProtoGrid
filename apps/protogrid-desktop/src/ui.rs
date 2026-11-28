@@ -14,7 +14,7 @@ use protogrid_core::model::{
 
 use crate::engine::{
     now_ms, strip_conn_prefix, ConnStatus, Engine, LogChannel, LogEntry, Snapshot, ToastEvent,
-    ToastKind, TrafficStats,
+    ToastKind, TrafficPoint,
 };
 use crate::installer::CoreFeatures;
 use crate::theme::{self, Palette};
@@ -103,28 +103,6 @@ pub enum LogFilter {
     Error,
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct TrafficPoint {
-    pub down: f32,
-    pub up: f32,
-    pub conns: f32,
-    pub proxy_down: f32,
-    pub proxy_up: f32,
-    pub direct_down: f32,
-    pub direct_up: f32,
-    pub ping: f32,
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct Totals {
-    pub down: f64,
-    pub up: f64,
-    pub proxy_down: f64,
-    pub proxy_up: f64,
-    pub direct_down: f64,
-    pub direct_up: f64,
-}
-
 pub struct UiToast {
     pub text: String,
     pub kind: ToastKind,
@@ -191,10 +169,6 @@ pub struct View {
     pub ov_range: u64,
     pub chart_range: u64,
     pub chart_dir: Direction,
-    pub series: VecDeque<TrafficPoint>,
-    pub totals: Totals,
-    pub last_sample: Option<Instant>,
-    pub last_status: Option<ConnStatus>,
 }
 
 impl View {
@@ -207,10 +181,6 @@ impl View {
     }
 
     pub fn new(dark: bool) -> Self {
-        let mut series = VecDeque::new();
-        for _ in 0..120 {
-            series.push_back(TrafficPoint::default());
-        }
         Self {
             page: Page::Overview,
             dark,
@@ -240,10 +210,6 @@ impl View {
             ov_range: 60,
             chart_range: 60,
             chart_dir: Direction::Down,
-            series,
-            totals: Totals::default(),
-            last_sample: None,
-            last_status: None,
         }
     }
 
@@ -262,78 +228,6 @@ impl View {
         for toast in toasts {
             self.toast(toast.text, toast.kind);
         }
-    }
-
-    fn tick(&mut self, snapshot: &Snapshot) {
-        if snapshot.is_connected() && self.last_status != Some(ConnStatus::Connected) {
-            self.totals = Totals::default();
-            self.series.clear();
-            for _ in 0..120 {
-                self.series.push_back(TrafficPoint::default());
-            }
-        }
-        self.last_status = Some(snapshot.status);
-
-        let now = Instant::now();
-        let due = self
-            .last_sample
-            .map(|at| now.duration_since(at) >= Duration::from_millis(900))
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        let elapsed = self
-            .last_sample
-            .map(|at| now.duration_since(at).as_secs_f64())
-            .unwrap_or(1.0)
-            .clamp(0.0, 5.0);
-        self.last_sample = Some(now);
-        let stats: TrafficStats = snapshot.traffic;
-        let ping = snapshot
-            .active_server()
-            .and_then(|server| snapshot.rtt_or_delay(&server.id))
-            .unwrap_or(0) as f32;
-        let point = TrafficPoint {
-            down: stats.down_bps as f32,
-            up: stats.up_bps as f32,
-            conns: stats.conns as f32,
-            proxy_down: stats.proxy_down_bps as f32,
-            proxy_up: stats.proxy_up_bps as f32,
-            direct_down: stats.direct_down_bps as f32,
-            direct_up: stats.direct_up_bps as f32,
-            ping,
-        };
-        // Prefer the core's own byte counters: integrating sampled rates drifts
-        // as soon as one frame is late, and double-counts when the UI samples
-        // twice between two core updates.
-        if stats.totals_known {
-            self.totals.down = stats.total_down as f64;
-            self.totals.up = stats.total_up as f64;
-            self.totals.proxy_down = stats.proxy_down_total as f64;
-            self.totals.proxy_up = stats.proxy_up_total as f64;
-            self.totals.direct_down = stats.direct_down_total as f64;
-            self.totals.direct_up = stats.direct_up_total as f64;
-        } else {
-            self.totals.down += point.down as f64 * elapsed;
-            self.totals.up += point.up as f64 * elapsed;
-            self.totals.proxy_down += point.proxy_down as f64 * elapsed;
-            self.totals.proxy_up += point.proxy_up as f64 * elapsed;
-            self.totals.direct_down += point.direct_down as f64 * elapsed;
-            self.totals.direct_up += point.direct_up as f64 * elapsed;
-        }
-        self.series.push_back(point);
-        while self.series.len() > 900 {
-            self.series.pop_front();
-        }
-    }
-
-    fn last_points(&self, range: u64) -> VecDeque<TrafficPoint> {
-        let take = (range as usize).min(self.series.len());
-        self.series
-            .iter()
-            .skip(self.series.len().saturating_sub(take))
-            .copied()
-            .collect()
     }
 }
 
@@ -2228,8 +2122,8 @@ fn overview_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot,
         ui.add_space(12.0);
     }
 
-    let points = view.last_points(view.ov_range);
-    let down = view.series.back().copied().unwrap_or_default();
+    let points = snapshot.traffic_points(view.ov_range);
+    let down = snapshot.last_traffic_point();
     let down_values: Vec<f32> = points.iter().map(|pt| pt.down).collect();
     let up_values: Vec<f32> = points.iter().map(|pt| pt.up).collect();
     let conn_values: Vec<f32> = points.iter().map(|pt| pt.conns).collect();
@@ -2556,8 +2450,8 @@ fn speed_card(
                 points.iter().map(|point| point.down).sum::<f32>() / points.len() as f32
             };
             let texts = [
-                ("Получено", bytes_f(view.totals.down)),
-                ("Отправлено", bytes_f(view.totals.up)),
+                ("Получено", bytes_f(snapshot.traffic_totals.down)),
+                ("Отправлено", bytes_f(snapshot.traffic_totals.up)),
                 (
                     "Средняя скорость",
                     format!("↑ {}  ↓ {}", rate_plain(avg_up), rate_plain(avg_down)),
@@ -2578,22 +2472,21 @@ fn speed_card(
             // height so the card border lands on the same line as the
             // neighbouring card even when its content is shorter.
             ui.allocate_space(Vec2::new(0.0, ui.available_height().max(0.0)));
-            let _ = snapshot;
         });
 }
 
 fn route_card(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
-    let total = view.totals.proxy_down
-        + view.totals.proxy_up
-        + view.totals.direct_down
-        + view.totals.direct_up;
-    let proxy = view.totals.proxy_down + view.totals.proxy_up;
+    let total = snapshot.traffic_totals.proxy_down
+        + snapshot.traffic_totals.proxy_up
+        + snapshot.traffic_totals.direct_down
+        + snapshot.traffic_totals.direct_up;
+    let proxy = snapshot.traffic_totals.proxy_down + snapshot.traffic_totals.proxy_up;
     let share = if total > 0.0 {
         Some((proxy / total * 100.0).round() as u32)
     } else {
         None
     };
-    let current = view.series.back().copied().unwrap_or_default();
+    let current = snapshot.last_traffic_point();
     Frame::new()
         .fill(p.panel)
         .stroke(Stroke::new(1.0, p.line))
@@ -2647,7 +2540,7 @@ fn route_card(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
             let height = (ui.max_rect().bottom() - ROUTE_FOOTER_H - chart_top).max(0.0);
             let (rect, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-            let points = view.last_points(60);
+            let points = snapshot.traffic_points(60);
             let proxy_values: Vec<f32> = points
                 .iter()
                 .map(|point| point.proxy_down + point.proxy_up)
@@ -4937,17 +4830,17 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
         },
     );
 
-    let points = view.last_points(view.chart_range);
-    let proxy_total = view.totals.proxy_down + view.totals.proxy_up;
-    let direct_total = view.totals.direct_down + view.totals.direct_up;
+    let points = snapshot.traffic_points(view.chart_range);
+    let proxy_total = snapshot.traffic_totals.proxy_down + snapshot.traffic_totals.proxy_up;
+    let direct_total = snapshot.traffic_totals.direct_down + snapshot.traffic_totals.direct_up;
     let all_total = proxy_total + direct_total;
     let share = if all_total > 0.0 {
         (proxy_total / all_total * 100.0).round() as u32
     } else {
         0
     };
-    let peak = view
-        .series
+    let peak = snapshot
+        .traffic_history
         .iter()
         .map(|point| match view.chart_dir {
             Direction::Down => point.down,
@@ -5042,8 +4935,8 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0, p.line);
             ui.add_space(10.0);
-            let proxy = view.totals.proxy_down + view.totals.proxy_up;
-            let direct = view.totals.direct_down + view.totals.direct_up;
+            let proxy = snapshot.traffic_totals.proxy_down + snapshot.traffic_totals.proxy_up;
+            let direct = snapshot.traffic_totals.direct_down + snapshot.traffic_totals.direct_up;
             card_grid(ui, 4, 14.0, |ui, index| match index {
                 0 => chart_foot(
                     ui,
@@ -5051,8 +4944,8 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
                     "Прокси ↓ / ↑",
                     &format!(
                         "{} / {}",
-                        bytes_f(view.totals.proxy_down),
-                        bytes_f(view.totals.proxy_up)
+                        bytes_f(snapshot.traffic_totals.proxy_down),
+                        bytes_f(snapshot.traffic_totals.proxy_up)
                     ),
                 ),
                 1 => chart_foot(
@@ -5061,8 +4954,8 @@ fn charts_page(ui: &mut Ui, p: &Palette, view: &mut View, snapshot: &Snapshot) {
                     "Напрямую ↓ / ↑",
                     &format!(
                         "{} / {}",
-                        bytes_f(view.totals.direct_down),
-                        bytes_f(view.totals.direct_up)
+                        bytes_f(snapshot.traffic_totals.direct_down),
+                        bytes_f(snapshot.traffic_totals.direct_up)
                     ),
                 ),
                 2 => chart_foot(ui, p, "Всего за сеанс", &bytes_f(proxy + direct)),
@@ -10281,7 +10174,6 @@ pub fn toasts(ctx: &egui::Context, p: &Palette, view: &mut View) {
 
 pub fn show(ui: &mut Ui, view: &mut View, snapshot: &Snapshot, engine: &Engine) {
     let p = Palette::from_ctx(ui.ctx());
-    view.tick(snapshot);
     if view.page != Page::Logs {
         engine.release_logs();
     }
