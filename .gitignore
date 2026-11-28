@@ -14,3 +14,6 @@ dist
 
 # Static site build output.
 /_site
+
+# JetBrains/Android Studio project files.
+.idea/
